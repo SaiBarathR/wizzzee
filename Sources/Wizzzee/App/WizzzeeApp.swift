@@ -25,11 +25,18 @@ struct WizzzeeApp: App {
                 Button("Rescan") { model.startScan() }
                     .keyboardShortcut("r", modifiers: .command)
                 Divider()
+                // One item with a changing verb rather than a checkmark, which
+                // is how the system apps title a pane they can hide.
+                Button(model.showsTreemap ? "Hide Treemap" : "Show Treemap") {
+                    model.showsTreemap.toggle()
+                }
+                .keyboardShortcut("t", modifiers: .command)
                 Button("Zoom Treemap Out") { model.zoomOut() }
                     .keyboardShortcut("[", modifiers: .command)
-                    .disabled(!model.canZoomOut)
+                    .disabled(!model.canZoomOut || !model.showsTreemap)
                 Button("Reset Treemap Zoom") { model.resetZoom() }
                     .keyboardShortcut("0", modifiers: .command)
+                    .disabled(!model.showsTreemap)
             }
         }
     }

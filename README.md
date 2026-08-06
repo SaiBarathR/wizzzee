@@ -63,7 +63,8 @@ rebuilding.
   filter to search by name; include a `/` to match against the full path.
 - **Treemap** — every file as a rectangle, area proportional to size, colored by
   extension. Click to select, double-click a folder to zoom in, and use the
-  arrows in the strip above it to zoom back out.
+  arrows in the strip above it to zoom back out. **View ▸ Hide Treemap** gives
+  the whole tab to the table; showing it again keeps the zoom you left it at.
 - **Right-click anything** for Reveal in Finder, Open, Open in Terminal, Copy
   Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the
   way up the tree without rescanning.
@@ -73,6 +74,7 @@ rebuilding.
 | `Return` | Scan |
 | `⌘.` | Stop a running scan |
 | `⌘R` | Rescan |
+| `⌘T` | Show or hide the treemap |
 | `⌘[` | Zoom the treemap out |
 | `⌘0` | Reset the treemap zoom |
 

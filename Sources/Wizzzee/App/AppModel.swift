@@ -182,6 +182,11 @@ final class AppModel: ObservableObject {
     @Published var isFilteringFiles = false
 
     // Treemap
+    /// Whether Tree View shows the treemap under the table. Hiding it hands the
+    /// whole tab to the table, for the times a long folder list is what you're
+    /// reading; the zoom and the map's own root are left alone so showing it
+    /// again picks up exactly where it left off.
+    @Published var showsTreemap = true
     @Published var treemapRoot: DirNode?
     @Published var hoveredRef: NodeRef?
     /// Incremented whenever the tree is structurally changed, so the treemap

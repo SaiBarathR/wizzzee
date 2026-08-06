@@ -15,10 +15,15 @@ struct TreeViewTab: View {
                 ExtensionLegend(model: model)
                     .frame(minWidth: 240, idealWidth: 252, maxWidth: 300)
             }
-            .frame(minHeight: 160, idealHeight: 340)
+            // With the treemap hidden there is nothing below to divide the
+            // height with, so the table's floor is the only one that applies and
+            // it takes the whole tab.
+            .frame(minHeight: 160, idealHeight: model.showsTreemap ? 340 : 660)
 
-            TreemapPane(model: model)
-                .frame(minHeight: 120, idealHeight: 260)
+            if model.showsTreemap {
+                TreemapPane(model: model)
+                    .frame(minHeight: 120, idealHeight: 260)
+            }
         }
     }
 }

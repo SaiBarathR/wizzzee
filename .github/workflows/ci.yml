@@ -48,5 +48,7 @@ jobs:
         run: |
           ./dist/Wizzzee.app/Contents/MacOS/Wizzzee --uishot --tab tree --path Sources --out /tmp/tree.png
           ./dist/Wizzzee.app/Contents/MacOS/Wizzzee --uishot --tab files --path Sources --out /tmp/files.png
+          ./dist/Wizzzee.app/Contents/MacOS/Wizzzee --uishot --tab tree --no-treemap --path Sources --out /tmp/tree-no-treemap.png
           test -s /tmp/tree.png
           test -s /tmp/files.png
+          test -s /tmp/tree-no-treemap.png

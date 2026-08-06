@@ -20,6 +20,7 @@ enum UIShot {
         var selectLargest = false
         var zoomDepth = 0
         var hideAccessBanner = false
+        var showTreemap = true
 
         var index = 0
         while index < arguments.count {
@@ -64,6 +65,11 @@ enum UIShot {
                 // user who has granted it sees.
                 hideAccessBanner = true
                 index += 1
+            case "--no-treemap":
+                // The View menu's Hide Treemap, so the table-only layout can be
+                // rendered without a screen capture.
+                showTreemap = false
+                index += 1
             case "--zoom":
                 zoomDepth = Int(next ?? "1") ?? 1
                 index += 2
@@ -79,6 +85,7 @@ enum UIShot {
         model.tab = tab
         model.customFolder = scanPath
         model.dismissedAccessPrompt = hideAccessBanner
+        model.showsTreemap = showTreemap
 
         let hosting = NSHostingView(rootView: ContentView(model: model))
         let frame = NSRect(x: 0, y: 0, width: width, height: height)
