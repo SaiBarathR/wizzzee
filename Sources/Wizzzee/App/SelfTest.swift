@@ -46,6 +46,7 @@ enum SelfTest {
         testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
         testScanOutcomeReporting()
+        testNativeWindowTabbingIsOff()
 
         print("")
         if failures == 0 {
@@ -670,6 +671,21 @@ enum SelfTest {
             "stopping mid-walk unwinds promptly",
             Date().timeIntervalSince(midStart) < 2,
             "took \(String(format: "%.1f", Date().timeIntervalSince(midStart)))s"
+        )
+    }
+
+    /// Native window tabbing has to be off before the first window exists, so
+    /// this asserts that building the app is what turns it off — deleting the
+    /// call would otherwise bring Show Tab Bar, Show All Tabs and the tab bar's
+    /// "+" back with nothing to notice it.
+    @MainActor
+    private static func testNativeWindowTabbingIsOff() {
+        NSWindow.allowsAutomaticWindowTabbing = true
+        _ = WizzzeeApp()
+        check(
+            "creating the app turns native window tabbing off",
+            !NSWindow.allowsAutomaticWindowTabbing,
+            "still on, so the tab bar and its menu items would come back"
         )
     }
 

@@ -1,7 +1,12 @@
+import AppKit
 import SwiftUI
 
 struct WizzzeeApp: App {
     @StateObject private var model = AppModel()
+
+    init() {
+        WindowTabbing.disable()
+    }
 
     var body: some Scene {
         WindowGroup("Wizzzee") {
@@ -27,5 +32,19 @@ struct WizzzeeApp: App {
                     .keyboardShortcut("0", modifiers: .command)
             }
         }
+    }
+}
+
+/// AppKit gives every window group native tabbing, which puts Show Tab Bar and
+/// Show All Tabs in the View menu and a "+" in a tab bar as soon as either is
+/// used. Wizzzee's window is a single scan with its own in-app tabs, so a native
+/// tab stacks a second identically-titled window behind the first with nothing
+/// to tell them apart, and the app's own tab strip ends up under a system one
+/// that looks just like it. Turning tabbing off removes the menu items and the
+/// bar together.
+enum WindowTabbing {
+    @MainActor
+    static func disable() {
+        NSWindow.allowsAutomaticWindowTabbing = false
     }
 }
