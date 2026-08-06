@@ -142,7 +142,8 @@ Sources/Wizzzee/
               TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,
               StatusBar, ItemContextMenu
-  App/        Main, WizzzeeApp, AppModel, AppInfo, CLI, SelfTest, UIShot
+  App/        Main, WizzzeeApp, AppModel, AppInfo, Preferences, CLI, SelfTest,
+              UIShot
 scripts/      build-app.sh, validate-release.sh, make-icon.swift
 ```
 

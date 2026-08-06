@@ -47,6 +47,7 @@ enum SelfTest {
         testSystemProtectionRefusal()
         testScanOutcomeReporting()
         testNativeWindowTabbingIsOff()
+        testTreemapVisibilityPersists()
 
         print("")
         if failures == 0 {
@@ -686,6 +687,67 @@ enum SelfTest {
             "creating the app turns native window tabbing off",
             !NSWindow.allowsAutomaticWindowTabbing,
             "still on, so the tab bar and its menu items would come back"
+        )
+    }
+
+    /// The treemap's visibility outlives a launch, which means a fresh model has
+    /// to read it back rather than assume shown. Run against a throwaway suite:
+    /// writing to the real domain would change the tester's own setting, and a
+    /// leftover value would make the first check pass or fail by history.
+    @MainActor
+    private static func testTreemapVisibilityPersists() {
+        let suite = "wizzzee-selftest-prefs-\(getpid())"
+        guard let scratch = UserDefaults(suiteName: suite) else {
+            check("a throwaway preference suite is available", false, suite)
+            return
+        }
+        let real = Preferences.store
+        Preferences.store = scratch
+        defer {
+            Preferences.store = real
+            scratch.removePersistentDomain(forName: suite)
+        }
+
+        check(
+            "a first launch shows the treemap, with nothing stored",
+            Preferences.showsTreemap && AppModel().showsTreemap,
+            "started hidden"
+        )
+
+        let model = AppModel()
+        model.toggleTreemap()
+        check(
+            "hiding it is recorded",
+            !model.showsTreemap && !Preferences.showsTreemap,
+            "model \(model.showsTreemap), stored \(Preferences.showsTreemap)"
+        )
+        check(
+            "the next launch starts hidden",
+            !AppModel().showsTreemap,
+            "came back shown"
+        )
+
+        model.toggleTreemap()
+        check(
+            "showing it again is recorded too",
+            model.showsTreemap && Preferences.showsTreemap,
+            "model \(model.showsTreemap), stored \(Preferences.showsTreemap)"
+        )
+        check(
+            "the next launch starts shown",
+            AppModel().showsTreemap,
+            "came back hidden"
+        )
+
+        // The headless renderer sets a layout for one image; that must not
+        // rewrite what the user chose.
+        let previous = Preferences.showsTreemap
+        let render = AppModel()
+        render.showsTreemap = false
+        check(
+            "assigning the property leaves the stored preference alone",
+            Preferences.showsTreemap == previous,
+            "a plain assignment was persisted"
         )
     }
 

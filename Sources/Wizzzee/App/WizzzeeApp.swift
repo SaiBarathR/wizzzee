@@ -28,7 +28,7 @@ struct WizzzeeApp: App {
                 // One item with a changing verb rather than a checkmark, which
                 // is how the system apps title a pane they can hide.
                 Button(model.showsTreemap ? "Hide Treemap" : "Show Treemap") {
-                    model.showsTreemap.toggle()
+                    model.toggleTreemap()
                 }
                 .keyboardShortcut("t", modifiers: .command)
                 Button("Zoom Treemap Out") { model.zoomOut() }

@@ -64,7 +64,8 @@ rebuilding.
 - **Treemap** — every file as a rectangle, area proportional to size, colored by
   extension. Click to select, double-click a folder to zoom in, and use the
   arrows in the strip above it to zoom back out. **View ▸ Hide Treemap** gives
-  the whole tab to the table; showing it again keeps the zoom you left it at.
+  the whole tab to the table; showing it again keeps the zoom you left it at, and
+  whichever way you leave it is how it opens next launch.
 - **Right-click anything** for Reveal in Finder, Open, Open in Terminal, Copy
   Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the
   way up the tree without rescanning.
