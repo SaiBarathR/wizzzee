@@ -1,0 +1,162 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Intended release tag (for example v0.1.0)
+        required: true
+        type: string
+      ref:
+        description: Exact branch, tag, or commit SHA to package without publishing
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-package:
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+      archive_name: ${{ steps.package.outputs.archive_name }}
+      notes_path: ${{ steps.validate.outputs.notes_path }}
+
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          REQUESTED_REF: ${{ inputs.ref }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "tag=$PUSH_TAG" >> "$GITHUB_OUTPUT"
+            echo "checkout_ref=$PUSH_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+            echo "checkout_ref=$REQUESTED_REF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the exact tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.checkout_ref }}
+
+      - name: Validate tag, bundle version, and release notes
+        id: validate
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          version="$(./scripts/validate-release.sh "$TAG")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "notes_path=docs/releases/$TAG.md" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: swift build
+
+      - name: Run the scanner and delete-path checks
+        run: swift run Wizzzee --selftest
+
+      - name: Build universal app bundle
+        run: ./scripts/build-app.sh
+
+      - name: Verify app before archiving
+        run: |
+          executable="dist/Wizzzee.app/Contents/MacOS/Wizzzee"
+          test "$(lipo -archs "$executable" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" = "arm64 x86_64"
+          test -s "dist/Wizzzee.app/Contents/Resources/AppIcon.icns"
+          codesign --verify --deep --strict --verbose=2 "dist/Wizzzee.app"
+          test "$(codesign --display --verbose=2 "dist/Wizzzee.app" 2>&1 | sed -n 's/^Signature=//p')" = "adhoc"
+
+      - name: Archive and generate checksum
+        id: package
+        env:
+          VERSION: ${{ steps.validate.outputs.version }}
+        run: |
+          archive_name="Wizzzee-${VERSION}-macos-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent "dist/Wizzzee.app" "dist/$archive_name"
+          (cd dist && shasum -a 256 "$archive_name" > SHA256SUMS.txt)
+          echo "archive_name=$archive_name" >> "$GITHUB_OUTPUT"
+
+      - name: Verify final archive in a clean directory
+        env:
+          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
+          VERSION: ${{ steps.validate.outputs.version }}
+        run: |
+          (cd dist && shasum -a 256 -c SHA256SUMS.txt)
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          ditto -x -k "dist/$ARCHIVE_NAME" "$extracted"
+          app="$extracted/Wizzzee.app"
+          executable="$app/Contents/MacOS/Wizzzee"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
+          test "$(lipo -archs "$executable" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" = "arm64 x86_64"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Upload verified assets for dry runs and publishing
+        uses: actions/upload-artifact@v4
+        with:
+          name: wizzzee-${{ steps.validate.outputs.version }}-release-assets
+          path: |
+            dist/${{ steps.package.outputs.archive_name }}
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: validate-and-package
+    runs-on: macos-14
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release notes from exact tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download verified assets
+        uses: actions/download-artifact@v4
+        with:
+          name: wizzzee-${{ needs.validate-and-package.outputs.version }}-release-assets
+          path: dist
+
+      - name: Refuse to overwrite an existing release or asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE_NAME: ${{ needs.validate-and-package.outputs.archive_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$TAG" --jq '.assets[].name' 2>/dev/null | grep -Fxq "$ARCHIVE_NAME"; then
+            echo "Asset $ARCHIVE_NAME already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+
+      - name: Publish verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE_NAME: ${{ needs.validate-and-package.outputs.archive_name }}
+          NOTES_PATH: ${{ needs.validate-and-package.outputs.notes_path }}
+        run: |
+          gh release create "$TAG" \
+            "dist/$ARCHIVE_NAME" \
+            dist/SHA256SUMS.txt \
+            --verify-tag \
+            --title "Wizzzee ${TAG#v}" \
+            --notes-file "$NOTES_PATH"

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: macos-14
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build
+
+      - name: Run the scanner and delete-path checks
+        run: swift run Wizzzee --selftest
+
+      - name: Build the universal app bundle
+        run: ./scripts/build-app.sh
+
+      - name: Verify architectures, icon, and ad-hoc signature
+        run: |
+          executable="dist/Wizzzee.app/Contents/MacOS/Wizzzee"
+          test "$(lipo -archs "$executable" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" = "arm64 x86_64"
+          test -s "dist/Wizzzee.app/Contents/Resources/AppIcon.icns"
+          codesign --verify --deep --strict --verbose=2 "dist/Wizzzee.app"
+          test "$(codesign --display --verbose=2 "dist/Wizzzee.app" 2>&1 | sed -n 's/^Signature=//p')" = "adhoc"
+
+      - name: Render the UI headlessly
+        run: |
+          ./dist/Wizzzee.app/Contents/MacOS/Wizzzee --uishot --tab tree --path Sources --out /tmp/tree.png
+          ./dist/Wizzzee.app/Contents/MacOS/Wizzzee --uishot --tab files --path Sources --out /tmp/files.png
+          test -s /tmp/tree.png
+          test -s /tmp/files.png

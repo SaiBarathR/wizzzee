@@ -1,0 +1,569 @@
+import AppKit
+import Combine
+import SwiftUI
+
+/// Which size a view should report: the logical file size, or the space it
+/// actually occupies on disk. Sparse files and tiny files diverge sharply
+/// between the two, so every size-bearing view honours this.
+enum SizeMetric: String, CaseIterable, Hashable {
+    case logical = "Size"
+    case allocated = "Allocated"
+}
+
+/// One row of the Tree View table.
+struct TreeRow: Identifiable, Hashable {
+    let ref: NodeRef
+    let depth: Int
+    let isExpandable: Bool
+    let isExpanded: Bool
+    /// True for the last child of its parent, used to draw the tree elbow.
+    let isLastSibling: Bool
+
+    var id: NodeRef { ref }
+}
+
+/// Sorts Tree View rows. Sorting is applied *within* each parent rather than
+/// across the flattened list, so the hierarchy stays intact — the same way
+/// WizTree behaves.
+struct TreeSort: SortComparator, Hashable {
+    typealias Compared = TreeRow
+
+    enum Key: Hashable {
+        case name, percent, size, allocated, items, files, folders, modified
+    }
+
+    var key: Key
+    var order: SortOrder
+
+    init(_ key: Key, order: SortOrder = .reverse) {
+        self.key = key
+        self.order = order
+    }
+
+    func compare(_ lhs: TreeRow, _ rhs: TreeRow) -> ComparisonResult {
+        compare(lhs.ref, rhs.ref)
+    }
+
+    func compare(_ lhs: NodeRef, _ rhs: NodeRef) -> ComparisonResult {
+        let result: ComparisonResult
+        switch key {
+        case .name:
+            result = lhs.name.localizedStandardCompare(rhs.name)
+        case .size, .percent:
+            result = numeric(lhs.size, rhs.size)
+        case .allocated:
+            result = numeric(lhs.alloc, rhs.alloc)
+        case .items:
+            result = numeric(itemCount(lhs), itemCount(rhs))
+        case .files:
+            result = numeric(fileCount(lhs), fileCount(rhs))
+        case .folders:
+            result = numeric(folderCount(lhs), folderCount(rhs))
+        case .modified:
+            result = numeric(lhs.mtime, rhs.mtime)
+        }
+        return order == .forward ? result : result.reversed
+    }
+
+    private func numeric<T: Comparable>(_ a: T, _ b: T) -> ComparisonResult {
+        a == b ? .orderedSame : (a < b ? .orderedAscending : .orderedDescending)
+    }
+
+    private func itemCount(_ ref: NodeRef) -> Int {
+        ref.isDirectory ? ref.dir.totalItems : 0
+    }
+    private func fileCount(_ ref: NodeRef) -> Int {
+        ref.isDirectory ? ref.dir.totalFiles : 0
+    }
+    private func folderCount(_ ref: NodeRef) -> Int {
+        ref.isDirectory ? ref.dir.totalDirs : 0
+    }
+}
+
+extension ComparisonResult {
+    var reversed: ComparisonResult {
+        switch self {
+        case .orderedAscending: return .orderedDescending
+        case .orderedDescending: return .orderedAscending
+        case .orderedSame: return .orderedSame
+        }
+    }
+}
+
+/// One row of the File View table. Values are stored rather than computed so the
+/// table can sort with plain `KeyPathComparator`s.
+struct FileRow: Identifiable, Hashable {
+    let ref: NodeRef
+    let name: String
+    let directory: String
+    let size: UInt64
+    let alloc: UInt64
+    let mtime: Double
+    let fractionOfRoot: Double
+
+    var id: NodeRef { ref }
+}
+
+enum MainTab: String, CaseIterable {
+    case tree = "Tree View"
+    case files = "File View"
+    case about = "About"
+
+    /// The name `--tab` accepts. The display titles make poor flag values —
+    /// prefix-matching "File View" means the obvious `--tab files` misses and
+    /// silently falls back to the tree.
+    var cliName: String {
+        switch self {
+        case .tree: return "tree"
+        case .files: return "files"
+        case .about: return "about"
+        }
+    }
+
+    /// Matches a `--tab` argument against either the short name or the display
+    /// title, by prefix, so `files`, `file`, and `file view` all land here.
+    init?(cliName: String) {
+        let key = cliName.lowercased()
+        guard !key.isEmpty,
+            let match = MainTab.allCases.first(where: {
+                $0.cliName.hasPrefix(key) || $0.rawValue.lowercased().hasPrefix(key)
+            })
+        else { return nil }
+        self = match
+    }
+}
+
+/// Central app state: owns the current scan, the derived table rows, and the
+/// treemap's zoom and selection.
+@MainActor
+final class AppModel: ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case scanning
+        case complete
+        case cancelled
+        case failed(String)
+    }
+
+    // Scan state
+    @Published var phase: Phase = .idle
+    @Published var progress = ScanEngine.Progress()
+    @Published private(set) var result: ScanResult?
+
+    // Targets
+    @Published var volumes: [VolumeInfo] = []
+    @Published var selectedVolumePath: String = "/"
+    /// Set when the user picks an arbitrary folder instead of a whole volume.
+    @Published var customFolder: String?
+
+    // View state
+    @Published var tab: MainTab = .tree
+    @Published var selection: NodeRef?
+    /// Defaults to space actually occupied. Logical size is badly misleading on
+    /// macOS, where sparse container and VM images routinely report hundreds of
+    /// gigabytes they don't occupy — and reclaimable space is the whole point.
+    @Published var sizeMetric: SizeMetric = .allocated
+    @Published var hasFullDiskAccess = true
+    @Published var dismissedAccessPrompt = false
+
+    // Tree View
+    @Published private(set) var treeRows: [TreeRow] = []
+    @Published var treeSort: [TreeSort] = [TreeSort(.allocated)]
+    private var expanded: Set<ObjectIdentifier> = []
+
+    // File View
+    @Published private(set) var fileRows: [FileRow] = []
+    @Published var fileQuery: String = ""
+    @Published var fileSort: [KeyPathComparator<FileRow>] = [
+        KeyPathComparator(\FileRow.alloc, order: .reverse)
+    ]
+    @Published var isFilteringFiles = false
+
+    // Treemap
+    @Published var treemapRoot: DirNode?
+    @Published var hoveredRef: NodeRef?
+    /// Incremented whenever the tree is structurally changed, so the treemap
+    /// knows to lay out again even though its root object is unchanged.
+    @Published var treeRevision = 0
+
+    // Errors surfaced as a sheet
+    @Published var actionError: String?
+    @Published var actionErrorDetail: String?
+    /// Set while awaiting confirmation of an irreversible delete.
+    @Published var permanentDeleteTarget: NodeRef?
+
+    private var engine: ScanEngine?
+    private var fileFilterWork: DispatchWorkItem?
+    /// Every background read of the scan tree runs here, so a delete can make
+    /// itself exclusive by syncing against it. Serial by design: two concurrent
+    /// walks would buy nothing, and the barrier below depends on the ordering.
+    private let treeQueue = DispatchQueue(
+        label: "com.wizzzee.tree-read",
+        qos: .userInitiated
+    )
+
+    init() {
+        volumes = VolumeInfo.current()
+        selectedVolumePath = volumes.first?.path ?? "/"
+        hasFullDiskAccess = FullDiskAccess.isGranted()
+    }
+
+    // MARK: - Scan target
+
+    var scanTargetPath: String { customFolder ?? selectedVolumePath }
+
+    var scanTargetLabel: String {
+        if let folder = customFolder { return folder }
+        return volumes.first { $0.path == selectedVolumePath }?.menuTitle
+            ?? selectedVolumePath
+    }
+
+    /// Capacity of the volume the current target lives on.
+    var targetCapacity: (total: UInt64, free: UInt64) {
+        if let result { return (result.volumeTotal, result.volumeFree) }
+        return VolumeInfo.capacity(of: scanTargetPath)
+    }
+
+    func refreshVolumes() {
+        volumes = VolumeInfo.current()
+        if !volumes.contains(where: { $0.path == selectedVolumePath }) {
+            selectedVolumePath = volumes.first?.path ?? "/"
+        }
+    }
+
+    func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Scan"
+        panel.message = "Choose a folder to analyze"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        customFolder = url.path
+        startScan()
+    }
+
+    // MARK: - Scanning
+
+    func startScan() {
+        guard phase != .scanning else { return }
+        let path = scanTargetPath
+
+        result = nil
+        treeRows = []
+        fileRows = []
+        selection = nil
+        treemapRoot = nil
+        expanded = []
+        progress = ScanEngine.Progress()
+        phase = .scanning
+        hasFullDiskAccess = FullDiskAccess.isGranted()
+
+        let engine = ScanEngine()
+        self.engine = engine
+        engine.onProgress = { [weak self] snapshot in
+            DispatchQueue.main.async { self?.progress = snapshot }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let scanned = engine.scanSynchronously(rootPath: path)
+            // A nil result is either a cancel or an unreadable root; only the
+            // engine knows which.
+            let cancelled = engine.wasCancelled
+            DispatchQueue.main.async {
+                self?.scanFinished(scanned, path: path, cancelled: cancelled)
+            }
+        }
+    }
+
+    func cancelScan() {
+        engine?.cancel()
+    }
+
+    private func scanFinished(_ scanned: ScanResult?, path: String, cancelled: Bool) {
+        engine = nil
+        guard let scanned else {
+            phase = cancelled ? .cancelled : .failed("Couldn’t scan “\(path)”.")
+            return
+        }
+        result = scanned
+        phase = .complete
+        treemapRoot = scanned.root
+        selection = NodeRef(scanned.root)
+        // Open the root so the biggest folders are visible immediately.
+        expanded = [ObjectIdentifier(scanned.root)]
+        rebuildTreeRows()
+        refreshFileRows(immediately: true)
+    }
+
+    // MARK: - Tree View rows
+
+    func isExpanded(_ dir: DirNode) -> Bool {
+        expanded.contains(ObjectIdentifier(dir))
+    }
+
+    func toggleExpansion(_ dir: DirNode) {
+        let key = ObjectIdentifier(dir)
+        if expanded.contains(key) {
+            expanded.remove(key)
+        } else {
+            expanded.insert(key)
+        }
+        rebuildTreeRows()
+    }
+
+    func setExpanded(_ dir: DirNode, _ isOpen: Bool) {
+        let key = ObjectIdentifier(dir)
+        if isOpen { expanded.insert(key) } else { expanded.remove(key) }
+        rebuildTreeRows()
+    }
+
+    /// Expands every ancestor of `ref` and scrolls it into the row list, so
+    /// clicking a treemap tile reveals the matching row.
+    func revealInTree(_ ref: NodeRef) {
+        var chain: [DirNode] = []
+        var node: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
+        while let current = node {
+            chain.append(current)
+            node = current.parent
+        }
+        for dir in chain { expanded.insert(ObjectIdentifier(dir)) }
+        selection = ref
+        rebuildTreeRows()
+    }
+
+    func rebuildTreeRows() {
+        guard let root = result?.root else {
+            treeRows = []
+            return
+        }
+        let sort = treeSort.first ?? TreeSort(.size)
+        var rows: [TreeRow] = []
+        rows.reserveCapacity(min(4096, root.subdirs.count * 4 + 16))
+        appendRows(for: root, depth: 0, isLast: true, sort: sort, into: &rows)
+        treeRows = rows
+    }
+
+    private func appendRows(
+        for dir: DirNode,
+        depth: Int,
+        isLast: Bool,
+        sort: TreeSort,
+        into rows: inout [TreeRow]
+    ) {
+        let isOpen = isExpanded(dir)
+        let hasChildren = !dir.subdirs.isEmpty || !dir.files.isEmpty
+        rows.append(
+            TreeRow(
+                ref: NodeRef(dir),
+                depth: depth,
+                isExpandable: hasChildren,
+                isExpanded: isOpen,
+                isLastSibling: isLast
+            )
+        )
+        guard isOpen else { return }
+
+        // Folders and files are ranked together, matching WizTree.
+        var children: [NodeRef] = []
+        children.reserveCapacity(dir.subdirs.count + dir.files.count)
+        for sub in dir.subdirs { children.append(NodeRef(sub)) }
+        for index in dir.files.indices {
+            children.append(NodeRef(dir: dir, fileIndex: index))
+        }
+        children.sort { sort.compare($0, $1) == .orderedAscending }
+
+        for (offset, child) in children.enumerated() {
+            let last = offset == children.count - 1
+            if child.isDirectory {
+                appendRows(
+                    for: child.dir,
+                    depth: depth + 1,
+                    isLast: last,
+                    sort: sort,
+                    into: &rows
+                )
+            } else {
+                rows.append(
+                    TreeRow(
+                        ref: child,
+                        depth: depth + 1,
+                        isExpandable: false,
+                        isExpanded: false,
+                        isLastSibling: last
+                    )
+                )
+            }
+        }
+    }
+
+    // MARK: - File View rows
+
+    /// Recomputes the largest-files list. Filtering walks every file in the
+    /// tree, so it runs off the main thread and coalesces keystrokes.
+    func refreshFileRows(immediately: Bool = false) {
+        fileFilterWork?.cancel()
+        guard let result else {
+            fileRows = []
+            return
+        }
+        let query = fileQuery
+        let metric = sizeMetric
+        isFilteringFiles = true
+
+        let work = DispatchWorkItem { [weak self] in
+            let refs = result.largestFiles(
+                matching: query,
+                limit: 1000,
+                metric: metric
+            )
+            let rootTotal = max(
+                metric == .logical ? result.root.totalSize : result.root.totalAlloc,
+                1
+            )
+            let rows = refs.map { ref -> FileRow in
+                let file = ref.dir.files[Int(ref.fileIndex)]
+                let weight = metric == .logical ? file.size : file.alloc
+                return FileRow(
+                    ref: ref,
+                    name: file.name,
+                    directory: ref.dir.path,
+                    size: file.size,
+                    alloc: file.alloc,
+                    mtime: file.mtime,
+                    fractionOfRoot: Double(weight) / Double(rootTotal)
+                )
+            }
+            DispatchQueue.main.async {
+                guard let self, self.fileQuery == query else { return }
+                self.fileRows = rows.sorted(using: self.fileSort)
+                self.isFilteringFiles = false
+            }
+        }
+        fileFilterWork = work
+        treeQueue.asyncAfter(
+            deadline: .now() + (immediately ? 0 : 0.25),
+            execute: work
+        )
+    }
+
+    func resortFileRows() {
+        fileRows = fileRows.sorted(using: fileSort)
+    }
+
+    // MARK: - Treemap zoom
+
+    var canZoomOut: Bool { treemapRoot?.parent != nil }
+
+    func zoom(into dir: DirNode) {
+        guard !dir.subdirs.isEmpty || !dir.files.isEmpty else { return }
+        treemapRoot = dir
+    }
+
+    func zoomOut() {
+        if let parent = treemapRoot?.parent { treemapRoot = parent }
+    }
+
+    func resetZoom() {
+        treemapRoot = result?.root
+    }
+
+    // MARK: - Destructive actions
+
+    func moveToTrash(_ ref: NodeRef) {
+        perform(on: ref) { try FileActions.moveToTrash($0) }
+    }
+
+    func deletePermanently(_ ref: NodeRef) {
+        perform(on: ref) { try FileActions.deletePermanently($0) }
+    }
+
+    private func perform(on ref: NodeRef, _ body: (String) throws -> Void) {
+        let path = ref.path
+        do {
+            try body(path)
+            remove(ref)
+        } catch let error as FileActions.ActionError {
+            actionError = error.errorDescription
+            actionErrorDetail = error.recoverySuggestion
+        } catch {
+            actionError = "Couldn’t delete “\((path as NSString).lastPathComponent)”"
+            actionErrorDetail = error.localizedDescription
+        }
+    }
+
+    /// Drops a deleted item from the tree and walks the size change up to the
+    /// root, so the whole UI updates without rescanning.
+    private func remove(_ ref: NodeRef) {
+        // The File View walk reads this tree on `treeQueue`. Drop any walk that
+        // hasn't started, then wait out one that has, so nothing is traversing
+        // the nodes about to be unlinked.
+        fileFilterWork?.cancel()
+        fileFilterWork = nil
+        treeQueue.sync {}
+
+        if ref.isDirectory {
+            let node = ref.dir
+            guard let parent = node.parent else { return }
+            subtract(
+                size: node.totalSize,
+                alloc: node.totalAlloc,
+                files: node.totalFiles,
+                dirs: node.totalDirs + 1,
+                from: parent
+            )
+            parent.subdirs.removeAll { $0 === node }
+            if treemapRoot === node || isDescendant(treemapRoot, of: node) {
+                treemapRoot = parent
+            }
+        } else {
+            let dir = ref.dir
+            let index = Int(ref.fileIndex)
+            guard index < dir.files.count else { return }
+            let file = dir.files[index]
+            subtract(
+                size: file.isDuplicateLink ? 0 : file.size,
+                alloc: file.isDuplicateLink ? 0 : file.alloc,
+                files: 1,
+                dirs: 0,
+                from: dir
+            )
+            dir.files.remove(at: index)
+        }
+
+        // Removing a file shifts the indices of its siblings, invalidating any
+        // NodeRef held elsewhere, so all derived rows are rebuilt and the
+        // selection is dropped.
+        selection = nil
+        hoveredRef = nil
+        treeRevision += 1
+        rebuildTreeRows()
+        refreshFileRows(immediately: true)
+    }
+
+    private func isDescendant(_ node: DirNode?, of ancestor: DirNode) -> Bool {
+        var current = node?.parent
+        while let step = current {
+            if step === ancestor { return true }
+            current = step.parent
+        }
+        return false
+    }
+
+    private func subtract(
+        size: UInt64,
+        alloc: UInt64,
+        files: Int,
+        dirs: Int,
+        from node: DirNode
+    ) {
+        var current: DirNode? = node
+        while let step = current {
+            step.totalSize -= min(step.totalSize, size)
+            step.totalAlloc -= min(step.totalAlloc, alloc)
+            step.totalFiles = max(0, step.totalFiles - files)
+            step.totalDirs = max(0, step.totalDirs - dirs)
+            current = step.parent
+        }
+    }
+}
