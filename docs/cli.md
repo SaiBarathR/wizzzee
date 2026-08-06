@@ -75,6 +75,7 @@ Wizzzee --uishot --tab files --path /System/Library \
 | `--zoom N` | `0` | Zoom the treemap N levels into the largest folder |
 | `--select-largest` | off | Select the biggest item before rendering |
 | `--no-access-banner` | off | Hide the Full Disk Access warning |
+| `--no-treemap` | off | Hide the treemap, as the View menu's Hide Treemap does |
 
 `--tab` accepts either the short name or the display title, matched by prefix,
 so `files`, `file`, and `"file view"` all select the File View. An unrecognized
