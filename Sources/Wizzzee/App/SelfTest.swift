@@ -42,6 +42,8 @@ enum SelfTest {
         testTrashUpdatesTree(root)
         testPermanentDeleteFolder(root)
         testStaleReferencesSurviveADelete(batchRoot)
+        testFileRowsNeverOutliveADelete(batchRoot)
+        testFileRowsDontOutliveTheirScan(batchRoot)
         testAncestorDedupe(batchRoot)
         testBatchTrashOfSiblings(batchRoot)
         testBatchDeleteOfNestedSelection(batchRoot)
@@ -103,9 +105,10 @@ enum SelfTest {
     // stale/{a,b,c}.dat   2,000 each
     // nest/top.dat        7,000
     // nest/inner/deep.dat 6,000
+    // rows/{r1,r2,r3}.dat 1,100 / 1,200 / 1,300
     private static func buildBatchFixture(at root: URL) throws {
         let manager = FileManager.default
-        for folder in ["siblings", "stale", "nest/inner"] {
+        for folder in ["siblings", "stale", "nest/inner", "rows"] {
             try manager.createDirectory(
                 at: root.appendingPathComponent(folder),
                 withIntermediateDirectories: true
@@ -119,6 +122,9 @@ enum SelfTest {
         try write(root.appendingPathComponent("stale/c.dat"), bytes: 2_000)
         try write(root.appendingPathComponent("nest/top.dat"), bytes: 7_000)
         try write(root.appendingPathComponent("nest/inner/deep.dat"), bytes: 6_000)
+        try write(root.appendingPathComponent("rows/r1.dat"), bytes: 1_100)
+        try write(root.appendingPathComponent("rows/r2.dat"), bytes: 1_200)
+        try write(root.appendingPathComponent("rows/r3.dat"), bytes: 1_300)
     }
 
     private static func write(_ url: URL, bytes: Int) throws {
@@ -411,6 +417,151 @@ enum SelfTest {
                 && dir.files.count == 1,
             "the folder or its contents were removed"
         )
+    }
+
+    /// The File View's rows are built off the main thread from a walk of the whole
+    /// tree, and each row names its file by index. A delete renumbers every
+    /// sibling after the one removed, so any row published from before it now
+    /// names a *different* file — and acting on one would trash the wrong thing
+    /// with nothing to reveal it. Two ways in: the rows already on screen, and a
+    /// walk that was in flight when the delete landed.
+    @MainActor
+    private static func testFileRowsNeverOutliveADelete(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let result = loadSynchronously(into: model) else { return }
+        let dir = result.root.subdir(named: "rows")!
+        guard dir.files.count == 3 else {
+            check("the row fixture has three files", false, "\(dir.files.count)")
+            return
+        }
+        // The rows arrive from a background walk, so a completed scan doesn't
+        // mean they are on screen yet.
+        pumpUntilFileRowsSettle(model, expecting: result.root.totalFiles)
+        check(
+            "the scan's rows are on screen to begin with",
+            model.fileRows.count == result.root.totalFiles,
+            "got \(model.fileRows.count), expected \(result.root.totalFiles)"
+        )
+
+        // Start a walk and let it finish on the tree queue *without* pumping the
+        // run loop, so its result is queued for the main thread but not yet
+        // delivered — the in-flight case, which a delete has to discard.
+        model.refreshFileRows(immediately: true)
+        usleep(300_000)
+
+        model.moveToTrash([NodeRef(dir: dir, fileIndex: 0)])
+
+        // Every row the model publishes, at every step, has to still name the
+        // file it was built for.
+        var mismatch: String?
+        var sawStale = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            for row in model.fileRows {
+                if row.ref.isStale {
+                    sawStale = true
+                } else if row.ref.name != row.name {
+                    mismatch = "a row for “\(row.name)” now names “\(row.ref.name)”"
+                }
+            }
+            if mismatch != nil || sawStale { break }
+            if !model.isFilteringFiles
+                && model.fileRows.count == result.root.totalFiles
+            {
+                break
+            }
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+
+        check(
+            "no published row ever names a file other than its own",
+            mismatch == nil,
+            mismatch ?? ""
+        )
+        check(
+            "no published row points past the end of its folder",
+            !sawStale,
+            "a stale row reached the table"
+        )
+        check(
+            "the rows settle on the tree as it is after the delete",
+            !model.isFilteringFiles
+                && model.fileRows.count == result.root.totalFiles
+                && !model.fileRows.contains { $0.ref.isStale },
+            "got \(model.fileRows.count) rows, expected \(result.root.totalFiles), "
+                + "filtering=\(model.isFilteringFiles)"
+        )
+    }
+
+    /// A rescan throws the old tree away, and a walk that was already running
+    /// describes it. Letting one land afterwards puts rows from a discarded scan
+    /// into the table — holding folders whose parents that scan's root was the
+    /// only thing keeping alive.
+    @MainActor
+    private static func testFileRowsDontOutliveTheirScan(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let first = loadSynchronously(into: model) else { return }
+        pumpUntilFileRowsSettle(model, expecting: first.root.totalFiles)
+        guard !model.fileRows.isEmpty else {
+            check("the first scan produced rows", false, "none")
+            return
+        }
+
+        // In flight, delivered to nobody yet — then the scan it describes is
+        // replaced.
+        model.refreshFileRows(immediately: true)
+        usleep(300_000)
+        model.startScan()
+        check(
+            "starting a scan clears the rows and the spinner",
+            model.fileRows.isEmpty && !model.isFilteringFiles,
+            "\(model.fileRows.count) rows, filtering=\(model.isFilteringFiles)"
+        )
+        // Checked at every step, not just once it settles: the old walk's rows
+        // land while the replacement scan is still running, and the scan's own
+        // refresh would paper over them a moment later.
+        var foreign: String?
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            if let current = model.result {
+                for row in model.fileRows
+                where !isWithin(row.ref.dir, current.root) {
+                    foreign = "a row for “\(row.name)” is not in the scan on show"
+                    break
+                }
+            } else if let row = model.fileRows.first {
+                foreign = "a row for “\(row.name)” is on show with no scan at all"
+            }
+            if foreign != nil { break }
+            if model.phase == .complete, !model.isFilteringFiles,
+                model.fileRows.count == model.result?.root.totalFiles
+            {
+                break
+            }
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+
+        check(
+            "no row from the replaced scan is ever on show",
+            foreign == nil,
+            foreign ?? ""
+        )
+        check(
+            "the rescan's own rows arrive",
+            model.phase == .complete
+                && model.fileRows.count == model.result?.root.totalFiles,
+            "phase \(model.phase), \(model.fileRows.count) rows"
+        )
+    }
+
+    /// Whether `node` is `ancestor` or sits beneath it. Walks down rather than up,
+    /// so it never reads a `parent` that a discarded scan may have left dangling.
+    private static func isWithin(_ node: DirNode, _ ancestor: DirNode) -> Bool {
+        if node === ancestor { return true }
+        for sub in ancestor.subdirs where isWithin(node, sub) { return true }
+        return false
     }
 
     /// A folder and something inside it can both be selected. Only the folder
@@ -851,6 +1002,17 @@ enum SelfTest {
             shown.contains("showsTreemap: true (stored)"),
             shown
         )
+    }
+
+    /// Runs the main run loop until the File View's background walk has delivered
+    /// `expecting` rows.
+    @MainActor
+    private static func pumpUntilFileRowsSettle(_ model: AppModel, expecting: Int) {
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if !model.isFilteringFiles && model.fileRows.count == expecting { return }
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
     }
 
     /// Runs the main run loop until the model leaves `.scanning`.
