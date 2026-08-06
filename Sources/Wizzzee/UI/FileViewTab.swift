@@ -51,7 +51,13 @@ struct FileViewTab: View {
     private var summary: String {
         guard model.result != nil else { return "" }
         let shown = model.fileRows.count
-        let total = model.fileRows.reduce(UInt64(0)) { $0 + $1.size }
+        // Totalled with the metric the rows were ranked by, so the figure agrees
+        // with the column the list is sorted on rather than quietly reporting
+        // logical size while "On Disk" is what's on show.
+        let logical = model.sizeMetric == .logical
+        let total = model.fileRows.reduce(UInt64(0)) {
+            $0 + (logical ? $1.size : $1.alloc)
+        }
         let cap = shown >= 1000 ? "largest 1,000" : "\(ByteFormat.count(shown)) files"
         return "\(cap) • \(ByteFormat.decimal(total))"
     }

@@ -19,8 +19,13 @@ then:
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-Unzip, move `Wizzzee.app` to Applications, then Control-click it and choose
-**Open** — the app is ad-hoc signed rather than notarized, so macOS asks once.
+Unzip and move `Wizzzee.app` to Applications. The app is ad-hoc signed rather
+than notarized, so Gatekeeper blocks the first launch: open it once, dismiss the
+warning, then go to **System Settings → Privacy & Security** and click **Open
+Anyway** next to the message about Wizzzee. macOS asks only that once.
+
+On macOS 14 you can instead Control-click the app and choose **Open**; macOS 15
+removed that shortcut for apps that aren't notarized.
 
 The app is universal (`arm64` + `x86_64`) and needs macOS 14 or newer.
 
@@ -173,7 +178,7 @@ dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest
 ```
 
 `--selftest` builds a throwaway tree with known contents and checks the scanner
-and both delete paths against ground truth — 76 checks, no permissions needed.
+and both delete paths against ground truth — 88 checks, no permissions needed.
 CI runs it on every push, along with a universal-binary and signature check.
 
 ## Releasing

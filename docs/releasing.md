@@ -73,8 +73,10 @@ Wizzzee is ad-hoc signed, not Developer ID signed and not notarized: a real
 signature needs a paid Apple Developer account. Two consequences worth
 remembering:
 
-- **Users get a Gatekeeper prompt** on first launch and have to Control-click →
-  **Open**, or use **Open Anyway** in System Settings.
+- **Users get a Gatekeeper prompt** on first launch and have to approve the app
+  under **Open Anyway** in System Settings → Privacy & Security. Control-click →
+  **Open** still works on macOS 14, but macOS 15 removed that shortcut for apps
+  that aren't notarized, so release notes should point at Open Anyway.
 - **Full Disk Access is tied to the exact binary.** macOS keys the grant on the
   code signature, and an ad-hoc signature changes with the binary, so a new
   release has to be added to Full Disk Access again. Release notes should say

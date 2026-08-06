@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 /// Finder integration and destructive operations on scanned items.
 enum FileActions {
@@ -67,8 +68,10 @@ enum FileActions {
     ]
 
     static func isSystemProtected(_ path: String) -> Bool {
-        // /usr/local and /opt are writable exceptions carved out of SIP.
-        if path.hasPrefix("/usr/local") { return false }
+        // /usr/local and /opt are writable exceptions carved out of SIP. Matched
+        // as a whole component, so a sibling like /usr/locality isn't exempted
+        // along with it.
+        if path == "/usr/local" || path.hasPrefix("/usr/local/") { return false }
         return protectedPrefixes.contains { path.hasPrefix($0) }
     }
 
@@ -103,13 +106,9 @@ enum FileActions {
     /// Icon for a scanned item. Uses the generic type icon rather than asking
     /// the filesystem for the real one, which would mean a disk hit per row.
     static func icon(for ref: NodeRef) -> NSImage {
-        if ref.isDirectory {
-            return NSWorkspace.shared.icon(forFileType: NSFileTypeForHFSTypeCode(OSType(kGenericFolderIcon)))
-        }
+        if ref.isDirectory { return NSWorkspace.shared.icon(for: .folder) }
         let ext = (ref.name as NSString).pathExtension
-        if ext.isEmpty {
-            return NSWorkspace.shared.icon(forFileType: NSFileTypeForHFSTypeCode(OSType(kGenericDocumentIcon)))
-        }
+        if ext.isEmpty { return NSWorkspace.shared.icon(for: .data) }
         return cachedIcon(forExtension: ext.lowercased())
     }
 
@@ -120,7 +119,10 @@ enum FileActions {
         iconCacheLock.lock()
         defer { iconCacheLock.unlock() }
         if let cached = iconCache[ext] { return cached }
-        let icon = NSWorkspace.shared.icon(forFileType: ext)
+        // An unrecognized extension has no content type; the generic data icon
+        // is what the old file-type call fell back to for those.
+        let type = UTType(filenameExtension: ext) ?? .data
+        let icon = NSWorkspace.shared.icon(for: type)
         icon.size = NSSize(width: 16, height: 16)
         iconCache[ext] = icon
         return icon
