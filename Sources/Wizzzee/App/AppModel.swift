@@ -186,7 +186,11 @@ final class AppModel: ObservableObject {
     /// whole tab to the table, for the times a long folder list is what you're
     /// reading; the zoom and the map's own root are left alone so showing it
     /// again picks up exactly where it left off.
-    @Published var showsTreemap = true
+    ///
+    /// Assigning this does not persist — `toggleTreemap()` is what records the
+    /// user's choice, so the headless renderer can set a layout for one image
+    /// without rewriting a real preference.
+    @Published var showsTreemap = Preferences.showsTreemap
     @Published var treemapRoot: DirNode?
     @Published var hoveredRef: NodeRef?
     /// Incremented whenever the tree is structurally changed, so the treemap
@@ -461,6 +465,15 @@ final class AppModel: ObservableObject {
 
     func resortFileRows() {
         fileRows = fileRows.sorted(using: fileSort)
+    }
+
+    // MARK: - Treemap visibility
+
+    /// Shows or hides the treemap and remembers which, so the layout a user
+    /// settled on is the one they get next launch.
+    func toggleTreemap() {
+        showsTreemap.toggle()
+        Preferences.showsTreemap = showsTreemap
     }
 
     // MARK: - Treemap zoom
