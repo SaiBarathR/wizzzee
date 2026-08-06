@@ -48,7 +48,7 @@ jobs:
           fi
 
       - name: Check out the exact tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.release.outputs.checkout_ref }}
 
@@ -116,7 +116,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Upload verified assets for dry runs and publishing
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wizzzee-${{ steps.validate.outputs.version }}-release-assets
           path: |
@@ -133,12 +133,12 @@ jobs:
 
     steps:
       - name: Check out release notes from exact tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
 
       - name: Download verified assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wizzzee-${{ needs.validate-and-package.outputs.version }}-release-assets
           path: dist

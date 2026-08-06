@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The default toolchain on the runner image can lag behind the Swift
       # tools version the package declares.
