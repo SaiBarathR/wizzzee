@@ -34,19 +34,32 @@ private struct ObjectKey: Hashable {
 /// would serialize all the workers.
 private final class ShardedKeySet {
     private static let shardCount = 32
-    private var shards: [Set<ObjectKey>]
-    private let locks: [UnfairLock]
+
+    /// One lock and one set per shard, in an object of their own.
+    ///
+    /// Holding the sets in a single `[Set<ObjectKey>]` and mutating
+    /// `shards[i]` under a per-shard lock touches disjoint memory, but every
+    /// worker takes a `modify` access on the one array property to get there,
+    /// which is exactly the overlapping access Swift's exclusivity rules
+    /// forbid. Per-shard objects make each mutation local to its own storage,
+    /// at the same cost.
+    private final class Shard {
+        let lock = UnfairLock()
+        var keys = Set<ObjectKey>()
+    }
+
+    private let shards: [Shard]
 
     init() {
-        shards = Array(repeating: Set<ObjectKey>(), count: Self.shardCount)
-        locks = (0..<Self.shardCount).map { _ in UnfairLock() }
+        shards = (0..<Self.shardCount).map { _ in Shard() }
     }
 
     /// Inserts `key`, returning true if it was not already present.
     func insert(_ key: ObjectKey) -> Bool {
         // Taken unsigned rather than via abs(), which traps on Int.min.
-        let shard = Int(UInt(bitPattern: key.ino.hashValue) % UInt(Self.shardCount))
-        return locks[shard].withLock { shards[shard].insert(key).inserted }
+        let index = Int(UInt(bitPattern: key.ino.hashValue) % UInt(Self.shardCount))
+        let shard = shards[index]
+        return shard.lock.withLock { shard.keys.insert(key).inserted }
     }
 }
 
