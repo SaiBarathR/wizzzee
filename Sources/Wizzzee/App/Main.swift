@@ -21,6 +21,8 @@ struct Main {
             CLI.renderTreemap(arguments: Array(args.dropFirst()))
         case "--uishot":
             UIShot.run(arguments: Array(args.dropFirst()))
+        case "--prefs":
+            CLI.prefs()
         case "--selftest":
             SelfTest.run()
         case "--help", "-h":

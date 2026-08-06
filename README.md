@@ -123,6 +123,7 @@ Wizzzee --probe /some/dir             # raw getattrlistbulk attributes
 Wizzzee --treemap / out.png           # render a treemap straight to a PNG
 Wizzzee --selftest                    # check the scanner and the delete paths
 Wizzzee --uishot --out ui.png         # screenshot the UI from inside the process
+Wizzzee --prefs                       # print the preferences the app reads
 ```
 
 `--scan` totals match `du -sk` exactly on the trees they were compared against.
@@ -172,7 +173,7 @@ dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest
 ```
 
 `--selftest` builds a throwaway tree with known contents and checks the scanner
-and both delete paths against ground truth — 37 checks, no permissions needed.
+and both delete paths against ground truth — 76 checks, no permissions needed.
 CI runs it on every push, along with a universal-binary and signature check.
 
 ## Releasing

@@ -18,4 +18,29 @@ enum Preferences {
         get { store.object(forKey: showsTreemapKey) as? Bool ?? true }
         set { store.set(newValue, forKey: showsTreemapKey) }
     }
+
+    /// Whether a value was ever written, as opposed to falling back to the
+    /// default above. Worth reporting: "shown" on a machine that has never been
+    /// touched means something different from "shown because that was chosen".
+    static var showsTreemapIsStored: Bool {
+        store.object(forKey: showsTreemapKey) != nil
+    }
+
+    /// What `--prefs` prints. Returned rather than printed so it can be checked
+    /// without capturing stdout, and reads nothing it doesn't report — a
+    /// diagnostic that created the key it was asked about would be worse than
+    /// none at all.
+    ///
+    /// The domain leads because it is the usual surprise: preferences belong to
+    /// the bundle identifier, so a binary run straight out of `.build` reads a
+    /// different domain than `Wizzzee.app` and will disagree with it.
+    static func summary() -> String {
+        let domain =
+            Bundle.main.bundleIdentifier
+            ?? "none — not an app bundle, so these are not Wizzzee.app's preferences"
+        return """
+            domain: \(domain)
+            showsTreemap: \(showsTreemap) (\(showsTreemapIsStored ? "stored" : "default"))
+            """
+    }
 }

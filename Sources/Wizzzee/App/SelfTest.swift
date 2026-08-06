@@ -48,6 +48,7 @@ enum SelfTest {
         testScanOutcomeReporting()
         testNativeWindowTabbingIsOff()
         testTreemapVisibilityPersists()
+        testPreferenceSummary()
 
         print("")
         if failures == 0 {
@@ -748,6 +749,60 @@ enum SelfTest {
             "assigning the property leaves the stored preference alone",
             Preferences.showsTreemap == previous,
             "a plain assignment was persisted"
+        )
+    }
+
+    /// What `--prefs` reports. The point of the flag is checking a UI-only
+    /// setting from a script, so the exact words are the contract and are
+    /// asserted here rather than eyeballed.
+    @MainActor
+    private static func testPreferenceSummary() {
+        let suite = "wizzzee-selftest-summary-\(getpid())"
+        guard let scratch = UserDefaults(suiteName: suite) else {
+            check("a throwaway preference suite is available", false, suite)
+            return
+        }
+        let real = Preferences.store
+        Preferences.store = scratch
+        defer {
+            Preferences.store = real
+            scratch.removePersistentDomain(forName: suite)
+        }
+
+        let untouched = Preferences.summary()
+        check(
+            "an untouched setting reports the default it fell back to",
+            untouched.contains("showsTreemap: true (default)"),
+            untouched
+        )
+        // A diagnostic that wrote the key it was asked about would turn every
+        // later "default" into "stored" and quietly answer its own question.
+        check(
+            "printing the summary stores nothing",
+            !Preferences.showsTreemapIsStored,
+            "the key exists after only reading it"
+        )
+        check(
+            "the summary names the domain the values came from",
+            untouched.contains("domain: "),
+            untouched
+        )
+
+        let model = AppModel()
+        model.toggleTreemap()
+        let hidden = Preferences.summary()
+        check(
+            "a chosen setting is reported as stored, not defaulted",
+            hidden.contains("showsTreemap: false (stored)"),
+            hidden
+        )
+
+        model.toggleTreemap()
+        let shown = Preferences.summary()
+        check(
+            "choosing the default value still counts as stored",
+            shown.contains("showsTreemap: true (stored)"),
+            shown
         )
     }
 
