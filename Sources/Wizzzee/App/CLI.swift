@@ -179,7 +179,12 @@ enum CLI {
         let elapsed = Date().timeIntervalSince(start)
         let root = result.root
         print("")
-        print("Scan of \(path) complete in \(String(format: "%.2f", elapsed))s")
+        // The resolved root, not the argument: a symlinked or relative path names
+        // somewhere else, and the totals below are the resolved tree's.
+        print(
+            "Scan of \(result.rootPath) complete in "
+                + "\(String(format: "%.2f", elapsed))s"
+        )
         print(
             "  total size:      \(ByteFormat.decimal(root.totalSize)) "
                 + "(\(root.totalSize) bytes)"
