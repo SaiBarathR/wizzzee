@@ -10,11 +10,22 @@ permissions:
 
 jobs:
   build-and-verify:
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      # The default toolchain on the runner image can lag behind the Swift
+      # tools version the package declares.
+      - name: Select the newest installed Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode_*.app 2>/dev/null \
+            | sed 's|.*/Xcode_||; s|\.app$||' | sort -V | tail -1)"
+          if [ -n "$newest" ]; then
+            sudo xcode-select -s "/Applications/Xcode_${newest}.app"
+          fi
+          swift --version
 
       - name: Build
         run: swift build

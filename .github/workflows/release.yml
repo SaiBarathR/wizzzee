@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   validate-and-package:
-    runs-on: macos-14
+    runs-on: macos-15
     outputs:
       version: ${{ steps.validate.outputs.version }}
       archive_name: ${{ steps.package.outputs.archive_name }}
@@ -51,6 +51,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.release.outputs.checkout_ref }}
+
+      # The default toolchain on the runner image can lag behind the Swift
+      # tools version the package declares.
+      - name: Select the newest installed Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode_*.app 2>/dev/null \
+            | sed 's|.*/Xcode_||; s|\.app$||' | sort -V | tail -1)"
+          if [ -n "$newest" ]; then
+            sudo xcode-select -s "/Applications/Xcode_${newest}.app"
+          fi
+          swift --version
 
       - name: Validate tag, bundle version, and release notes
         id: validate
@@ -116,7 +127,7 @@ jobs:
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: validate-and-package
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: write
 
