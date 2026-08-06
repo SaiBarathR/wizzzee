@@ -33,6 +33,15 @@ final class DirNode {
     let name: String
     /// Unowned because the root retains the whole tree top-down; making this
     /// strong would create a reference cycle and leak the tree on rescan.
+    ///
+    /// Unchecked, so anything holding a node has to keep its ancestors alive
+    /// too — a delete unlinks a subtree, and the folders above a node that
+    /// outlived it are freed while it is still being read. Two places hold
+    /// nodes across a delete and both pin the chain deliberately: `NodeRef`s
+    /// captured in a delete batch always include the topmost target, whose
+    /// `subdirs` keep the rest of the subtree alive, and `TreemapModel` stores
+    /// its root's ancestors for exactly this reason. Derived rows that can't
+    /// promise it — the File View's — are dropped in `AppModel.detach`.
     unowned(unsafe) var parent: DirNode?
 
     var subdirs: [DirNode] = []
