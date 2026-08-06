@@ -35,6 +35,7 @@ enum SelfTest {
         print("fixture: \(root.path)\n")
 
         testScanTotals(root)
+        testSymlinkedRootIsScanned(root)
         testHardLinks(root)
         testExtensionStats(root)
         testFilterAndRanking(root)
@@ -155,6 +156,52 @@ enum SelfTest {
             "folder count excludes the root itself",
             result.root.totalDirs == 3,
             "got \(result.root.totalDirs), expected 3 (a, a/b, c)"
+        )
+    }
+
+    /// A scan root whose last component is a symlink.
+    ///
+    /// The workers open directories with `O_NOFOLLOW` so a symlinked child can't
+    /// smuggle another subtree into the totals, but that also refuses the root
+    /// when the user names one — and `standardizingPath` puts perfectly ordinary
+    /// roots in that position, rewriting `/private/tmp` to `/tmp`. The scan then
+    /// reported "complete" with zero bytes and one unreadable directory, which is
+    /// the worst way for a measuring tool to be wrong.
+    private static func testSymlinkedRootIsScanned(_ root: URL) {
+        let link = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-link-\(getpid())")
+        try? FileManager.default.removeItem(at: link)
+        do {
+            try FileManager.default.createSymbolicLink(
+                at: link,
+                withDestinationURL: root
+            )
+        } catch {
+            check("a symlink to the fixture can be made", false, "\(error)")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: link) }
+
+        let direct = scan(root)
+        let through = scan(link)
+        check(
+            "a symlinked root scans the directory it points at",
+            through.root.totalSize == direct.root.totalSize
+                && through.root.totalFiles == direct.root.totalFiles,
+            "got \(through.root.totalSize) bytes / \(through.root.totalFiles) files, "
+                + "expected \(direct.root.totalSize) / \(direct.root.totalFiles)"
+        )
+        check(
+            "it reports no unreadable directories",
+            through.deniedCount == 0,
+            "got \(through.deniedCount)"
+        )
+        // Reported as the real directory, so the paths the delete actions resolve
+        // don't run back through the link.
+        check(
+            "the root path is reported resolved",
+            through.rootPath == direct.rootPath,
+            "got \(through.rootPath), expected \(direct.rootPath)"
         )
     }
 

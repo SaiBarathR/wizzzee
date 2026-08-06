@@ -470,7 +470,26 @@ final class ScanEngine {
 
     // MARK: - Paths
 
+    /// Resolves a scan root to a real, symlink-free absolute path.
+    ///
+    /// `realpath(3)` rather than `standardizingPath` because the workers open
+    /// directories with `O_NOFOLLOW` — the right call for children, where a
+    /// symlink would otherwise pull another subtree into the totals, but it
+    /// refuses the root whenever its last component is a link. `/tmp`, `/etc` and
+    /// `/var` are all links, and `standardizingPath` *creates* the problem for
+    /// ordinary roots by rewriting `/private/tmp` back to `/tmp`. The scan then
+    /// reported "complete" at zero bytes with the root marked unreadable.
+    ///
+    /// Resolving here also means the paths handed to the delete actions name the
+    /// real files rather than running back through a link.
     static func normalize(_ path: String) -> String {
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        if !path.isEmpty, realpath(path, &buffer) != nil {
+            let resolved = String(cString: buffer)
+            if !resolved.isEmpty { return resolved }
+        }
+        // Nothing there to resolve — a nonexistent root has to survive to the
+        // `stat` below, which is what reports it as unscannable.
         var result = (path as NSString).standardizingPath
         if result.isEmpty { result = "/" }
         while result.count > 1 && result.hasSuffix("/") { result.removeLast() }
