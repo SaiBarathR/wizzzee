@@ -52,36 +52,52 @@ struct ContentView: View {
         .confirmationDialog(
             deleteTitle,
             isPresented: Binding(
-                get: { model.permanentDeleteTarget != nil },
-                set: { if !$0 { model.permanentDeleteTarget = nil } }
+                get: { !model.permanentDeleteTargets.isEmpty },
+                set: { if !$0 { model.permanentDeleteTargets = [] } }
             ),
             titleVisibility: .visible
         ) {
             Button("Delete Permanently", role: .destructive) {
-                if let target = model.permanentDeleteTarget {
-                    model.permanentDeleteTarget = nil
-                    model.deletePermanently(target)
-                }
+                let targets = model.permanentDeleteTargets
+                model.permanentDeleteTargets = []
+                model.deletePermanently(targets)
             }
-            Button("Cancel", role: .cancel) { model.permanentDeleteTarget = nil }
+            Button("Cancel", role: .cancel) { model.permanentDeleteTargets = [] }
         } message: {
-            if let target = model.permanentDeleteTarget {
-                Text(
-                    "\(target.path)\n\n"
-                        + "\(ByteFormat.decimal(target.size)) will be reclaimed. "
-                        + "This bypasses the Trash and cannot be undone."
-                )
-            }
+            if !model.permanentDeleteTargets.isEmpty { Text(deleteMessage) }
         }
     }
 
     private var deleteTitle: String {
-        guard let target = model.permanentDeleteTarget else { return "" }
+        let targets = model.permanentDeleteTargets
+        if targets.count > 1 {
+            return "Permanently delete \(ByteFormat.count(targets.count)) items?"
+        }
+        guard let target = targets.first else { return "" }
         if target.isDirectory {
             return "Permanently delete “\(target.name)” and "
                 + "\(ByteFormat.count(target.dir.totalItems)) items inside it?"
         }
         return "Permanently delete “\(target.name)”?"
+    }
+
+    private var deleteMessage: String {
+        let targets = model.permanentDeleteTargets
+        let warning =
+            "\(ByteFormat.decimal(model.reclaimableSize(targets))) will be "
+            + "reclaimed. This bypasses the Trash and cannot be undone."
+        if targets.count == 1, let single = targets.first {
+            return "\(single.path)\n\n\(warning)"
+        }
+
+        // Names, not full paths: a dozen absolute paths make an alert unreadable,
+        // and the list is only here to confirm the right things are about to go.
+        let names = targets.map(\.name)
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        let shown = names.prefix(6).joined(separator: "\n")
+        let rest = names.count - 6
+        let more = rest > 0 ? "\n…and \(ByteFormat.count(rest)) more" : ""
+        return "\(shown)\(more)\n\n\(warning)"
     }
 
     private var tabBar: some View {

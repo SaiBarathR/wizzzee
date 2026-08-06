@@ -7,18 +7,22 @@ struct TreemapPane: View {
     var body: some View {
         VStack(spacing: 0) {
             breadcrumb
+            // The map highlights a single tile, so it tracks the selection only
+            // when there is exactly one — a multi-row selection made in a table
+            // has no meaningful outline here. Clicking a tile still replaces the
+            // whole selection.
             TreemapCanvas(
                 root: model.treemapRoot,
                 metric: model.sizeMetric,
-                selection: model.selection,
+                selection: model.primarySelection,
                 revision: model.treeRevision,
-                onSelect: { ref in model.selection = ref },
+                onSelect: { ref in model.selection = [ref] },
                 onZoom: { dir in model.zoom(into: dir) },
                 onHover: { ref in model.hoveredRef = ref }
             )
             .contextMenu {
-                if let ref = model.selection {
-                    ItemContextMenu(model: model, refs: [ref])
+                if !model.selection.isEmpty {
+                    ItemContextMenu(model: model, refs: model.selection)
                 }
             }
         }

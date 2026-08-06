@@ -111,35 +111,52 @@ struct NodeRef: Hashable, Identifiable {
     }
 
     var isDirectory: Bool { fileIndex < 0 }
+
+    /// True when this points at a file index its folder no longer has.
+    ///
+    /// Deleting a file renumbers every sibling after it, which invalidates any
+    /// reference captured beforehand. Derived rows are rebuilt after a delete,
+    /// but SwiftUI keeps a context menu's content alive and re-evaluates it once
+    /// the sheet closes — by then the tree has already changed under it. Every
+    /// accessor below therefore degrades to an empty value instead of trapping,
+    /// and anything that acts on a reference checks this first.
+    var isStale: Bool { fileIndex >= 0 && Int(fileIndex) >= dir.files.count }
+
     var file: FileEntry? {
-        fileIndex < 0 ? nil : dir.files[Int(fileIndex)]
+        guard fileIndex >= 0, Int(fileIndex) < dir.files.count else { return nil }
+        return dir.files[Int(fileIndex)]
     }
 
     var name: String {
-        fileIndex < 0 ? dir.name : dir.files[Int(fileIndex)].name
+        fileIndex < 0 ? dir.name : (file?.name ?? "")
     }
 
     var size: UInt64 {
-        fileIndex < 0 ? dir.totalSize : dir.files[Int(fileIndex)].size
+        fileIndex < 0 ? dir.totalSize : (file?.size ?? 0)
     }
 
     var alloc: UInt64 {
-        fileIndex < 0 ? dir.totalAlloc : dir.files[Int(fileIndex)].alloc
+        fileIndex < 0 ? dir.totalAlloc : (file?.alloc ?? 0)
     }
 
     var mtime: Double {
-        fileIndex < 0 ? dir.mtime : dir.files[Int(fileIndex)].mtime
+        fileIndex < 0 ? dir.mtime : (file?.mtime ?? 0)
     }
 
+    /// Empty for a stale reference rather than the containing folder's path —
+    /// a delete resolves its targets through here, and falling back to the
+    /// folder would aim it at the parent of what the user picked.
     var path: String {
-        fileIndex < 0 ? dir.path : dir.path(ofFileAt: Int(fileIndex))
+        if fileIndex < 0 { return dir.path }
+        guard !isStale else { return "" }
+        return dir.path(ofFileAt: Int(fileIndex))
     }
 
     /// Size relative to the containing directory, for the "% of Parent" column.
     var fractionOfParent: Double {
         if fileIndex < 0 { return dir.fractionOfParent }
-        guard dir.totalSize > 0 else { return 0 }
-        return Double(dir.files[Int(fileIndex)].size) / Double(dir.totalSize)
+        guard dir.totalSize > 0, let file else { return 0 }
+        return Double(file.size) / Double(dir.totalSize)
     }
 
     /// As `fractionOfParent`, but measured with the metric currently on show so
@@ -150,8 +167,8 @@ struct NodeRef: Hashable, Identifiable {
             guard let parent = dir.parent, parent.totalAlloc > 0 else { return 1 }
             return Double(dir.totalAlloc) / Double(parent.totalAlloc)
         }
-        guard dir.totalAlloc > 0 else { return 0 }
-        return Double(dir.files[Int(fileIndex)].alloc) / Double(dir.totalAlloc)
+        guard dir.totalAlloc > 0, let file else { return 0 }
+        return Double(file.alloc) / Double(dir.totalAlloc)
     }
 
     var id: Self { self }
