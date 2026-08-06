@@ -37,6 +37,15 @@ existing release or asset.
    package. It builds, verifies and uploads the assets as a workflow artifact
    without publishing anything.
 
+   The ref must be a **branch name or a full 40-character SHA**. `actions/checkout`
+   expands it into `refs/heads/<ref>*` and `refs/tags/<ref>*`, so an abbreviated
+   SHA matches nothing and the run fails at checkout, several minutes before it
+   would have told you anything useful about the release.
+
+   ```bash
+   gh workflow run "Release macOS app" -f tag=v0.1.0 -f ref="$(git rev-parse main)"
+   ```
+
 5. **Commit, tag, and push.**
 
    ```bash
