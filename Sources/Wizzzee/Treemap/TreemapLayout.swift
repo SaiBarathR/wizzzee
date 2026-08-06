@@ -26,6 +26,16 @@ struct TreemapModel {
     var size: CGSize = .zero
     /// The subtree this layout was built for.
     var root: DirNode?
+    /// `root`'s parent chain, held only to keep it alive.
+    ///
+    /// A `DirNode`'s `parent` is unowned, on the basis that the scan's root
+    /// retains the whole tree top-down. A layout outlives that guarantee: the
+    /// view keeps the last one it was handed until SwiftUI gets round to
+    /// updating it, and a delete in the meantime can free the folders above
+    /// `root` while the cells and frames below it are still retained. Reading
+    /// `path` or `fractionOfParent` on one of those would then walk into freed
+    /// memory, so the chain is pinned for as long as the layout exists.
+    var ancestors: [DirNode] = []
     var metric: SizeMetric = .logical
 
     /// Topmost tile at a point. Cells are appended in draw order, so the search
@@ -77,7 +87,18 @@ enum TreemapLayout {
         metric: SizeMetric,
         maxDepth: Int = 12
     ) -> TreemapModel {
-        var model = TreemapModel(size: size, root: root, metric: metric)
+        var chain: [DirNode] = []
+        var above = root.parent
+        while let step = above {
+            chain.append(step)
+            above = step.parent
+        }
+        var model = TreemapModel(
+            size: size,
+            root: root,
+            ancestors: chain,
+            metric: metric
+        )
         guard size.width > 1, size.height > 1 else { return model }
 
         let rect = CGRect(origin: .zero, size: size)
