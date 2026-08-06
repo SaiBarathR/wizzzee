@@ -32,9 +32,9 @@ enum ByteFormat {
             value /= divisor
             unit += 1
         }
-        // One decimal below 10, otherwise none — keeps columns narrow while
-        // staying precise where it matters.
-        let digits = value < 10 ? 1 : (value < 100 ? 1 : 0)
+        // One decimal below 100, none above — keeps columns narrow while staying
+        // precise where the difference is worth reading.
+        let digits = value < 100 ? 1 : 0
         return String(format: "%.\(digits)f %@", value, units[unit])
     }
 

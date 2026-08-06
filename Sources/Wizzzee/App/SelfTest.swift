@@ -797,6 +797,18 @@ enum SelfTest {
             "wrongly flagged"
         )
         check(
+            "/usr/local itself is not treated as protected",
+            !FileActions.isSystemProtected("/usr/local"),
+            "wrongly flagged"
+        )
+        // The exemption is a whole path component: matched as a bare prefix it
+        // also waves through anything merely starting with those letters.
+        check(
+            "a sibling of /usr/local is still protected",
+            FileActions.isSystemProtected("/usr/locality/bin/thing"),
+            "the /usr/local exemption swallowed it"
+        )
+        check(
             "a home path is not treated as protected",
             !FileActions.isSystemProtected(NSHomeDirectory() + "/Downloads/x.zip"),
             "wrongly flagged"
