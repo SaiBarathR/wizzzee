@@ -267,6 +267,11 @@ final class AppModel: ObservableObject {
 
         result = nil
         treeRows = []
+        // Dropped along with the rows it would have replaced: a walk still going
+        // describes the scan being thrown away.
+        fileFilterWork?.cancel()
+        fileFilterWork = nil
+        isFilteringFiles = false
         fileRows = []
         selection = []
         treemapRoot = nil
@@ -425,6 +430,12 @@ final class AppModel: ObservableObject {
         }
         let query = fileQuery
         let metric = sizeMetric
+        // Both captured so a walk that was already under way when the tree
+        // changed under it can be thrown away. Its rows describe the tree as it
+        // was: after a delete their file indices no longer name the same files,
+        // and after a rescan they belong to a scan that has been discarded.
+        let revision = treeRevision
+        let source = result
         isFilteringFiles = true
 
         let work = DispatchWorkItem { [weak self] in
@@ -451,7 +462,9 @@ final class AppModel: ObservableObject {
                 )
             }
             DispatchQueue.main.async {
-                guard let self, self.fileQuery == query else { return }
+                guard let self, self.fileQuery == query,
+                    self.treeRevision == revision, self.result === source
+                else { return }
                 self.fileRows = rows.sorted(using: self.fileSort)
                 self.isFilteringFiles = false
             }
@@ -642,6 +655,13 @@ final class AppModel: ObservableObject {
         selection = []
         hoveredRef = nil
         treeRevision += 1
+        // Dropped here and now, not when the walk below returns with fresh ones.
+        // A row names its file by index, so the rows already on screen name
+        // whatever shifted into their place — and double-clicking one, or
+        // deleting it, would act on that instead. They also hold a folder
+        // without holding its ancestors, so a row inside a deleted subtree
+        // outlives its own parent chain.
+        fileRows = []
         rebuildTreeRows()
         refreshFileRows(immediately: true)
     }
