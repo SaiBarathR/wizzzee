@@ -2,45 +2,43 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>Wizzzee</string>
 	<key>CFBundleDisplayName</key>
 	<string>Wizzzee</string>
 	<key>CFBundleExecutable</key>
 	<string>Wizzzee</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.wizzzee.diskanalyzer</string>
+	<key>CFBundleName</key>
+	<string>Wizzzee</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.2</string>
+	<string>0.2.3</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
-	<key>NSSupportsAutomaticTermination</key>
-	<false/>
-	<key>NSSupportsSuddenTermination</key>
-	<false/>
+	<string>5</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>Disk space analyzer for macOS.</string>
-	<!-- Reading the whole disk means touching other users' home folders and
-	     removable media; these give macOS something to show in the prompts. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>Wizzzee needs to read your Desktop to report how much space it uses.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>Wizzzee needs to read your Documents to report how much space they use.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>Wizzzee needs to read your Downloads to report how much space they use.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Disk space analyzer for macOS.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>Wizzzee needs to read connected volumes to analyze their space.</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
 </dict>
 </plist>
