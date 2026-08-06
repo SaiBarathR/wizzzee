@@ -85,6 +85,36 @@ A command-line build can never hold Full Disk Access, so the warning banner is
 always up; `--no-access-banner` produces the layout a user who has granted it
 sees.
 
+## `--prefs`
+
+Prints the preferences this build would start with. Read-only — it never writes,
+including the key it was asked about.
+
+```bash
+$ Wizzzee.app/Contents/MacOS/Wizzzee --prefs
+domain: com.wizzzee.diskanalyzer
+showsTreemap: false (stored)
+```
+
+`stored` means someone chose it; `default` means nothing was ever written and the
+value shown is the fallback. The distinction matters, because "shown" on an
+untouched machine is not the same fact as "shown because that is what was
+picked".
+
+The domain leads because it is the usual surprise. Preferences belong to the
+bundle identifier, so a binary run straight out of `.build` reads a different
+domain than `Wizzzee.app` and will disagree with it; in that case the line says
+so instead of printing an identifier.
+
+This exists because treemap visibility is only reachable from a menu. Verifying
+it otherwise means driving the menu bar and looking at the window, which needs
+Accessibility and Screen Recording permissions a CI runner does not have:
+
+```bash
+defaults write com.wizzzee.diskanalyzer showsTreemap -bool false
+Wizzzee.app/Contents/MacOS/Wizzzee --prefs | grep -q 'showsTreemap: false'
+```
+
 ## `--selftest`
 
 Builds a throwaway tree with known contents and checks the scanner and the

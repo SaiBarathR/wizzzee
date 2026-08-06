@@ -52,3 +52,27 @@ jobs:
           test -s /tmp/tree.png
           test -s /tmp/files.png
           test -s /tmp/tree-no-treemap.png
+
+      # Treemap visibility is only reachable from a menu, which a runner can't
+      # click, so the bundle is asked what it would start with instead.
+      - name: Check the app reads its preferences from the real domain
+        run: |
+          executable="dist/Wizzzee.app/Contents/MacOS/Wizzzee"
+          domain=com.wizzzee.diskanalyzer
+          defaults delete "$domain" showsTreemap 2>/dev/null || true
+
+          "$executable" --prefs | grep -qx "domain: $domain"
+          "$executable" --prefs | grep -qx "showsTreemap: true (default)"
+
+          # Reading must not create the key it reports on, or every later
+          # "default" would silently read "stored".
+          test -z "$(defaults read "$domain" showsTreemap 2>/dev/null)"
+
+          defaults write "$domain" showsTreemap -bool false
+          "$executable" --prefs | grep -qx "showsTreemap: false (stored)"
+
+          # Taking a screenshot must not rewrite what the user chose.
+          "$executable" --uishot --tab tree --path Sources --out /tmp/prefs-render.png
+          "$executable" --prefs | grep -qx "showsTreemap: false (stored)"
+
+          defaults delete "$domain" showsTreemap

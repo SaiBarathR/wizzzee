@@ -15,6 +15,7 @@ enum CLI {
               Wizzzee --scan <dir>           scan a tree and print the largest entries
               Wizzzee --treemap <dir> <png>  scan and write the treemap to a PNG
                                              [--size WxH] [--metric size|disk]
+              Wizzzee --prefs                print the preferences the app reads
               Wizzzee --selftest             check the scanner and the delete paths
               Wizzzee --uishot --out <png>   render the real UI to a PNG
                                              [--path <dir>] [--size WxH]
@@ -99,6 +100,12 @@ enum CLI {
         } else {
             print("  failed to write \(output)")
         }
+    }
+
+    /// Prints the preferences this build would start with, so a setting that is
+    /// only visible in the UI can still be checked from a script. Read-only.
+    static func prefs() {
+        print(Preferences.summary())
     }
 
     /// Dumps a single directory's entries exactly as `getattrlistbulk` reported
