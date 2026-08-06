@@ -158,7 +158,9 @@ final class AppModel: ObservableObject {
 
     // View state
     @Published var tab: MainTab = .tree
-    @Published var selection: NodeRef?
+    /// A set rather than one item, so the tables get macOS's native ⌘-click and
+    /// ⇧-arrow multi-select and the destructive actions can work on a batch.
+    @Published var selection: Set<NodeRef> = []
     /// Defaults to space actually occupied. Logical size is badly misleading on
     /// macOS, where sparse container and VM images routinely report hundreds of
     /// gigabytes they don't occupy — and reclaimable space is the whole point.
@@ -189,8 +191,8 @@ final class AppModel: ObservableObject {
     // Errors surfaced as a sheet
     @Published var actionError: String?
     @Published var actionErrorDetail: String?
-    /// Set while awaiting confirmation of an irreversible delete.
-    @Published var permanentDeleteTarget: NodeRef?
+    /// Non-empty while awaiting confirmation of an irreversible delete.
+    @Published var permanentDeleteTargets: Set<NodeRef> = []
 
     private var engine: ScanEngine?
     private var fileFilterWork: DispatchWorkItem?
@@ -207,6 +209,11 @@ final class AppModel: ObservableObject {
         selectedVolumePath = volumes.first?.path ?? "/"
         hasFullDiskAccess = FullDiskAccess.isGranted()
     }
+
+    /// The one selected item, when exactly one is selected. The treemap
+    /// highlight and the status line describe a single thing, so they ask for
+    /// this rather than picking arbitrarily out of a set.
+    var primarySelection: NodeRef? { selection.count == 1 ? selection.first : nil }
 
     // MARK: - Scan target
 
@@ -252,7 +259,7 @@ final class AppModel: ObservableObject {
         result = nil
         treeRows = []
         fileRows = []
-        selection = nil
+        selection = []
         treemapRoot = nil
         expanded = []
         progress = ScanEngine.Progress()
@@ -289,7 +296,7 @@ final class AppModel: ObservableObject {
         result = scanned
         phase = .complete
         treemapRoot = scanned.root
-        selection = NodeRef(scanned.root)
+        selection = [NodeRef(scanned.root)]
         // Open the root so the biggest folders are visible immediately.
         expanded = [ObjectIdentifier(scanned.root)]
         rebuildTreeRows()
@@ -328,7 +335,7 @@ final class AppModel: ObservableObject {
             node = current.parent
         }
         for dir in chain { expanded.insert(ObjectIdentifier(dir)) }
-        selection = ref
+        selection = [ref]
         rebuildTreeRows()
     }
 
@@ -470,31 +477,131 @@ final class AppModel: ObservableObject {
 
     // MARK: - Destructive actions
 
-    func moveToTrash(_ ref: NodeRef) {
-        perform(on: ref) { try FileActions.moveToTrash($0) }
+    func moveToTrash(_ ref: NodeRef) { moveToTrash([ref]) }
+
+    func moveToTrash(_ refs: Set<NodeRef>) {
+        performBatch(on: refs) { try FileActions.moveToTrash($0) }
     }
 
-    func deletePermanently(_ ref: NodeRef) {
-        perform(on: ref) { try FileActions.deletePermanently($0) }
+    func deletePermanently(_ ref: NodeRef) { deletePermanently([ref]) }
+
+    func deletePermanently(_ refs: Set<NodeRef>) {
+        performBatch(on: refs) { try FileActions.deletePermanently($0) }
     }
 
-    private func perform(on ref: NodeRef, _ body: (String) throws -> Void) {
-        let path = ref.path
-        do {
-            try body(path)
-            remove(ref)
-        } catch let error as FileActions.ActionError {
-            actionError = error.errorDescription
-            actionErrorDetail = error.recoverySuggestion
-        } catch {
-            actionError = "Couldn’t delete “\((path as NSString).lastPathComponent)”"
-            actionErrorDetail = error.localizedDescription
+    /// `refs` with anything already covered by a selected ancestor dropped.
+    /// Deleting a folder takes its contents with it, so a nested selection would
+    /// otherwise be deleted twice — the second attempt failing on a path that no
+    /// longer exists, and its bytes being subtracted from the totals twice over.
+    func distinctTargets(_ refs: Set<NodeRef>) -> [NodeRef] {
+        let selectedDirs = Set(
+            refs.lazy.filter(\.isDirectory).map { ObjectIdentifier($0.dir) }
+        )
+        // A reference whose folder has since been renumbered names either
+        // nothing or the wrong file, so it is dropped rather than acted on.
+        return refs.filter { !$0.isStale }.filter { ref in
+            // A file's containing directory counts as an ancestor; a directory's
+            // does not, or every folder would exclude itself.
+            var ancestor: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
+            while let step = ancestor {
+                if selectedDirs.contains(ObjectIdentifier(step)) { return false }
+                ancestor = step.parent
+            }
+            return true
         }
     }
 
-    /// Drops a deleted item from the tree and walks the size change up to the
+    /// Space deleting `refs` would actually reclaim, counting a folder's
+    /// contents once rather than once per nested selection.
+    func reclaimableSize(_ refs: Set<NodeRef>) -> UInt64 {
+        distinctTargets(refs).reduce(0) { $0 + $1.size }
+    }
+
+    private func performBatch(
+        on refs: Set<NodeRef>,
+        _ body: (String) throws -> Void
+    ) {
+        // Paths are resolved up front: removing one file renumbers its siblings,
+        // so a NodeRef read after the first deletion would name the wrong path.
+        let targets = distinctTargets(refs).map { (ref: $0, path: $0.path) }
+        guard !targets.isEmpty else { return }
+
+        let allowed = targets.filter { !FileActions.isSystemProtected($0.path) }
+        guard !allowed.isEmpty else {
+            // Nothing worth attempting: the protection itself is the only useful
+            // thing to say, and it explains why the space can't be reclaimed.
+            let error = FileActions.ActionError.systemProtected(targets[0].path)
+            actionError = error.errorDescription
+            actionErrorDetail = error.recoverySuggestion
+            return
+        }
+
+        var deleted: [NodeRef] = []
+        var failures: [(title: String, detail: String)] = []
+        for target in allowed {
+            do {
+                try body(target.path)
+                deleted.append(target.ref)
+            } catch let error as FileActions.ActionError {
+                failures.append(
+                    (
+                        error.errorDescription ?? "Couldn’t delete an item",
+                        error.recoverySuggestion ?? ""
+                    )
+                )
+            } catch {
+                let name = (target.path as NSString).lastPathComponent
+                failures.append(
+                    ("Couldn’t delete “\(name)”", error.localizedDescription)
+                )
+            }
+        }
+
+        // Successes are applied even when part of the batch failed, so the tree
+        // never claims space that is already gone.
+        detach(deleted)
+        report(
+            failures: failures,
+            protected: targets.count - allowed.count,
+            attempted: targets.count
+        )
+    }
+
+    /// Surfaces the first failure — a wall of alerts helps nobody — but says how
+    /// many items were affected, so a partial result isn't taken for a complete
+    /// one.
+    private func report(
+        failures: [(title: String, detail: String)],
+        protected: Int,
+        attempted: Int
+    ) {
+        let unfinished = failures.count + protected
+        guard unfinished > 0 else { return }
+        if unfinished == 1, let only = failures.first {
+            actionError = only.title
+            actionErrorDetail = only.detail.isEmpty ? nil : only.detail
+            return
+        }
+        actionError = "\(ByteFormat.count(unfinished)) of "
+            + "\(ByteFormat.count(attempted)) items couldn’t be removed"
+        var detail: [String] = []
+        if protected > 0 {
+            detail.append(
+                "\(ByteFormat.count(protected)) live on the sealed system "
+                    + "volume, which System Integrity Protection makes read-only."
+            )
+        }
+        if let first = failures.first {
+            detail.append("\(first.title). \(first.detail)")
+        }
+        actionErrorDetail = detail.joined(separator: "\n\n")
+    }
+
+    /// Drops deleted items from the tree and walks the size change up to the
     /// root, so the whole UI updates without rescanning.
-    private func remove(_ ref: NodeRef) {
+    private func detach(_ refs: [NodeRef]) {
+        guard !refs.isEmpty else { return }
+
         // The File View walk reads this tree on `treeQueue`. Drop any walk that
         // hasn't started, then wait out one that has, so nothing is traversing
         // the nodes about to be unlinked.
@@ -502,43 +609,53 @@ final class AppModel: ObservableObject {
         fileFilterWork = nil
         treeQueue.sync {}
 
-        if ref.isDirectory {
-            let node = ref.dir
-            guard let parent = node.parent else { return }
-            subtract(
-                size: node.totalSize,
-                alloc: node.totalAlloc,
-                files: node.totalFiles,
-                dirs: node.totalDirs + 1,
-                from: parent
-            )
-            parent.subdirs.removeAll { $0 === node }
-            if treemapRoot === node || isDescendant(treemapRoot, of: node) {
-                treemapRoot = parent
-            }
-        } else {
-            let dir = ref.dir
-            let index = Int(ref.fileIndex)
-            guard index < dir.files.count else { return }
-            let file = dir.files[index]
-            subtract(
-                size: file.isDuplicateLink ? 0 : file.size,
-                alloc: file.isDuplicateLink ? 0 : file.alloc,
-                files: 1,
-                dirs: 0,
-                from: dir
-            )
-            dir.files.remove(at: index)
-        }
+        // Files come off first, highest index first: removing an entry shifts
+        // every sibling after it, so any other order unlinks the wrong ones.
+        // Sorting the whole batch at once is safe because entries in different
+        // folders can't disturb each other's indices.
+        let files = refs.lazy.filter { !$0.isDirectory }
+            .sorted { $0.fileIndex > $1.fileIndex }
+        for ref in files { detachFile(ref) }
+        for ref in refs where ref.isDirectory { detachDirectory(ref.dir) }
 
         // Removing a file shifts the indices of its siblings, invalidating any
         // NodeRef held elsewhere, so all derived rows are rebuilt and the
         // selection is dropped.
-        selection = nil
+        selection = []
         hoveredRef = nil
         treeRevision += 1
         rebuildTreeRows()
         refreshFileRows(immediately: true)
+    }
+
+    private func detachFile(_ ref: NodeRef) {
+        let dir = ref.dir
+        let index = Int(ref.fileIndex)
+        guard index < dir.files.count else { return }
+        let file = dir.files[index]
+        subtract(
+            size: file.isDuplicateLink ? 0 : file.size,
+            alloc: file.isDuplicateLink ? 0 : file.alloc,
+            files: 1,
+            dirs: 0,
+            from: dir
+        )
+        dir.files.remove(at: index)
+    }
+
+    private func detachDirectory(_ node: DirNode) {
+        guard let parent = node.parent else { return }
+        subtract(
+            size: node.totalSize,
+            alloc: node.totalAlloc,
+            files: node.totalFiles,
+            dirs: node.totalDirs + 1,
+            from: parent
+        )
+        parent.subdirs.removeAll { $0 === node }
+        if treemapRoot === node || isDescendant(treemapRoot, of: node) {
+            treemapRoot = parent
+        }
     }
 
     private func isDescendant(_ node: DirNode?, of ancestor: DirNode) -> Bool {

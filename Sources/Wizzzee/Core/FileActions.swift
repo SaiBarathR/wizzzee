@@ -72,6 +72,13 @@ enum FileActions {
         return protectedPrefixes.contains { path.hasPrefix($0) }
     }
 
+    /// True when *any* of `refs` is protected. A bulk action that silently did
+    /// part of what it offered would be worse than one that refuses outright, so
+    /// the UI disables the whole thing on a single protected item.
+    static func containsSystemProtected(_ refs: Set<NodeRef>) -> Bool {
+        refs.contains { isSystemProtected($0.path) }
+    }
+
     static func moveToTrash(_ path: String) throws {
         if isSystemProtected(path) { throw ActionError.systemProtected(path) }
         do {

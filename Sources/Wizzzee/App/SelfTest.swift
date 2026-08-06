@@ -15,10 +15,19 @@ enum SelfTest {
     static func run() {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("wizzzee-selftest-\(getpid())")
-        defer { try? FileManager.default.removeItem(at: root) }
+        // The batch tests need folders of their own: the checks above delete
+        // parts of the main fixture, which would leave them too little to work
+        // with and make their expected totals depend on test order.
+        let batchRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-batch-\(getpid())")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: batchRoot)
+        }
 
         do {
             try buildFixture(at: root)
+            try buildBatchFixture(at: batchRoot)
         } catch {
             print("couldn't build the fixture: \(error)")
             exit(1)
@@ -31,6 +40,10 @@ enum SelfTest {
         testFilterAndRanking(root)
         testTrashUpdatesTree(root)
         testPermanentDeleteFolder(root)
+        testStaleReferencesSurviveADelete(batchRoot)
+        testAncestorDedupe(batchRoot)
+        testBatchTrashOfSiblings(batchRoot)
+        testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
         testScanOutcomeReporting()
 
@@ -75,6 +88,33 @@ enum SelfTest {
             at: root.appendingPathComponent("c/alias.dat"),
             withDestinationURL: root.appendingPathComponent("c/five.dat")
         )
+    }
+
+    // Each check below deletes from the batch fixture, so every one gets its own
+    // folder rather than sharing — otherwise they only pass in a fixed order.
+    //
+    // siblings/one.dat    3,000 bytes
+    // siblings/two.dat    4,000
+    // siblings/three.dat  5,000
+    // stale/{a,b,c}.dat   2,000 each
+    // nest/top.dat        7,000
+    // nest/inner/deep.dat 6,000
+    private static func buildBatchFixture(at root: URL) throws {
+        let manager = FileManager.default
+        for folder in ["siblings", "stale", "nest/inner"] {
+            try manager.createDirectory(
+                at: root.appendingPathComponent(folder),
+                withIntermediateDirectories: true
+            )
+        }
+        try write(root.appendingPathComponent("siblings/one.dat"), bytes: 3_000)
+        try write(root.appendingPathComponent("siblings/two.dat"), bytes: 4_000)
+        try write(root.appendingPathComponent("siblings/three.dat"), bytes: 5_000)
+        try write(root.appendingPathComponent("stale/a.dat"), bytes: 2_000)
+        try write(root.appendingPathComponent("stale/b.dat"), bytes: 2_000)
+        try write(root.appendingPathComponent("stale/c.dat"), bytes: 2_000)
+        try write(root.appendingPathComponent("nest/top.dat"), bytes: 7_000)
+        try write(root.appendingPathComponent("nest/inner/deep.dat"), bytes: 6_000)
     }
 
     private static func write(_ url: URL, bytes: Int) throws {
@@ -258,7 +298,238 @@ enum SelfTest {
         )
         check(
             "the selection is cleared, since file indices shifted",
-            model.selection == nil,
+            model.selection.isEmpty,
+            "selection survived"
+        )
+    }
+
+    /// A `NodeRef` names a file by its index in the folder's array, so deleting
+    /// anything ahead of it leaves the reference pointing past the end. SwiftUI
+    /// keeps a context menu's content alive and re-runs its body once the sheet
+    /// closes — after the delete — so reading a stale reference has to degrade
+    /// quietly. Reading one used to trap and take the whole app down.
+    @MainActor
+    private static func testStaleReferencesSurviveADelete(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let result = loadSynchronously(into: model) else { return }
+        let dir = result.root.subdir(named: "stale")!
+        guard dir.files.count == 3 else {
+            check("the stale-ref fixture has three files", false, "\(dir.files.count)")
+            return
+        }
+
+        // Captured while all three exist, then read once only one remains —
+        // exactly what the menu holds across a delete.
+        let last = NodeRef(dir: dir, fileIndex: 2)
+        model.moveToTrash([
+            NodeRef(dir: dir, fileIndex: 0), NodeRef(dir: dir, fileIndex: 1),
+        ])
+        check(
+            "the fixture is down to one file",
+            dir.files.count == 1,
+            "got \(dir.files.count)"
+        )
+        check("a reference past the end reports itself stale", last.isStale, "")
+        check("its path reads empty rather than trapping", last.path.isEmpty, last.path)
+        check("its name reads empty", last.name.isEmpty, last.name)
+        check("its size reads zero", last.size == 0, "\(last.size)")
+        check("its file entry is nil", last.file == nil, "got one")
+        check(
+            "its percentage reads zero",
+            last.fractionOfParent == 0 && last.fractionOfParent(using: .allocated) == 0,
+            "\(last.fractionOfParent)"
+        )
+        // The protection check is what the crash came through: the menu asks it
+        // for every captured reference each time its body re-runs.
+        check(
+            "the menu's protection check tolerates a stale reference",
+            !FileActions.containsSystemProtected([last]),
+            "reported protected"
+        )
+        check(
+            "a stale reference is never a delete target",
+            model.distinctTargets([last]).isEmpty,
+            "it survived the filter"
+        )
+        // Aiming a stale reference at its parent folder would delete the wrong
+        // thing entirely, so the surviving file must still be here afterwards.
+        model.deletePermanently([last])
+        check(
+            "acting on a stale reference is a no-op, not a parent delete",
+            FileManager.default.fileExists(atPath: dir.path)
+                && dir.files.count == 1,
+            "the folder or its contents were removed"
+        )
+    }
+
+    /// A folder and something inside it can both be selected. Only the folder
+    /// should be acted on — deleting it takes the rest with it, so a second
+    /// attempt would fail on a path that no longer exists and, worse, subtract
+    /// the same bytes from the totals twice.
+    @MainActor
+    private static func testAncestorDedupe(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let result = loadSynchronously(into: model) else { return }
+        let nest = result.root.subdir(named: "nest")!
+        let inner = nest.subdir(named: "inner")!
+        let topIndex = nest.files.firstIndex { $0.name == "top.dat" }!
+        let deepIndex = inner.files.firstIndex { $0.name == "deep.dat" }!
+
+        let nested: Set<NodeRef> = [
+            NodeRef(nest),
+            NodeRef(inner),
+            NodeRef(dir: nest, fileIndex: topIndex),
+            NodeRef(dir: inner, fileIndex: deepIndex),
+        ]
+        let targets = model.distinctTargets(nested)
+        check(
+            "a folder swallows every selected descendant",
+            targets.count == 1 && targets.first?.dir === nest,
+            "got \(targets.map(\.name))"
+        )
+
+        let siblings = result.root.subdir(named: "siblings")!
+        let unrelated: Set<NodeRef> = [
+            NodeRef(dir: siblings, fileIndex: 0),
+            NodeRef(dir: siblings, fileIndex: 1),
+            NodeRef(inner),
+        ]
+        check(
+            "unrelated selections are all kept",
+            model.distinctTargets(unrelated).count == 3,
+            "got \(model.distinctTargets(unrelated).map(\.name))"
+        )
+        check(
+            "reclaimable size counts a nested selection once",
+            model.reclaimableSize(nested) == nest.totalSize,
+            "got \(model.reclaimableSize(nested)), expected \(nest.totalSize)"
+        )
+    }
+
+    /// Two files in one folder, trashed together. Removing an entry renumbers
+    /// every sibling after it, so the batch has to unlink from the back — done
+    /// front-to-back this drops the wrong rows from the model while deleting the
+    /// right files from disk, which no error would ever reveal.
+    @MainActor
+    private static func testBatchTrashOfSiblings(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let result = loadSynchronously(into: model) else { return }
+
+        let dir = result.root.subdir(named: "siblings")!
+        guard dir.files.count == 3 else {
+            check("the batch fixture has three siblings", false, "\(dir.files.count)")
+            return
+        }
+        // Indices, not names: which name lands at which index depends on the
+        // order the filesystem enumerated them, and it's the indices that the
+        // removal order has to get right.
+        let names = dir.files.map(\.name)
+        let paths = (0..<3).map { dir.path(ofFileAt: $0) }
+        let removedBytes = dir.files[0].size + dir.files[2].size
+        let before = result.root.totalSize
+        let beforeFiles = result.root.totalFiles
+
+        model.moveToTrash([
+            NodeRef(dir: dir, fileIndex: 0), NodeRef(dir: dir, fileIndex: 2),
+        ])
+
+        check(
+            "trashing two at once reports no error",
+            model.actionError == nil,
+            model.actionError ?? ""
+        )
+        check(
+            "both files are gone from disk",
+            !FileManager.default.fileExists(atPath: paths[0])
+                && !FileManager.default.fileExists(atPath: paths[2]),
+            "still present"
+        )
+        check(
+            "the untouched sibling is still on disk",
+            FileManager.default.fileExists(atPath: paths[1]),
+            "\(names[1]) was deleted too"
+        )
+        check(
+            "the model keeps exactly the sibling that survived",
+            dir.files.map(\.name) == [names[1]],
+            "got \(dir.files.map(\.name)), expected [\(names[1])]"
+        )
+        check(
+            "the root's total drops by both files' sizes",
+            result.root.totalSize == before - removedBytes,
+            "root is \(result.root.totalSize), expected \(before - removedBytes)"
+        )
+        check(
+            "the root's file count drops by two",
+            result.root.totalFiles == beforeFiles - 2,
+            "got \(result.root.totalFiles), expected \(beforeFiles - 2)"
+        )
+        check(
+            "a batch clears the selection",
+            model.selection.isEmpty,
+            "selection survived"
+        )
+    }
+
+    /// A folder selected together with its own contents, deleted permanently.
+    @MainActor
+    private static func testBatchDeleteOfNestedSelection(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let result = loadSynchronously(into: model) else { return }
+
+        let nest = result.root.subdir(named: "nest")!
+        let inner = nest.subdir(named: "inner")!
+        let topIndex = nest.files.firstIndex { $0.name == "top.dat" }!
+        let nestSize = nest.totalSize
+        let nestFiles = nest.totalFiles
+        let before = result.root.totalSize
+        let beforeFiles = result.root.totalFiles
+        let beforeDirs = result.root.totalDirs
+
+        model.selection = [NodeRef(nest)]
+        model.deletePermanently([
+            NodeRef(nest), NodeRef(inner), NodeRef(dir: nest, fileIndex: topIndex),
+        ])
+
+        check(
+            "deleting a folder alongside its contents reports no error",
+            model.actionError == nil,
+            model.actionError ?? ""
+        )
+        check(
+            "the folder is gone from disk",
+            !FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("nest").path
+            ),
+            "still present"
+        )
+        check(
+            "it is detached from the root",
+            result.root.subdir(named: "nest") == nil,
+            "still attached"
+        )
+        check(
+            "its bytes come off the root exactly once",
+            result.root.totalSize == before - nestSize,
+            "root is \(result.root.totalSize), expected \(before - nestSize)"
+        )
+        check(
+            "both of its files come off the root's file count",
+            result.root.totalFiles == beforeFiles - nestFiles,
+            "got \(result.root.totalFiles), expected \(beforeFiles - nestFiles)"
+        )
+        check(
+            "the folder and its subfolder both come off the folder count",
+            result.root.totalDirs == beforeDirs - 2,
+            "got \(result.root.totalDirs), expected \(beforeDirs - 2)"
+        )
+        check(
+            "the selection is cleared after a nested batch",
+            model.selection.isEmpty,
             "selection survived"
         )
     }

@@ -27,9 +27,11 @@ struct TreeTable: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
+        // A Set binding is what turns on macOS's native ⌘-click toggle,
+        // ⇧-click range and ⇧-arrow extend — none of it needs a key handler.
         Table(
             model.treeRows,
-            selection: selectionBinding,
+            selection: $model.selection,
             sortOrder: $model.treeSort
         ) {
             TableColumn("Folder / File", sortUsing: TreeSort(.name)) { row in
@@ -93,13 +95,6 @@ struct TreeTable: View {
         }
     }
 
-    private var selectionBinding: Binding<NodeRef?> {
-        Binding(
-            get: { model.selection },
-            set: { model.selection = $0 }
-        )
-    }
-
     private func numeric(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 11).monospacedDigit())
@@ -154,7 +149,7 @@ private struct NameCell: View {
 
     private var nameColor: Color {
         if row.ref.isDirectory { return .primary }
-        let file = row.ref.dir.files[Int(row.ref.fileIndex)]
+        guard let file = row.ref.file else { return .secondary }
         if file.isDuplicateLink { return .secondary }
         if file.isSymlink { return .secondary }
         return .primary
@@ -162,7 +157,7 @@ private struct NameCell: View {
 
     private var exclusionNote: String? {
         guard row.ref.isDirectory else {
-            let file = row.ref.dir.files[Int(row.ref.fileIndex)]
+            guard let file = row.ref.file else { return nil }
             if file.isDuplicateLink { return "hard link" }
             if file.isSymlink { return "alias" }
             return nil

@@ -111,7 +111,7 @@ enum UIShot {
         if selectLargest {
             let biggest = model.result?.root.subdirs.max { $0.totalSize < $1.totalSize }
             if let biggest {
-                model.selection = NodeRef(biggest)
+                model.selection = [NodeRef(biggest)]
                 model.setExpanded(biggest, true)
             }
         }

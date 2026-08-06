@@ -57,9 +57,11 @@ struct FileViewTab: View {
     }
 
     private var table: some View {
+        // As in the Tree View, the Set binding is what gives the table macOS's
+        // native ⌘-click and ⇧-arrow multi-select.
         Table(
             model.fileRows,
-            selection: selectionBinding,
+            selection: $model.selection,
             sortOrder: $model.fileSort
         ) {
             TableColumn("File Name", value: \.name) { row in
@@ -121,12 +123,5 @@ struct FileViewTab: View {
         } primaryAction: { refs in
             if let ref = refs.first { FileActions.revealInFinder(ref.path) }
         }
-    }
-
-    private var selectionBinding: Binding<NodeRef?> {
-        Binding(
-            get: { model.selection },
-            set: { model.selection = $0 }
-        )
     }
 }

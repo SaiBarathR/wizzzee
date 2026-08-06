@@ -7,13 +7,18 @@ struct StatusBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            if let selection = model.selection {
+            if let single = model.primarySelection {
                 Label {
-                    Text(selectionSummary(selection))
+                    Text(selectionSummary(single))
                 } icon: {
-                    Image(
-                        systemName: selection.isDirectory ? "folder" : "doc"
-                    )
+                    Image(systemName: single.isDirectory ? "folder" : "doc")
+                }
+                .labelStyle(.titleAndIcon)
+            } else if model.selection.count > 1 {
+                Label {
+                    Text(multipleSelectionSummary)
+                } icon: {
+                    Image(systemName: "square.stack.3d.up")
                 }
                 .labelStyle(.titleAndIcon)
             } else {
@@ -45,6 +50,13 @@ struct StatusBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    /// The size quoted is what deleting the selection would actually free, so a
+    /// folder selected alongside a file inside it is counted once.
+    private var multipleSelectionSummary: String {
+        "\(ByteFormat.count(model.selection.count)) items selected  •  "
+            + ByteFormat.decimal(model.reclaimableSize(model.selection))
     }
 
     private func selectionSummary(_ ref: NodeRef) -> String {

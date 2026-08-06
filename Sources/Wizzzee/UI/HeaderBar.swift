@@ -194,7 +194,11 @@ struct HeaderBar: View {
     }
 
     private var selectionName: String {
-        if let selection = model.selection { return selection.path }
+        if let single = model.primarySelection { return single.path }
+        if model.selection.count > 1 {
+            return "\(ByteFormat.count(model.selection.count)) items  •  "
+                + ByteFormat.decimal(model.reclaimableSize(model.selection))
+        }
         return model.result?.rootPath ?? model.scanTargetLabel
     }
 
@@ -218,10 +222,39 @@ struct HeaderBar: View {
                     + "on disk than their logical size."
             )
 
-            Text("Wizzzee \(AppInfo.version)")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
+            // The bulk actions take the version line's place rather than adding
+            // a row, so the header doesn't change height as the selection grows.
+            if model.selection.count > 1 {
+                bulkActions
+            } else {
+                Text("Wizzzee \(AppInfo.version)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
         }
         .fixedSize()
+    }
+
+    // MARK: - Bulk actions
+
+    /// Shown only for a multiple selection: the single-item versions live in the
+    /// context menu, and a permanently visible delete button next to the metric
+    /// picker would be an easy mis-click during ordinary browsing.
+    private var bulkActions: some View {
+        let refs = model.selection
+        let blocked = FileActions.containsSystemProtected(refs)
+        let count = ByteFormat.count(refs.count)
+        return HStack(spacing: 6) {
+            Button("Move \(count) to Trash") { model.moveToTrash(refs) }
+            Button("Delete \(count)…") { model.permanentDeleteTargets = refs }
+        }
+        .controlSize(.small)
+        .disabled(blocked)
+        .help(
+            blocked
+                ? "Part of the selection is on the sealed system volume and "
+                    + "can't be removed."
+                : "Applies to all \(count) selected items."
+        )
     }
 }
