@@ -26,6 +26,10 @@ enum DirExclusion: UInt8 {
     case otherVolume
     /// Already counted under a different path (an APFS firmlink).
     case alreadyCounted
+    /// Enumeration started but stopped early, so the contents are incomplete.
+    /// Distinct from `permissionDenied`: some of the folder *is* in the totals,
+    /// which is the case most likely to be mistaken for a complete reading.
+    case partiallyRead
 }
 
 /// A directory in the scanned tree.

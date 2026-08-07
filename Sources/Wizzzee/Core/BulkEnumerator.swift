@@ -99,7 +99,14 @@ final class BulkEnumerator {
             // getattrlistbulk mutates the attrlist, so hand it a fresh copy.
             var req = request
             let count = getattrlistbulk(fd, &req, buffer, Self.bufferSize, 0)
-            if count == -1 { return errno }
+            if count == -1 {
+                // A signal delivered to this worker thread is not a failure to
+                // read the directory; the next call resumes where this one was
+                // interrupted. Returning here instead silently truncated the
+                // folder at whatever batch the signal happened to land on.
+                if errno == EINTR { continue }
+                return errno
+            }
             if count == 0 { return 0 }
 
             var entry = UnsafeRawPointer(buffer)

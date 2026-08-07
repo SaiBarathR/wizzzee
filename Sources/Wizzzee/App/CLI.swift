@@ -55,8 +55,9 @@ enum CLI {
         }
 
         print("Scanning \(path)…")
-        guard let result = ScanEngine().scanSynchronously(rootPath: path) else {
-            print("scan failed")
+        let outcome = ScanEngine().scanSynchronously(rootPath: path)
+        guard let result = outcome.result else {
+            print(outcome.failureDescription ?? "scan failed")
             return
         }
         print(
@@ -171,8 +172,9 @@ enum CLI {
             }
         }
 
-        guard let result = engine.scanSynchronously(rootPath: path) else {
-            print("scan failed or was cancelled")
+        let outcome = engine.scanSynchronously(rootPath: path)
+        guard let result = outcome.result else {
+            print(outcome.failureDescription ?? "scan failed")
             return
         }
 
