@@ -7,6 +7,52 @@ struct StatusBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
+            // A delete takes over the strip while it runs. It is the only thing
+            // happening, it can take minutes on a large tree, and the Stop has
+            // to be somewhere the user is already looking.
+            if let progress = model.deleteProgress {
+                deleting(progress)
+            } else {
+                contents
+            }
+        }
+        .font(.system(size: 10).monospacedDigit())
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(.bar)
+    }
+
+    private func deleting(_ progress: AppModel.DeleteProgress) -> some View {
+        Group {
+            ProgressView(value: progress.fraction)
+                .progressViewStyle(.linear)
+                .frame(width: 130)
+
+            Text(
+                "Removing \(ByteFormat.count(progress.done + 1)) of "
+                    + "\(ByteFormat.count(progress.total))"
+            )
+            if !progress.currentName.isEmpty {
+                Text(progress.currentName)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            // Stops after the item in hand: removing a directory is a single
+            // uninterruptible call, so there is nothing honest to promise
+            // beyond "no further items will be started".
+            Button("Stop") { model.cancelDelete() }
+                .controlSize(.small)
+                .help("Stop after the item currently being removed")
+        }
+    }
+
+    @ViewBuilder
+    private var contents: some View {
+        Group {
             if let single = model.primarySelection {
                 Label {
                     Text(selectionSummary(single))
@@ -44,12 +90,6 @@ struct StatusBar: View {
                 }
             }
         }
-        .font(.system(size: 10).monospacedDigit())
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(.bar)
     }
 
     /// The size quoted is what deleting the selection would actually free, so a

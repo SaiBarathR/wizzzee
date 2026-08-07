@@ -206,8 +206,36 @@ final class AppModel: ObservableObject {
     /// Non-empty while awaiting confirmation of an irreversible delete.
     @Published var permanentDeleteTargets: Set<NodeRef> = []
 
+    /// How far a running delete batch has got. Nil when none is running.
+    @Published private(set) var deleteProgress: DeleteProgress?
+
+    /// Progress of a delete batch, counted in top-level targets.
+    ///
+    /// Not in bytes: `FileManager.removeItem` recurses into a directory itself
+    /// and reports nothing on the way, so the honest unit is the item, and a
+    /// single huge tree is one long step.
+    struct DeleteProgress: Equatable {
+        var done: Int
+        var total: Int
+        /// The item about to be removed, for the status line.
+        var currentName: String
+
+        var fraction: Double {
+            total > 0 ? Double(done) / Double(total) : 0
+        }
+    }
+
     private var engine: ScanEngine?
+    private var deleteTask: Task<Void, Never>?
     private var fileFilterWork: DispatchWorkItem?
+    /// Lets a walk already running on `treeQueue` give up part-way.
+    ///
+    /// Cancelling the work item only stops one that hasn't started. `detach`
+    /// still has to wait out a walk that has, because it is about to unlink the
+    /// nodes that walk is reading — but with this the wait is the few
+    /// microseconds to the walk's next check rather than a full pass over every
+    /// file in the scan.
+    private var fileWalkToken = WalkToken()
     /// Every background read of the scan tree runs here, so a delete can make
     /// itself exclusive by syncing against it. Serial by design: two concurrent
     /// walks would buy nothing, and the barrier below depends on the ordering.
@@ -471,12 +499,17 @@ final class AppModel: ObservableObject {
         let revision = treeRevision
         let source = result
         isFilteringFiles = true
+        // A fresh token per walk: the previous one may already be cancelled, and
+        // this walk is entitled to run.
+        let token = WalkToken()
+        fileWalkToken = token
 
         let work = DispatchWorkItem { [weak self] in
             let refs = result.largestFiles(
                 matching: query,
                 limit: 1000,
-                metric: metric
+                metric: metric,
+                token: token
             )
             let rootTotal = max(
                 metric == .logical ? result.root.totalSize : result.root.totalAlloc,
@@ -542,6 +575,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Destructive actions
 
+    /// True while a delete batch is running, so the UI can offer a Stop and
+    /// refuse to start another.
+    var isDeleting: Bool { deleteProgress != nil }
+
+    /// Stops a running batch after the item currently being removed.
+    func cancelDelete() { deleteTask?.cancel() }
+
     func moveToTrash(_ ref: NodeRef) { moveToTrash([ref]) }
 
     func moveToTrash(_ refs: Set<NodeRef>) {
@@ -594,7 +634,7 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    /// True when anything in `refs` may not be removed, so the menu can offer an
+    /// True when nothing in `refs` may be removed, so the menu can offer an
     /// explanation in place of actions that would only fail.
     func isDeletionRefused(_ refs: Set<NodeRef>) -> Bool {
         refs.contains { deletionRefusal(for: $0) != nil }
@@ -622,10 +662,26 @@ final class AppModel: ObservableObject {
         distinctTargets(refs).contains { $0.file?.sharesStorage == true }
     }
 
+    /// Runs a delete batch off the main actor, reporting progress as it goes.
+    ///
+    /// `removeItem` on a large tree is tens of seconds to minutes of `unlink(2)`.
+    /// Run on the main actor — which is where every caller of this is — it
+    /// stopped the run loop for the whole of that: no spinner, no progress, no
+    /// cancel, and long enough that the responsiveness watchdog could kill the
+    /// app part-way and leave a half-removed tree behind totals that were never
+    /// updated.
+    ///
+    /// One target at a time rather than concurrently: the batch is already
+    /// deduplicated to non-overlapping subtrees, and deleting several huge trees
+    /// at once only makes the disk seek more.
     private func performBatch(
         on refs: Set<NodeRef>,
-        _ body: (String) throws -> Void
+        _ body: @escaping @Sendable (String) throws -> Void
     ) {
+        // One batch at a time. A second started mid-flight would resolve its
+        // paths against a tree the first is still changing.
+        guard deleteTask == nil else { return }
+
         // Paths are resolved up front: removing one file renumbers its siblings,
         // so a NodeRef read after the first deletion would name the wrong path.
         let targets = distinctTargets(refs).map { (ref: $0, path: $0.path) }
@@ -642,31 +698,68 @@ final class AppModel: ObservableObject {
             return
         }
 
-        var deleted: [NodeRef] = []
-        var failures: [(title: String, detail: String)] = []
-        for target in allowed {
-            do {
-                try body(target.path)
-                deleted.append(target.ref)
-            } catch let error as FileActions.ActionError {
-                failures.append(
-                    (
-                        error.errorDescription ?? "Couldn’t delete an item",
-                        error.recoverySuggestion ?? ""
-                    )
-                )
-            } catch {
-                let name = (target.path as NSString).lastPathComponent
-                failures.append(
-                    ("Couldn’t delete “\(name)”", error.localizedDescription)
+        let paths = allowed.map(\.path)
+        deleteProgress = DeleteProgress(
+            done: 0,
+            total: paths.count,
+            currentName: (paths[0] as NSString).lastPathComponent
+        )
+
+        deleteTask = Task { [weak self] in
+            var deleted: [NodeRef] = []
+            var failures: [(title: String, detail: String)] = []
+
+            for (index, path) in paths.enumerated() {
+                // Checked between items. `removeItem` itself can't be
+                // interrupted, so Stop takes effect at the next target rather
+                // than part-way through the one in hand.
+                if Task.isCancelled { break }
+
+                let failure = await Task.detached(priority: .userInitiated) {
+                    () -> (title: String, detail: String)? in
+                    do {
+                        try body(path)
+                        return nil
+                    } catch let error as FileActions.ActionError {
+                        return (
+                            error.errorDescription ?? "Couldn’t delete an item",
+                            error.recoverySuggestion ?? ""
+                        )
+                    } catch {
+                        let name = (path as NSString).lastPathComponent
+                        return (
+                            "Couldn’t delete “\(name)”", error.localizedDescription
+                        )
+                    }
+                }.value
+
+                if let failure {
+                    failures.append(failure)
+                } else {
+                    deleted.append(allowed[index].ref)
+                }
+
+                guard let self else { return }
+                self.deleteProgress = DeleteProgress(
+                    done: index + 1,
+                    total: paths.count,
+                    currentName: index + 1 < paths.count
+                        ? (paths[index + 1] as NSString).lastPathComponent : ""
                 )
             }
-        }
 
-        // Successes are applied even when part of the batch failed, so the tree
-        // never claims space that is already gone.
-        detach(deleted)
-        report(failures: failures, refusals: refusals, attempted: targets.count)
+            guard let self else { return }
+            self.deleteTask = nil
+            self.deleteProgress = nil
+            // Successes are applied even when part of the batch failed or was
+            // stopped, so the tree never claims space that is already gone.
+            self.detach(deleted)
+            self.report(
+                failures: failures,
+                refusals: refusals,
+                attempted: targets.count
+            )
+        }
     }
 
     /// Surfaces the first failure — a wall of alerts helps nobody — but says how
@@ -715,10 +808,16 @@ final class AppModel: ObservableObject {
         guard !refs.isEmpty else { return }
 
         // The File View walk reads this tree on `treeQueue`. Drop any walk that
-        // hasn't started, then wait out one that has, so nothing is traversing
-        // the nodes about to be unlinked.
+        // hasn't started, tell one that has to give up, then wait out whatever
+        // is left, so nothing is traversing the nodes about to be unlinked.
+        //
+        // The barrier stays: it is what makes the unlink safe, since a walk
+        // mid-traversal is reading the very arrays about to be mutated. The
+        // token is what makes it short — without it this waited out a full pass
+        // over every file in the scan.
         fileFilterWork?.cancel()
         fileFilterWork = nil
+        fileWalkToken.cancel()
         treeQueue.sync {}
 
         // Files come off first, highest index first: removing an entry shifts

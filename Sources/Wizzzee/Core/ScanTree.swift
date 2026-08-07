@@ -226,6 +226,21 @@ struct NodeRef: Hashable, Identifiable {
     }
 }
 
+/// A flag a background tree walk checks so it can give up part-way.
+///
+/// The walk reads nodes that a delete is about to unlink, so the delete has to
+/// know the walk has stopped touching them — cancelling the queued work item
+/// only helps if it hasn't started. This lets one that has started notice and
+/// return, which turns the delete's wait from a full pass over every file in the
+/// scan into the gap between two checks.
+final class WalkToken {
+    private let lock = UnfairLock()
+    private var cancelled = false
+
+    var isCancelled: Bool { lock.withLock { cancelled } }
+    func cancel() { lock.withLock { cancelled = true } }
+}
+
 /// Aggregate totals for one file extension across the whole scan.
 struct ExtensionStat: Identifiable, Hashable {
     /// Lowercased, without the leading dot. Empty means "no extension".
@@ -318,14 +333,21 @@ final class ScanResult {
     ///
     /// Walks the tree with a bounded min-heap instead of keeping a flat sorted
     /// array of every file, which on a full disk would cost tens of megabytes.
+    /// Returns an empty array if `token` is cancelled part-way: a caller that
+    /// gave up is about to change the tree this is reading, and a partial
+    /// ranking of it is worth nothing.
     func largestFiles(
         matching query: String = "",
         limit: Int = 1000,
-        metric: SizeMetric = .allocated
+        metric: SizeMetric = .allocated,
+        token: WalkToken? = nil
     ) -> [NodeRef] {
         let needle = query.lowercased()
         let matchPath = needle.contains("/")
         var heap = SizeHeap(limit: limit)
+        // Checked per directory rather than per file — the flag is behind a
+        // lock, and a directory is a short enough unit to keep the wait small.
+        var sinceCheck = 0
 
         // An explicit stack rather than recursion: nothing bounds how deep a
         // scanned tree goes, and this walk runs on a queue whose threads get a
@@ -336,6 +358,11 @@ final class ScanResult {
             (root, matchPath ? root.path : "")
         ]
         while let (dir, dirPath) = stack.popLast() {
+            sinceCheck += 1
+            if sinceCheck >= 64, let token {
+                sinceCheck = 0
+                if token.isCancelled { return [] }
+            }
             for i in dir.files.indices {
                 let file = dir.files[i]
                 if file.isDuplicateLink { continue }

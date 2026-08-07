@@ -44,7 +44,9 @@ struct ItemContextMenu: View {
             Text(Self.menuNote(for: refusal))
         } else {
             Button("Move to Trash") { model.moveToTrash(ref) }
+                .disabled(model.isDeleting)
             Button("Delete Permanently…") { model.permanentDeleteTargets = [ref] }
+                .disabled(model.isDeleting)
         }
     }
 
@@ -74,9 +76,11 @@ struct ItemContextMenu: View {
             Button("Move \(ByteFormat.count(refs.count)) Items to Trash") {
                 model.moveToTrash(refs)
             }
+            .disabled(model.isDeleting)
             Button("Delete \(ByteFormat.count(refs.count)) Items Permanently…") {
                 model.permanentDeleteTargets = refs
             }
+            .disabled(model.isDeleting)
         }
     }
 }

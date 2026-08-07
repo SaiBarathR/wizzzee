@@ -46,6 +46,8 @@ enum SelfTest {
         // distinguish from an earlier one having removed part of it.
         testScanRootIsNeverDeletable(root)
         testVolumeAndHomeRootsAreRefused()
+        testDeleteReturnsBeforeItHasFinished()
+        testDeleteCanBeStopped()
         testTrashUpdatesTree(root)
         testPermanentDeleteFolder(root)
         testStaleReferencesSurviveADelete(batchRoot)
@@ -370,6 +372,160 @@ enum SelfTest {
     }
 
 
+    /// The delete batch runs off the main actor, so the call has to come back to
+    /// the run loop before the work is done. Run on the main actor — where every
+    /// caller of it is — removing a large tree stopped the run loop for minutes:
+    /// no spinner, no progress, no cancel, and long enough that the system's
+    /// responsiveness watchdog could kill the app part-way through.
+    ///
+    /// Deterministic despite being about timing: the batch's task body only runs
+    /// once the main actor is yielded, so nothing can have been removed by the
+    /// time the call returns.
+    @MainActor
+    private static func testDeleteReturnsBeforeItHasFinished() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-async-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            for folder in ["bulk", "spare"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            for i in 0..<60 {
+                try write(base.appendingPathComponent("bulk/f\(i).dat"), bytes: 900)
+            }
+            try write(base.appendingPathComponent("spare/keep.dat"), bytes: 700)
+        } catch {
+            check("the async fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let bulk = result.root.subdir(named: "bulk"),
+            let spare = result.root.subdir(named: "spare")
+        else {
+            check("the async fixture scanned", false, "missing folders")
+            return
+        }
+        let bulkPath = bulk.path
+        let sparePath = spare.path
+
+        model.moveToTrash([NodeRef(bulk)])
+
+        check(
+            "the call returns while the batch is still running",
+            model.isDeleting,
+            "it had already finished, so the run loop was blocked for it"
+        )
+        check(
+            "nothing has been removed by the time it returns",
+            FileManager.default.fileExists(atPath: bulkPath),
+            "the delete ran synchronously on the main thread"
+        )
+        check(
+            "progress starts at nothing done",
+            model.deleteProgress?.done == 0
+                && model.deleteProgress?.total == 1,
+            "got \(String(describing: model.deleteProgress))"
+        )
+
+        // A second batch started mid-flight would resolve its paths against a
+        // tree the first is still changing.
+        model.moveToTrash([NodeRef(spare)])
+        check(
+            "a second batch is refused while one is running",
+            model.deleteProgress?.total == 1,
+            "the second batch replaced the first"
+        )
+
+        pumpUntilDeleteSettles(model)
+
+        check(
+            "the batch finishes and clears its progress",
+            !model.isDeleting && model.deleteProgress == nil,
+            "still reporting \(String(describing: model.deleteProgress))"
+        )
+        check(
+            "the folder is gone once it settles",
+            !FileManager.default.fileExists(atPath: bulkPath),
+            "still present"
+        )
+        check(
+            "the refused second batch never ran",
+            FileManager.default.fileExists(atPath: sparePath),
+            "it was deleted after all"
+        )
+        check(
+            "the tree is updated for the batch that did run",
+            result.root.subdir(named: "bulk") == nil
+                && result.root.totalFiles == 1,
+            "got \(result.root.totalFiles) files"
+        )
+    }
+
+    /// Stop has to be honoured before the next item is started. Cancelling
+    /// before the task body has had a chance to run means nothing is removed at
+    /// all, which is the one outcome that can be asserted without a race.
+    @MainActor
+    private static func testDeleteCanBeStopped() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-stop-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("doomed"),
+                withIntermediateDirectories: true
+            )
+            try write(base.appendingPathComponent("doomed/a.dat"), bytes: 1_000)
+        } catch {
+            check("the stop fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let doomed = result.root.subdir(named: "doomed") else {
+            check("the stop fixture scanned", false, "missing folder")
+            return
+        }
+        let path = doomed.path
+        let before = result.root.totalSize
+
+        model.moveToTrash([NodeRef(doomed)])
+        model.cancelDelete()
+        pumpUntilDeleteSettles(model)
+
+        check(
+            "stopping before the first item leaves it on disk",
+            FileManager.default.fileExists(atPath: path),
+            "it was removed anyway"
+        )
+        check(
+            "a stopped batch leaves the totals alone",
+            result.root.totalSize == before,
+            "root is \(result.root.totalSize), expected \(before)"
+        )
+        check(
+            "a stopped batch clears its progress",
+            !model.isDeleting,
+            "still reporting itself as running"
+        )
+        // The model has to be usable again afterwards, not stuck refusing every
+        // later batch because the cancelled one never released its slot.
+        model.moveToTrash([NodeRef(doomed)])
+        pumpUntilDeleteSettles(model)
+        check(
+            "a batch can be started again after a stop",
+            !FileManager.default.fileExists(atPath: path),
+            "the model stayed wedged after the cancelled batch"
+        )
+    }
+
     @MainActor
     private static func testTrashUpdatesTree(_ root: URL) {
         let model = AppModel()
@@ -387,7 +543,7 @@ enum SelfTest {
         let ref = NodeRef(dir: a, fileIndex: index)
         let size = a.files[index].size
 
-        model.moveToTrash(ref)
+        trash(model, [ref])
 
         check(
             "trashing reports no error",
@@ -447,7 +603,7 @@ enum SelfTest {
         // Captured while all three exist, then read once only one remains —
         // exactly what the menu holds across a delete.
         let last = NodeRef(dir: dir, fileIndex: 2)
-        model.moveToTrash([
+        trash(model, [
             NodeRef(dir: dir, fileIndex: 0), NodeRef(dir: dir, fileIndex: 1),
         ])
         check(
@@ -479,7 +635,7 @@ enum SelfTest {
         )
         // Aiming a stale reference at its parent folder would delete the wrong
         // thing entirely, so the surviving file must still be here afterwards.
-        model.deletePermanently([last])
+        deletePermanently(model, [last])
         check(
             "acting on a stale reference is a no-op, not a parent delete",
             FileManager.default.fileExists(atPath: dir.path)
@@ -519,7 +675,7 @@ enum SelfTest {
         model.refreshFileRows(immediately: true)
         usleep(300_000)
 
-        model.moveToTrash([NodeRef(dir: dir, fileIndex: 0)])
+        trash(model, [NodeRef(dir: dir, fileIndex: 0)])
 
         // Every row the model publishes, at every step, has to still name the
         // file it was built for.
@@ -712,7 +868,7 @@ enum SelfTest {
 
         let before = result.root.totalSize
         let beforeFiles = result.root.totalFiles
-        model.deletePermanently([rootRef])
+        deletePermanently(model, [rootRef])
 
         check(
             "deleting the scan root leaves it on disk",
@@ -732,7 +888,7 @@ enum SelfTest {
         )
 
         model.actionError = nil
-        model.moveToTrash([rootRef])
+        trash(model, [rootRef])
         check(
             "trashing the scan root is refused too",
             FileManager.default.fileExists(atPath: root.path)
@@ -828,6 +984,7 @@ enum SelfTest {
             )
         }
     }
+
     /// Two files in one folder, trashed together. Removing an entry renumbers
     /// every sibling after it, so the batch has to unlink from the back — done
     /// front-to-back this drops the wrong rows from the model while deleting the
@@ -852,7 +1009,7 @@ enum SelfTest {
         let before = result.root.totalSize
         let beforeFiles = result.root.totalFiles
 
-        model.moveToTrash([
+        trash(model, [
             NodeRef(dir: dir, fileIndex: 0), NodeRef(dir: dir, fileIndex: 2),
         ])
 
@@ -911,7 +1068,7 @@ enum SelfTest {
         let beforeDirs = result.root.totalDirs
 
         model.selection = [NodeRef(nest)]
-        model.deletePermanently([
+        deletePermanently(model, [
             NodeRef(nest), NodeRef(inner), NodeRef(dir: nest, fileIndex: topIndex),
         ])
 
@@ -968,7 +1125,7 @@ enum SelfTest {
         let bSize = b.totalSize
         let bFiles = b.totalFiles
 
-        model.deletePermanently(NodeRef(b))
+        deletePermanently(model, [NodeRef(b)])
 
         check(
             "deleting a folder reports no error",
@@ -1271,6 +1428,34 @@ enum SelfTest {
             if !model.isFilteringFiles && model.fileRows.count == expecting { return }
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
+    }
+
+    /// Trashes `refs` and runs the main run loop until the batch has finished.
+    ///
+    /// The delete itself runs off the main actor so a large tree can't stop the
+    /// run loop, which means the assertions after it would otherwise read the
+    /// tree before anything had been removed.
+    @MainActor
+    private static func trash(_ model: AppModel, _ refs: Set<NodeRef>) {
+        model.moveToTrash(refs)
+        pumpUntilDeleteSettles(model)
+    }
+
+    @MainActor
+    private static func deletePermanently(_ model: AppModel, _ refs: Set<NodeRef>) {
+        model.deletePermanently(refs)
+        pumpUntilDeleteSettles(model)
+    }
+
+    @MainActor
+    private static func pumpUntilDeleteSettles(_ model: AppModel) {
+        let deadline = Date().addingTimeInterval(30)
+        while model.isDeleting && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        // One more turn so the batch's own completion work — detaching the
+        // successes and reporting failures — has run before anything is checked.
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
     }
 
     /// Runs the main run loop until the model leaves `.scanning`.
