@@ -9,6 +9,8 @@ struct TreemapCanvas: NSViewRepresentable {
     let selection: NodeRef?
     /// Bumped whenever the tree is mutated, to force a fresh layout.
     let revision: Int
+    /// The model's treemap queue, which a delete fences before unlinking nodes.
+    let layoutQueue: DispatchQueue
 
     let onSelect: (NodeRef) -> Void
     let onZoom: (DirNode) -> Void
@@ -16,6 +18,7 @@ struct TreemapCanvas: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TreemapNSView {
         let view = TreemapNSView()
+        view.layoutQueue = layoutQueue
         view.onSelect = onSelect
         view.onZoom = onZoom
         view.onHover = onHover
@@ -23,6 +26,7 @@ struct TreemapCanvas: NSViewRepresentable {
     }
 
     func updateNSView(_ view: TreemapNSView, context: Context) {
+        view.layoutQueue = layoutQueue
         view.onSelect = onSelect
         view.onZoom = onZoom
         view.onHover = onHover
@@ -53,10 +57,9 @@ final class TreemapNSView: NSView {
     private var renderToken = 0
     private var layoutSize: CGSize = .zero
     private var resizeDebounce: DispatchWorkItem?
-    private let renderQueue = DispatchQueue(
-        label: "wizzzee.treemap.render",
-        qos: .userInitiated
-    )
+    /// Where layout and rasterizing run. Supplied by the model rather than made
+    /// here, because a delete has to be able to fence against it.
+    var layoutQueue: DispatchQueue?
 
     // Layout uses a top-left origin, like the tree table.
     override var isFlipped: Bool { true }
@@ -115,24 +118,37 @@ final class TreemapNSView: NSView {
             }
         }
 
-        guard let root, size.width > 4, size.height > 4, root.totalSize > 0 else {
+        guard let root, size.width > 4, size.height > 4, root.totalSize > 0,
+            let queue = layoutQueue
+        else {
             model = TreemapModel()
             image = nil
             needsDisplay = true
             return
         }
 
-        // Layout walks the live tree, so it stays on the main thread; the tree
-        // can be mutated by a delete at any time. Rasterizing only touches the
-        // resulting value types, so that part goes to a background queue.
-        let built = TreemapLayout.build(root: root, size: size, metric: metric)
-        model = built
+        // Layout walks the live tree — allocating and sorting a `[NodeRef]` per
+        // directory it visits — and it runs again on every resize step, zoom,
+        // metric change and tree revision. On the main thread that was tens of
+        // milliseconds of stopped run loop each time, and a folder with a very
+        // large number of entries in one directory is far worse.
+        //
+        // It goes to the model's treemap queue, which `AppModel.detach` fences
+        // before it unlinks anything: the layout reads nodes a delete would
+        // otherwise be freeing underneath it. Rasterizing only touches the
+        // value types the layout produced, so it follows on the same queue
+        // rather than hopping to another.
+        let metric = self.metric
         let scale = window?.backingScaleFactor ?? 2
 
-        renderQueue.async { [weak self] in
+        queue.async { [weak self] in
+            let built = TreemapLayout.build(root: root, size: size, metric: metric)
             let rendered = TreemapRenderer.render(model: built, scale: scale)
             DispatchQueue.main.async {
                 guard let self, token == self.renderToken else { return }
+                // Both land together, so the borders and labels drawn from the
+                // model always describe the image underneath them.
+                self.model = built
                 self.image = rendered.map { NSImage(cgImage: $0, size: size) }
                 self.needsDisplay = true
             }

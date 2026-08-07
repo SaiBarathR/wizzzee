@@ -118,7 +118,7 @@ When no other name is in the tree — a link whose partner lives outside the sca
 the Time Machine case — nothing is promoted and the subtraction stands, which is
 correct: those bytes really have left the scanned tree.
 
-## 3. Move treemap layout off the main thread — *still open*
+## 3. Move treemap layout off the main thread — *done, shipped in 0.3.1*
 
 `TreemapLayout.build` walks the live tree, allocating and sorting a `[NodeRef]`
 per visited directory, on the main thread; only the rasterisation goes to
@@ -130,15 +130,32 @@ folders) — not a visible stall. The 239 ms in the review was a debug build. A
 folder with 200,000 entries in a single directory would be far worse, but that is
 not the common case.
 
-**Shape of the work** — snapshot the subtree into a `Sendable` value form (id,
-weight, extIndex, children) once per `treeRevision`, then run both `build` and
-`render` on `renderQueue` keyed by the existing `renderToken`. This also retires
-the `TreemapModel.ancestors` pinning, which exists only because the layout holds
-live `DirNode`s across a possible delete.
+**The snapshot was not needed.** The plan called for copying the subtree into a
+`Sendable` value form so the layout could never see a live `DirNode`. That is a
+real refactor — cells and frames would have to carry indices instead of
+`NodeRef`s, rippling through hit-testing, labels and tooltips — and it buys
+nothing the app doesn't already have a mechanism for.
 
-**Recommendation** — 0.3.2 or later. It is a real refactor of the layout's ownership
-model with no correctness bug behind it, and 0.3 is stronger as a focused safety
-release.
+`AppModel.treeQueue` exists precisely so "every background read of the scan tree
+runs here, so a delete can make itself exclusive by syncing against it". The
+treemap is another background read of the same tree. It now runs on a sibling
+queue, `treemapQueue`, which `detach` fences alongside `treeQueue` before it
+unlinks anything.
+
+A sibling rather than the same queue: sharing `treeQueue` would put every layout
+behind a File View walk over the whole scan, and the treemap would arrive a
+second late on a big disk. The two only read, so they may overlap each other;
+what neither may do is overlap a delete.
+
+Layout and rasterizing now happen in one hop on that queue and land together, so
+the borders and labels drawn from the model always describe the image under
+them. `TreemapModel.ancestors` pinning stays — it is what keeps a laid-out cell's
+parent chain alive, and it was never the thing standing in the way.
+
+**Verified with Thread Sanitizer.** `testTreemapLayoutIsFencedAgainstDeletes`
+leaves 24 layouts in flight and deletes a folder underneath them. It passes clean
+under `--sanitize=thread`; with the fence removed, TSan reports the race. That
+check is what makes the argument above testable rather than merely plausible.
 
 ---
 

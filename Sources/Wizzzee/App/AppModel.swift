@@ -243,6 +243,17 @@ final class AppModel: ObservableObject {
         label: "com.wizzzee.tree-read",
         qos: .userInitiated
     )
+    /// Where the treemap lays itself out.
+    ///
+    /// Its own queue rather than sharing `treeQueue`, which would put every
+    /// layout behind a File View walk over the whole scan — the treemap would
+    /// arrive a second late on a big disk. The two only read the tree, so they
+    /// are free to run at the same time as each other; what they must not do is
+    /// run while a delete unlinks nodes, which `detach` handles by fencing both.
+    let treemapQueue = DispatchQueue(
+        label: "com.wizzzee.treemap-layout",
+        qos: .userInitiated
+    )
 
     init() {
         volumes = VolumeInfo.current()
@@ -819,6 +830,10 @@ final class AppModel: ObservableObject {
         fileFilterWork = nil
         fileWalkToken.cancel()
         treeQueue.sync {}
+        // The treemap reads the same tree, on its own queue, so it is fenced
+        // too. A layout in flight is short — tens of milliseconds — and only
+        // this makes it safe to run it off the main thread at all.
+        treemapQueue.sync {}
 
         // Files come off first, highest index first: removing an entry shifts
         // every sibling after it, so any other order unlinks the wrong ones.
