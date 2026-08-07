@@ -575,10 +575,50 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Space deleting `refs` would actually reclaim, counting a folder's
-    /// contents once rather than once per nested selection.
+    /// Why `ref` can't be removed, or nil when it can.
+    ///
+    /// The scan root is checked here as well as in `FileActions`, because only
+    /// the model knows what the scan was rooted at: a scan of `~/Projects` makes
+    /// that folder the root, and it is selected the instant the scan lands.
+    func deletionRefusal(for ref: NodeRef) -> FileActions.ActionError? {
+        if ref.isDirectory, ref.dir.isRoot {
+            return .undeletableRoot(ref.path)
+        }
+        if FileActions.isUndeletableRoot(ref.path) {
+            return .undeletableRoot(ref.path)
+        }
+        if FileActions.isSystemProtected(ref.path) {
+            return .systemProtected(ref.path)
+        }
+        return nil
+    }
+
+    /// True when anything in `refs` may not be removed, so the menu can offer an
+    /// explanation in place of actions that would only fail.
+    func isDeletionRefused(_ refs: Set<NodeRef>) -> Bool {
+        refs.contains { deletionRefusal(for: $0) != nil }
+    }
+
+    /// Space deleting `refs` would actually reclaim: a folder's contents counted
+    /// once rather than once per nested selection, measured with the metric on
+    /// show, and hard-linked files counted as freeing nothing.
+    ///
+    /// This number is the last thing a user reads before an irreversible delete,
+    /// so it errs low. Counting logical size while the whole UI defaults to
+    /// allocated promised 200 GB back from a sparse image that occupies 8 GB;
+    /// counting a hard link's bytes promised space that deleting one of its
+    /// names never frees.
     func reclaimableSize(_ refs: Set<NodeRef>) -> UInt64 {
-        distinctTargets(refs).reduce(0) { $0 + $1.size }
+        distinctTargets(refs).reduce(0) { total, ref in
+            if let file = ref.file, file.sharesStorage { return total }
+            return total + (sizeMetric == .logical ? ref.size : ref.alloc)
+        }
+    }
+
+    /// Whether any target's bytes live under more than one name, which makes the
+    /// reclaimable figure a ceiling rather than a promise.
+    func selectionSharesStorage(_ refs: Set<NodeRef>) -> Bool {
+        distinctTargets(refs).contains { $0.file?.sharesStorage == true }
     }
 
     private func performBatch(
@@ -590,11 +630,12 @@ final class AppModel: ObservableObject {
         let targets = distinctTargets(refs).map { (ref: $0, path: $0.path) }
         guard !targets.isEmpty else { return }
 
-        let allowed = targets.filter { !FileActions.isSystemProtected($0.path) }
+        let refusals = targets.compactMap { deletionRefusal(for: $0.ref) }
+        let allowed = targets.filter { deletionRefusal(for: $0.ref) == nil }
         guard !allowed.isEmpty else {
-            // Nothing worth attempting: the protection itself is the only useful
+            // Nothing worth attempting: the refusal itself is the only useful
             // thing to say, and it explains why the space can't be reclaimed.
-            let error = FileActions.ActionError.systemProtected(targets[0].path)
+            let error = refusals[0]
             actionError = error.errorDescription
             actionErrorDetail = error.recoverySuggestion
             return
@@ -624,11 +665,7 @@ final class AppModel: ObservableObject {
         // Successes are applied even when part of the batch failed, so the tree
         // never claims space that is already gone.
         detach(deleted)
-        report(
-            failures: failures,
-            protected: targets.count - allowed.count,
-            attempted: targets.count
-        )
+        report(failures: failures, refusals: refusals, attempted: targets.count)
     }
 
     /// Surfaces the first failure — a wall of alerts helps nobody — but says how
@@ -636,24 +673,34 @@ final class AppModel: ObservableObject {
     /// one.
     private func report(
         failures: [(title: String, detail: String)],
-        protected: Int,
+        refusals: [FileActions.ActionError],
         attempted: Int
     ) {
-        let unfinished = failures.count + protected
+        let unfinished = failures.count + refusals.count
         guard unfinished > 0 else { return }
-        if unfinished == 1, let only = failures.first {
+        if unfinished == 1 {
+            let only =
+                failures.first
+                ?? (
+                    refusals[0].errorDescription ?? "Couldn’t remove an item",
+                    refusals[0].recoverySuggestion ?? ""
+                )
             actionError = only.title
             actionErrorDetail = only.detail.isEmpty ? nil : only.detail
             return
         }
         actionError = "\(ByteFormat.count(unfinished)) of "
             + "\(ByteFormat.count(attempted)) items couldn’t be removed"
+        // The refusals carry their own explanation — one names the sealed system
+        // volume, the other a volume or home root — so the first of each kind is
+        // quoted rather than assuming they were all the same thing.
         var detail: [String] = []
-        if protected > 0 {
-            detail.append(
-                "\(ByteFormat.count(protected)) live on the sealed system "
-                    + "volume, which System Integrity Protection makes read-only."
-            )
+        var seen = Set<String>()
+        for reason in refusals {
+            guard let suggestion = reason.recoverySuggestion,
+                seen.insert(suggestion).inserted
+            else { continue }
+            detail.append(suggestion)
         }
         if let first = failures.first {
             detail.append("\(first.title). \(first.detail)")

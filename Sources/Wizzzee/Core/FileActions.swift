@@ -6,12 +6,16 @@ import UniformTypeIdentifiers
 enum FileActions {
     enum ActionError: LocalizedError {
         case systemProtected(String)
+        /// A whole volume, a home folder, or the folder a scan was rooted at.
+        case undeletableRoot(String)
         case failed(String, String)
 
         var errorDescription: String? {
             switch self {
             case .systemProtected(let path):
                 return "“\((path as NSString).lastPathComponent)” is protected by macOS"
+            case .undeletableRoot(let path):
+                return "“\(path)” is a root folder"
             case .failed(let path, _):
                 return "Couldn’t delete “\((path as NSString).lastPathComponent)”"
             }
@@ -24,6 +28,12 @@ enum FileActions {
                     It lives on the sealed system volume, which System Integrity \
                     Protection makes read-only. Nothing can remove it — not even \
                     an administrator — so this space cannot be reclaimed.
+                    """
+            case .undeletableRoot:
+                return """
+                    Wizzzee won't delete a whole volume, a home folder, or the \
+                    folder a scan was rooted at. Open it and remove what's \
+                    inside instead.
                     """
             case .failed(_, let reason):
                 return reason
@@ -67,12 +77,44 @@ enum FileActions {
         "/System/", "/usr/", "/bin/", "/sbin/", "/private/var/db/",
     ]
 
+    /// Writable locations that sit underneath a protected prefix.
+    ///
+    /// `/System/Volumes/Data` is the mount point of the writable APFS data
+    /// volume, and a legitimate scan target — it is exactly what a scan of `/`
+    /// skips to avoid double-counting firmlinks, so seeing inside it means
+    /// scanning it directly. Without this, every path in such a scan begins
+    /// `/System/` and every delete was refused with a flatly false claim that
+    /// the user's own home directory was on the read-only system volume.
+    private static let writableExceptions = ["/usr/local", "/System/Volumes/Data"]
+
     static func isSystemProtected(_ path: String) -> Bool {
-        // /usr/local and /opt are writable exceptions carved out of SIP. Matched
-        // as a whole component, so a sibling like /usr/locality isn't exempted
-        // along with it.
-        if path == "/usr/local" || path.hasPrefix("/usr/local/") { return false }
+        // Matched as whole path components — each prefix ends in "/", so a
+        // sibling like /usr/locality or /Systemic isn't caught with them.
+        for exception in writableExceptions {
+            if path == exception || path.hasPrefix(exception + "/") { return false }
+        }
         return protectedPrefixes.contains { path.hasPrefix($0) }
+    }
+
+    /// True when the path names an entire volume or a whole home folder.
+    ///
+    /// A scan is normally rooted at one of these, and its root row is selected
+    /// the moment the scan lands — so the very first "Delete Permanently…" a
+    /// user reached for was aimed at everything they had just measured. None of
+    /// the SIP prefixes cover `/` or `/Users/<name>`, so nothing else stops it.
+    static func isUndeletableRoot(_ path: String) -> Bool {
+        var trimmed = path
+        while trimmed.count > 1 && trimmed.hasSuffix("/") { trimmed.removeLast() }
+        if trimmed.isEmpty || trimmed == "/" { return true }
+        if trimmed == NSHomeDirectory() { return true }
+
+        let parts = trimmed.split(separator: "/", omittingEmptySubsequences: true)
+        // /Volumes/<name>, the mount point of an external or secondary volume.
+        if parts.count == 2 && parts[0] == "Volumes" { return true }
+        // /Users/<name>, which is someone's home folder even when it isn't this
+        // process's own — a scan run with Full Disk Access reaches all of them.
+        if parts.count == 2 && parts[0] == "Users" { return true }
+        return false
     }
 
     /// True when *any* of `refs` is protected. A bulk action that silently did
@@ -83,6 +125,7 @@ enum FileActions {
     }
 
     static func moveToTrash(_ path: String) throws {
+        if isUndeletableRoot(path) { throw ActionError.undeletableRoot(path) }
         if isSystemProtected(path) { throw ActionError.systemProtected(path) }
         do {
             try FileManager.default.trashItem(
@@ -95,6 +138,7 @@ enum FileActions {
     }
 
     static func deletePermanently(_ path: String) throws {
+        if isUndeletableRoot(path) { throw ActionError.undeletableRoot(path) }
         if isSystemProtected(path) { throw ActionError.systemProtected(path) }
         do {
             try FileManager.default.removeItem(atPath: path)

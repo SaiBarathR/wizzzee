@@ -83,9 +83,17 @@ struct ContentView: View {
 
     private var deleteMessage: String {
         let targets = model.permanentDeleteTargets
-        let warning =
+        var warning =
             "\(ByteFormat.decimal(model.reclaimableSize(targets))) will be "
             + "reclaimed. This bypasses the Trash and cannot be undone."
+        // Hard-linked bytes stay on disk under their other names, so the figure
+        // above deliberately excludes them and says so rather than quoting a
+        // number that `df` will not agree with afterwards.
+        if model.selectionSharesStorage(targets) {
+            warning +=
+                " Some of these are hard links whose data has another name on "
+                + "disk; removing them frees nothing on their own."
+        }
         if targets.count == 1, let single = targets.first {
             return "\(single.path)\n\n\(warning)"
         }
