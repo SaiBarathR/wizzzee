@@ -171,7 +171,10 @@ final class AppModel: ObservableObject {
     // Tree View
     @Published private(set) var treeRows: [TreeRow] = []
     @Published var treeSort: [TreeSort] = [TreeSort(.allocated)]
-    private var expanded: Set<ObjectIdentifier> = []
+    /// Keyed on `DirNode.id` rather than `ObjectIdentifier`, which is the
+    /// object's address and can be handed to a different node once a delete has
+    /// freed the one it belonged to.
+    private var expanded: Set<UInt64> = []
 
     // File View
     @Published private(set) var fileRows: [FileRow] = []
@@ -330,7 +333,7 @@ final class AppModel: ObservableObject {
         treemapRoot = scanned.root
         selection = [NodeRef(scanned.root)]
         // Open the root so the biggest folders are visible immediately.
-        expanded = [ObjectIdentifier(scanned.root)]
+        expanded = [scanned.root.id]
         rebuildTreeRows()
         refreshFileRows(immediately: true)
     }
@@ -353,22 +356,20 @@ final class AppModel: ObservableObject {
     // MARK: - Tree View rows
 
     func isExpanded(_ dir: DirNode) -> Bool {
-        expanded.contains(ObjectIdentifier(dir))
+        expanded.contains(dir.id)
     }
 
     func toggleExpansion(_ dir: DirNode) {
-        let key = ObjectIdentifier(dir)
-        if expanded.contains(key) {
-            expanded.remove(key)
+        if expanded.contains(dir.id) {
+            expanded.remove(dir.id)
         } else {
-            expanded.insert(key)
+            expanded.insert(dir.id)
         }
         rebuildTreeRows()
     }
 
     func setExpanded(_ dir: DirNode, _ isOpen: Bool) {
-        let key = ObjectIdentifier(dir)
-        if isOpen { expanded.insert(key) } else { expanded.remove(key) }
+        if isOpen { expanded.insert(dir.id) } else { expanded.remove(dir.id) }
         rebuildTreeRows()
     }
 
@@ -381,7 +382,7 @@ final class AppModel: ObservableObject {
             chain.append(current)
             node = current.parent
         }
-        for dir in chain { expanded.insert(ObjectIdentifier(dir)) }
+        for dir in chain { expanded.insert(dir.id) }
         selection = [ref]
         rebuildTreeRows()
     }

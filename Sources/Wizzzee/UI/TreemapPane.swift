@@ -81,10 +81,18 @@ struct ExtensionLegend: View {
 
     /// Ranked by whichever metric is showing, so the legend order matches the
     /// treemap's tile sizes.
+    ///
+    /// A computed property here re-sorted every extension in the scan —
+    /// thousands on a real disk — on each body evaluation, which this view gets
+    /// for any change published by the model, hovering the treemap included.
+    /// The allocated order is instead derived once per scan and cached.
     private var stats: [ExtensionStat] {
-        let all = model.result?.extensionStats ?? []
-        guard model.sizeMetric == .allocated else { return Array(all.prefix(40)) }
-        return Array(all.sorted { $0.alloc > $1.alloc }.prefix(40))
+        guard let result = model.result else { return [] }
+        if model.sizeMetric == .logical {
+            // Already stored in descending size order.
+            return Array(result.extensionStats.prefix(40))
+        }
+        return result.topByAllocated
     }
 
     private func weight(_ stat: ExtensionStat) -> UInt64 {

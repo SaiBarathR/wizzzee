@@ -76,7 +76,6 @@ final class TreemapNSView: NSView {
         self.root = root
         self.metric = metric
         self.revision = revision
-        hovered = nil
         rebuild()
     }
 
@@ -100,6 +99,21 @@ final class TreemapNSView: NSView {
         let token = renderToken
         let size = bounds.size
         layoutSize = size
+
+        // Cleared here rather than in `apply`, which the resize path doesn't go
+        // through: dragging the splitter with the pointer over the map re-laid
+        // it out underneath the cursor while the hover outline kept being
+        // stroked at the old cell's rect, over entirely different tiles.
+        if hovered != nil {
+            hovered = nil
+            // Announced on the next turn of the run loop, never inline:
+            // `rebuild()` is reachable from `updateNSView`, and publishing model
+            // state from inside a SwiftUI view update is not allowed.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.hovered == nil else { return }
+                self.onHover?(nil)
+            }
+        }
 
         guard let root, size.width > 4, size.height > 4, root.totalSize > 0 else {
             model = TreemapModel()
@@ -368,11 +382,17 @@ final class TreemapNSView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         pointerLocation = point
         let found = model.cell(at: point)
-        if found?.ref != hovered?.ref {
+        let changed = found?.ref != hovered?.ref
+        if changed {
             hovered = found
             onHover?(found?.ref)
         }
-        needsDisplay = true
+        // A redraw here re-strokes every group border and lays out an attributed
+        // string per labelled folder, so it is worth skipping when nothing on
+        // screen would differ. Moving within one tile still redraws — the
+        // tooltip follows the pointer — but sweeping across empty space no
+        // longer does.
+        if changed || hovered != nil { needsDisplay = true }
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -386,19 +406,22 @@ final class TreemapNSView: NSView {
         let point = convert(event.locationInWindow, from: nil)
 
         if event.clickCount >= 2 {
-            // Zoom into the innermost folder under the pointer. A file tile
-            // zooms to its containing folder.
-            if let cell = model.cell(at: point), !cell.ref.isDirectory {
-                if let frame = model.frame(at: point), frame.depth > 0 {
-                    onZoom?(frame.dir)
-                    return
-                }
+            // A folder drawn as a single tile — too small or too deep to
+            // subdivide — has no frame of its own, so asking for the innermost
+            // frame here returned its *parent* and the zoom either went the
+            // wrong way or, at the map's root, did nothing at all. That tile is
+            // the only way to drill past the layout's depth limit, so it is
+            // matched before falling back to the enclosing frame.
+            if let cell = model.cell(at: point), cell.ref.isDirectory {
                 onZoom?(cell.ref.dir)
                 return
             }
+            // A file tile zooms to the innermost folder that contains it.
             if let frame = model.frame(at: point), frame.depth > 0 {
                 onZoom?(frame.dir)
+                return
             }
+            if let cell = model.cell(at: point) { onZoom?(cell.ref.dir) }
             return
         }
 
