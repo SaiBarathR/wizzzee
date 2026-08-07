@@ -204,12 +204,22 @@ final class TreemapNSView: NSView {
         shadow.shadowOffset = .zero
 
         let lineHeight: CGFloat = 13
+        // Keep the label off the tile's top-left corner so it reads as sitting
+        // inside the group instead of clipped against its top and left edges.
+        // A group at the very edge of the pane has its first few points hidden
+        // under the surrounding chrome, so the inset has to clear that too.
+        let insetX: CGFloat = 12
+        let insetTop: CGFloat = 8
+        // Only the left gap is spent twice over; the right side just needs
+        // enough room that the truncation ellipsis isn't flush to the border.
+        let trailingGap: CGFloat = 4
         var placed: [CGRect] = []
 
         // frames are appended depth-first, so shallower groups get first claim.
         for frame in model.frames where frame.depth > 0 {
             guard frame.depth <= 4 else { continue }
-            guard frame.rect.width >= 62, frame.rect.height >= 16 else { continue }
+            guard frame.rect.width >= 62, frame.rect.height >= insetTop + lineHeight
+            else { continue }
 
             let label =
                 "\(frame.dir.name) (\(ByteFormat.decimal(sizeValue(frame.dir))))"
@@ -222,11 +232,14 @@ final class TreemapNSView: NSView {
                 .shadow: shadow,
             ]
             let string = NSAttributedString(string: label, attributes: attributes)
-            let width = min(string.size().width + 2, frame.rect.width - 5)
+            let width = min(
+                string.size().width + 2,
+                frame.rect.width - insetX - trailingGap
+            )
 
             var textRect = CGRect(
-                x: frame.rect.minX + 3,
-                y: frame.rect.minY + 2,
+                x: frame.rect.minX + insetX,
+                y: frame.rect.minY + insetTop,
                 width: width,
                 height: lineHeight
             )
