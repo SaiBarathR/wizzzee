@@ -15,14 +15,30 @@ struct FileEntry {
     var isSymlink: Bool
     /// A hard link whose size was already counted under another path.
     var isDuplicateLink: Bool
-    /// Names this file's inode has on the volume. Above 1, deleting this one
-    /// frees nothing until the last of them goes, so the space a delete can
-    /// promise is not this file's size.
-    var linkCount: UInt32 = 1
+    /// How many names this file's inode has on the volume, saturating at 255.
+    ///
+    /// Above 1, deleting this name frees nothing until the last of them goes.
+    /// It drops as the other names are removed, so a file that ends up the sole
+    /// survivor stops being treated as sharing its storage.
+    ///
+    /// A byte rather than the `UInt32` the filesystem reports: the value is only
+    /// ever compared against 1, and a wider field would push this struct from 56
+    /// bytes to 64 once `fileID` is added — 32 MB on a full-disk scan. A
+    /// saturated count is never decremented, since the real number is unknown.
+    var linkCount: UInt8 = 1
+
+    /// True when this name shares its bytes with another, so removing it frees
+    /// nothing on its own.
+    var isHardLinked: Bool { linkCount > 1 || linkCount == UInt8.max }
+    /// Inode number, used to pair the names of one hard-linked file.
+    ///
+    /// Unique per volume, and a scan never leaves the volume it started on, so
+    /// within one `ScanResult` this identifies the storage a name points at.
+    var fileID: UInt64 = 0
 
     /// True when the bytes survive this name being removed, either because
     /// another name was already counted for them or because one still exists.
-    var sharesStorage: Bool { isDuplicateLink || linkCount > 1 }
+    var sharesStorage: Bool { isDuplicateLink || isHardLinked }
 }
 
 /// Why a directory's contents are missing from the scan.
@@ -277,7 +293,10 @@ final class ScanResult {
 
     let elapsed: TimeInterval
     let deniedCount: Int
-    let hardLinkSavings: UInt64
+    /// Bytes that would be double-counted if every name of a hard-linked file
+    /// were counted in full. Falls as duplicates are promoted or removed, so the
+    /// status line keeps describing the tree actually on show.
+    private(set) var hardLinkSavings: UInt64
     let volumeTotal: UInt64
     let volumeFree: UInt64
     let volumeUsed: UInt64
@@ -393,6 +412,58 @@ final class ScanResult {
 
     /// Total across every file, ignoring hard-link duplicates.
     var fileCount: Int { root.totalFiles }
+
+    /// Records that one name of a hard-linked file is being removed, and fixes
+    /// up the names that remain.
+    ///
+    /// The scan counts such a file's bytes once, under whichever of its names a
+    /// worker reached first, and marks the rest as duplicates worth nothing.
+    /// Two things then have to happen when a name goes:
+    ///
+    /// - Every surviving name loses a link. One left as the last name stops
+    ///   sharing its storage, so a delete can promise its bytes back again.
+    /// - If the name leaving is the one carrying the bytes, a survivor takes
+    ///   over the count — the bytes are still on disk under that other name,
+    ///   and dropping them from the totals would have the tree disagree with
+    ///   the disk until the next scan.
+    ///
+    /// One full walk, affordable because it only runs when a hard-linked file is
+    /// actually removed. Returns the promoted name's folder and the bytes it now
+    /// accounts for, or nil when there was nothing in the tree to promote.
+    @discardableResult
+    func releaseHardLink(
+        at leaving: (dir: DirNode, index: Int),
+        promoting wantsPromotion: Bool
+    ) -> (dir: DirNode, size: UInt64, alloc: UInt64)? {
+        let fileID = leaving.dir.files[leaving.index].fileID
+        var promoted: (dir: DirNode, size: UInt64, alloc: UInt64)?
+
+        var stack: [DirNode] = [root]
+        while let dir = stack.popLast() {
+            for i in dir.files.indices where dir.files[i].fileID == fileID {
+                if dir === leaving.dir && i == leaving.index { continue }
+
+                // A saturated count is left alone: the real number of names is
+                // unknown, so decrementing could wrongly reach 1.
+                if dir.files[i].linkCount > 1, dir.files[i].linkCount < .max {
+                    dir.files[i].linkCount -= 1
+                }
+                if wantsPromotion, promoted == nil, dir.files[i].isDuplicateLink {
+                    dir.files[i].isDuplicateLink = false
+                    promoted = (dir, dir.files[i].size, dir.files[i].alloc)
+                    hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                }
+            }
+            stack.append(contentsOf: dir.subdirs)
+        }
+        return promoted
+    }
+
+    /// Drops `size` from the double-counting statistic when a duplicate name is
+    /// removed outright rather than promoted.
+    func forgetDuplicate(size: UInt64) {
+        hardLinkSavings -= min(hardLinkSavings, size)
+    }
 }
 
 /// Bounded min-heap that keeps the `limit` largest items seen.

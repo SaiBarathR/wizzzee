@@ -10,19 +10,19 @@ where the mechanism or severity was wrong, and rejected 1 outright.
 | Severity | Reported | Confirmed | Corrected | Rejected | Fixed | Partly fixed | Deferred |
 |---|---|---|---|---|---|---|---|
 | Critical | 1 | 1 | — | — | 1 | — | — |
-| High | 3 | 2 | 1 | — | 2 | 1 | — |
+| High | 3 | 2 | 1 | — | 3 | — | — |
 | Medium | 8 | 6 | 1 | 1 | 6 | — | 1 |
 | Low | 6 | 6 | — | — | 6 | — | — |
-| **Total** | **18** | **15** | **2** | **1** | **15** | **1** | **1** |
+| **Total** | **18** | **15** | **2** | **1** | **16** | **—** | **1** |
 
-Finding 2 is partly fixed: the number the delete dialog promises is now correct
-in both directions, but the tree's own totals after deleting the surviving name
-of a hard-linked pair still under-report. The reason is in that section.
+0.3.0 shipped 15 of these; finding 2's remaining half landed in 0.3.1. The one
+still open is finding 12, treemap layout on the main thread — 19–20 ms in
+release, with no correctness bug behind it.
 
 Validation after the fixes: `swift build` succeeds with no new warnings (the one
 `SendableClosureCaptures` warning on the scan dispatch in `AppModel.startScan`
 is present in the baseline too, confirmed by building a full stash of it),
-self-test **113/113** in both debug and release (was 88 — 25 new checks). No scan
+self-test **144/144** in both debug and release (was 88 — 56 new checks). No scan
 or layout regression: `~/Library` (427k files) scans in 6.1–6.3 s before and
 after, treemap layout 19–20 ms before and after, unreadable-directory count
 unchanged at 147–149.
@@ -69,7 +69,7 @@ points, trailing slashes, and that ordinary paths inside them stay deletable.
 
 ## High
 
-### 2. Hard-linked files were mis-accounted on delete, in both directions — PARTLY FIXED
+### 2. Hard-linked files were mis-accounted on delete, in both directions — FIXED
 
 `detachFile` subtracts `0` for a file marked `isDuplicateLink`, but
 `reclaimableSize` counted every ref at full `.size`. Using the self-test's own
@@ -90,18 +90,36 @@ nothing, and the confirmation dialog says so explicitly rather than quoting a
 figure `df` will disagree with. This covers both directions — neither name of a
 pair now promises space it cannot deliver.
 
-**Not fixed: the totals afterwards.** `detachFile` still subtracts the full size
-when the *surviving* name is the one deleted, so the tree under-reports relative
-to disk until a rescan. Correcting it needs to know whether another name for the
-same inode is still inside the scan, and `FileEntry` deliberately does not store
-the inode — it is sized to hold several million files. The alternative, always
-subtracting zero for a linked file, is wrong the other way whenever the other
-name lives outside the scan. That trade-off is a design decision, not a
-mechanical fix; see `docs/plan-0.3.md`.
+**Fixed in 0.3.1: the totals afterwards.** `detachFile` used to subtract the full
+size when the *surviving* name was the one deleted, so the tree under-reported
+against disk until a rescan.
+
+The objection recorded here originally was memory: pairing two names needs the
+inode, and `FileEntry` is allocated once per file — several million on a
+full-disk scan — so an extra `UInt64` looked like +32 MB. It isn't, because the
+struct had six bytes of tail padding. Narrowing the link count from the
+filesystem's `UInt32` to a saturating `UInt8` — the value is only ever compared
+against 1 — paid for `fileID` exactly, and `FileEntry` is still **56 bytes**.
+A check now asserts that, so a carelessly added field can't quietly round it to
+64.
+
+With the inode available, removing a name walks the tree once and does two
+things: every surviving name loses a link, so one left alone stops counting as
+shared and can promise its bytes again; and if the departing name was the one
+carrying the bytes, a survivor takes over the count. Bytes move between the two
+folders' chains rather than leaving the tree, which is right — they are still on
+disk. When no other name is in the tree the promotion doesn't fire and the
+subtraction stands, which is also right: those bytes really have left the scan.
 
 **Tests added** — `testHardLinkPromisesNoSpace` asserts both names of the pair
-promise zero, that the dialog is told the space is shared, and that an ordinary
-file still promises its own size.
+promise zero while both exist, and that an ordinary file still promises its own
+size. `testDeletingTheCountedNameOfAPairPromotesTheOther` uses a pair split
+across two folders and asserts the root total is unchanged, the survivor's folder
+gains the bytes, the survivor stops being reported as a duplicate, the totals add
+up again, and that removing the last name finally does drop them.
+`testDeletingTheDuplicateNameFreesTheOther` covers the mirror case, and
+`testDeletingALinkWithNoPartnerInTreeSubtracts` covers a link whose partner lives
+outside the scan, where the bytes genuinely do leave.
 
 ### 3. Every treemap mouse-move forced a full custom redraw — FIXED (mechanism corrected)
 
@@ -321,8 +339,9 @@ and from the mistaken publish-per-event model respectively. The release figure i
 
 ## What was left alone
 
-Both deferred items are UI-thread work with no data-correctness consequence, and
-both need more than a minimal edit. They open `docs/plan-0.3.md`.
+One item is still open: finding 12, treemap layout on the main thread. It is
+UI-thread work with no data-correctness consequence behind it, and it opens
+`docs/plan-0.3.md`.
 
 Cursor's own summary of the codebase is worth keeping: it traced the work-stack
 idle accounting and could not deadlock it, confirmed the squarify implementation
