@@ -37,9 +37,15 @@ enum SelfTest {
         testScanTotals(root)
         testSymlinkedRootIsScanned(root)
         testHardLinks(root)
+        testHardLinkPromisesNoSpace(root)
         testExtensionStats(root)
         testFilterAndRanking(root)
         testDeepestReachableTreeIsWalked()
+        // Runs before anything that deletes from the fixture: it asserts the
+        // fixture is *still there* afterwards, which a later check couldn't
+        // distinguish from an earlier one having removed part of it.
+        testScanRootIsNeverDeletable(root)
+        testVolumeAndHomeRootsAreRefused()
         testTrashUpdatesTree(root)
         testPermanentDeleteFolder(root)
         testStaleReferencesSurviveADelete(batchRoot)
@@ -665,13 +671,163 @@ enum SelfTest {
             model.distinctTargets(unrelated).count == 3,
             "got \(model.distinctTargets(unrelated).map(\.name))"
         )
+        // Measured with the metric on show, which defaults to allocated. Quoting
+        // logical size here promised a sparse image's full 200 GB back from a
+        // delete that frees the 8 GB it actually occupies.
         check(
             "reclaimable size counts a nested selection once",
+            model.reclaimableSize(nested) == nest.totalAlloc,
+            "got \(model.reclaimableSize(nested)), expected \(nest.totalAlloc)"
+        )
+        model.sizeMetric = .logical
+        check(
+            "reclaimable size follows the metric on show",
             model.reclaimableSize(nested) == nest.totalSize,
             "got \(model.reclaimableSize(nested)), expected \(nest.totalSize)"
         )
     }
 
+    /// The scan root is selected the moment a scan lands, and the context menu
+    /// used to offer it "Delete Permanently…" like any other row — so the first
+    /// one a user reached for was aimed at everything they had just measured.
+    /// Nothing else stopped it: none of the SIP prefixes cover `/` or a home
+    /// folder.
+    @MainActor
+    private static func testScanRootIsNeverDeletable(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let result = loadSynchronously(into: model) else { return }
+        let rootRef = NodeRef(result.root)
+
+        check(
+            "a completed scan leaves its root selected",
+            model.selection == [rootRef],
+            "got \(model.selection.map(\.name))"
+        )
+        check(
+            "the scan root is refused as a delete target",
+            model.deletionRefusal(for: rootRef) != nil,
+            "it was accepted"
+        )
+
+        let before = result.root.totalSize
+        let beforeFiles = result.root.totalFiles
+        model.deletePermanently([rootRef])
+
+        check(
+            "deleting the scan root leaves it on disk",
+            FileManager.default.fileExists(atPath: root.path),
+            "the fixture was removed"
+        )
+        check(
+            "and leaves its contents entirely alone",
+            result.root.totalSize == before
+                && result.root.totalFiles == beforeFiles,
+            "totals moved: \(result.root.totalSize) of \(before)"
+        )
+        check(
+            "the refusal is explained rather than silent",
+            model.actionError != nil,
+            "nothing was reported"
+        )
+
+        model.actionError = nil
+        model.moveToTrash([rootRef])
+        check(
+            "trashing the scan root is refused too",
+            FileManager.default.fileExists(atPath: root.path)
+                && model.actionError != nil,
+            "it went ahead"
+        )
+    }
+
+    /// Volume and home roots, checked below the model so the guard holds for any
+    /// caller. `FileActions` can't know what a scan was rooted at, so it covers
+    /// the paths that are roots no matter how they were reached.
+    private static func testVolumeAndHomeRootsAreRefused() {
+        check("/ is refused", FileActions.isUndeletableRoot("/"), "accepted")
+        check(
+            "a trailing slash doesn't slip past it",
+            FileActions.isUndeletableRoot("/Volumes/Backup/"),
+            "accepted"
+        )
+        check(
+            "this user's home folder is refused",
+            FileActions.isUndeletableRoot(NSHomeDirectory()),
+            "accepted"
+        )
+        check(
+            "another user's home folder is refused",
+            FileActions.isUndeletableRoot("/Users/someoneelse"),
+            "accepted"
+        )
+        check(
+            "a volume mount point is refused",
+            FileActions.isUndeletableRoot("/Volumes/Backup"),
+            "accepted"
+        )
+        check(
+            "something inside a home folder is still deletable",
+            !FileActions.isUndeletableRoot(NSHomeDirectory() + "/Downloads/x.zip"),
+            "wrongly refused"
+        )
+        check(
+            "a folder inside a volume is still deletable",
+            !FileActions.isUndeletableRoot("/Volumes/Backup/old"),
+            "wrongly refused"
+        )
+    }
+
+    /// Deleting one name of a hard-linked pair frees nothing while the other
+    /// name is still there, so the confirmation dialog must not promise the
+    /// file's size back. It quoted the full size for both members of a pair
+    /// while the tree subtracted nothing for one of them.
+    @MainActor
+    private static func testHardLinkPromisesNoSpace(_ root: URL) {
+        let model = AppModel()
+        model.customFolder = root.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let c = result.root.subdir(named: "c"),
+            let duplicate = c.files.firstIndex(where: \.isDuplicateLink),
+            let original = c.files.firstIndex(where: {
+                !$0.isDuplicateLink && $0.linkCount > 1
+            })
+        else {
+            check("the fixture still has its hard-linked pair", false, "missing")
+            return
+        }
+
+        let linked = NodeRef(dir: c, fileIndex: duplicate)
+        let survivor = NodeRef(dir: c, fileIndex: original)
+        check(
+            "the already-counted name promises nothing",
+            model.reclaimableSize([linked]) == 0,
+            "got \(model.reclaimableSize([linked]))"
+        )
+        // The scanner marks only the second name it reaches as a duplicate, so
+        // without the link count the first one looked like an ordinary 40 KB
+        // file whose deletion would free 40 KB. It would free nothing.
+        check(
+            "the other name of the pair promises nothing either",
+            model.reclaimableSize([survivor]) == 0,
+            "got \(model.reclaimableSize([survivor]))"
+        )
+        check(
+            "the dialog is told the space is shared",
+            model.selectionSharesStorage([linked, survivor]),
+            "it would have quoted a plain figure"
+        )
+
+        let plain = c.files.firstIndex { $0.linkCount == 1 && !$0.isSymlink }
+        if let plain {
+            let ref = NodeRef(dir: c, fileIndex: plain)
+            check(
+                "an ordinary file still promises its own size",
+                model.reclaimableSize([ref]) == ref.alloc && ref.alloc > 0,
+                "got \(model.reclaimableSize([ref])), expected \(ref.alloc)"
+            )
+        }
+    }
     /// Two files in one folder, trashed together. Removing an entry renumbers
     /// every sibling after it, so the batch has to unlink from the back — done
     /// front-to-back this drops the wrong rows from the model while deleting the
@@ -874,6 +1030,33 @@ enum SelfTest {
         check(
             "a home path is not treated as protected",
             !FileActions.isSystemProtected(NSHomeDirectory() + "/Downloads/x.zip"),
+            "wrongly flagged"
+        )
+        // /System/Volumes/Data is the writable data volume's mount point and a
+        // legitimate scan target — it is what a scan of / skips to avoid
+        // double-counting firmlinks. Caught by the bare "/System/" prefix, every
+        // delete in such a scan was refused with a false claim that the user's
+        // own home directory was on the sealed read-only volume.
+        check(
+            "the data volume is not treated as protected",
+            !FileActions.isSystemProtected(
+                "/System/Volumes/Data/Users/someone/Downloads/x.zip"
+            ),
+            "the whole data volume was flagged read-only"
+        )
+        check(
+            "the data volume's own mount point is not protected",
+            !FileActions.isSystemProtected("/System/Volumes/Data"),
+            "wrongly flagged"
+        )
+        check(
+            "other paths under /System/Volumes are still protected",
+            FileActions.isSystemProtected("/System/Volumes/Update/mnt1/x"),
+            "the exemption was too broad"
+        )
+        check(
+            "a name merely starting with System isn't caught",
+            !FileActions.isSystemProtected("/Systemic/thing"),
             "wrongly flagged"
         )
         do {

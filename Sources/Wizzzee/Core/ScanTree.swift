@@ -15,6 +15,14 @@ struct FileEntry {
     var isSymlink: Bool
     /// A hard link whose size was already counted under another path.
     var isDuplicateLink: Bool
+    /// Names this file's inode has on the volume. Above 1, deleting this one
+    /// frees nothing until the last of them goes, so the space a delete can
+    /// promise is not this file's size.
+    var linkCount: UInt32 = 1
+
+    /// True when the bytes survive this name being removed, either because
+    /// another name was already counted for them or because one still exists.
+    var sharesStorage: Bool { isDuplicateLink || linkCount > 1 }
 }
 
 /// Why a directory's contents are missing from the scan.

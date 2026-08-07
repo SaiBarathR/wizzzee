@@ -40,11 +40,22 @@ struct ItemContextMenu: View {
 
         Divider()
 
-        if FileActions.isSystemProtected(ref.path) {
-            Text("Protected by macOS — can't be removed")
+        if let refusal = model.deletionRefusal(for: ref) {
+            Text(Self.menuNote(for: refusal))
         } else {
             Button("Move to Trash") { model.moveToTrash(ref) }
             Button("Delete Permanently…") { model.permanentDeleteTargets = [ref] }
+        }
+    }
+
+    /// A menu-length version of the refusal. The full explanation belongs in the
+    /// alert; here it only has to say why the two actions are missing.
+    private static func menuNote(for refusal: FileActions.ActionError) -> String {
+        switch refusal {
+        case .undeletableRoot:
+            return "A root folder — can't be removed"
+        default:
+            return "Protected by macOS — can't be removed"
         }
     }
 
@@ -57,8 +68,8 @@ struct ItemContextMenu: View {
 
         Divider()
 
-        if FileActions.containsSystemProtected(refs) {
-            Text("Some are protected by macOS — can't be removed")
+        if model.isDeletionRefused(refs) {
+            Text("Some can't be removed — protected, or a root folder")
         } else {
             Button("Move \(ByteFormat.count(refs.count)) Items to Trash") {
                 model.moveToTrash(refs)

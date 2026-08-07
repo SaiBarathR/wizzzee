@@ -440,7 +440,8 @@ final class ScanEngine {
                             mtime: entry.mtime,
                             extIndex: -1,
                             isSymlink: entry.isSymlink,
-                            isDuplicateLink: isDuplicate
+                            isDuplicateLink: isDuplicate,
+                            linkCount: entry.linkCount
                         )
                     )
                 }
