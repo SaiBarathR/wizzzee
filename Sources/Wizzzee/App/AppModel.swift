@@ -851,13 +851,33 @@ final class AppModel: ObservableObject {
         let index = Int(ref.fileIndex)
         guard index < dir.files.count else { return }
         let file = dir.files[index]
-        subtract(
-            size: file.isDuplicateLink ? 0 : file.size,
-            alloc: file.isDuplicateLink ? 0 : file.alloc,
-            files: 1,
-            dirs: 0,
-            from: dir
-        )
+
+        if file.isDuplicateLink {
+            // Its bytes were never in the totals — they are counted under the
+            // name the scan reached first, which is still there. The survivors
+            // still lose a link, so one left alone can promise its bytes again.
+            result?.releaseHardLink(at: (dir, index), promoting: false)
+            result?.forgetDuplicate(size: file.size)
+            subtract(size: 0, alloc: 0, files: 1, dirs: 0, from: dir)
+            dir.files.remove(at: index)
+            return
+        }
+
+        // This name is the one carrying the inode's bytes. If another name for
+        // it is still in the tree, those bytes have not gone anywhere: the
+        // survivor takes over the count, so the folder holding it stops
+        // reporting the file as free and the totals keep matching the disk.
+        //
+        // Both chains are walked, not just the common part, because the two
+        // names can be in different folders — and if there is no survivor in
+        // the tree, the bytes really do leave it and only the subtraction runs.
+        if file.isHardLinked,
+            let promoted = result?.releaseHardLink(at: (dir, index), promoting: true)
+        {
+            add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
+        }
+
+        subtract(size: file.size, alloc: file.alloc, files: 1, dirs: 0, from: dir)
         dir.files.remove(at: index)
     }
 
@@ -883,6 +903,18 @@ final class AppModel: ObservableObject {
             current = step.parent
         }
         return false
+    }
+
+    /// Walks a size back *up* to the root, for a hard link's surviving name
+    /// taking over bytes the deleted name used to account for. Counts are
+    /// untouched: the survivor was always in them, at zero size.
+    private func add(size: UInt64, alloc: UInt64, to node: DirNode) {
+        var current: DirNode? = node
+        while let step = current {
+            step.totalSize += size
+            step.totalAlloc += alloc
+            current = step.parent
+        }
     }
 
     private func subtract(

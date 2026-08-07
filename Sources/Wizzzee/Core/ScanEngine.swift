@@ -441,7 +441,8 @@ final class ScanEngine {
                             extIndex: -1,
                             isSymlink: entry.isSymlink,
                             isDuplicateLink: isDuplicate,
-                            linkCount: entry.linkCount
+                            linkCount: UInt8(min(entry.linkCount, 255)),
+                            fileID: entry.fileID
                         )
                     )
                 }

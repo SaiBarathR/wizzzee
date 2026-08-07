@@ -34,6 +34,7 @@ enum SelfTest {
         }
         print("fixture: \(root.path)\n")
 
+        testFileEntryStaysNarrow()
         testScanTotals(root)
         testSymlinkedRootIsScanned(root)
         testHardLinks(root)
@@ -54,6 +55,9 @@ enum SelfTest {
         testFileRowsNeverOutliveADelete(batchRoot)
         testFileRowsDontOutliveTheirScan(batchRoot)
         testAncestorDedupe(batchRoot)
+        testDeletingTheCountedNameOfAPairPromotesTheOther()
+        testDeletingTheDuplicateNameFreesTheOther()
+        testDeletingALinkWithNoPartnerInTreeSubtracts()
         testBatchTrashOfSiblings(batchRoot)
         testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
@@ -134,6 +138,44 @@ enum SelfTest {
         try write(root.appendingPathComponent("rows/r1.dat"), bytes: 1_100)
         try write(root.appendingPathComponent("rows/r2.dat"), bytes: 1_200)
         try write(root.appendingPathComponent("rows/r3.dat"), bytes: 1_300)
+    }
+
+    /// A hard-linked pair whose two names sit in *different* folders, so the
+    /// promotion has to move bytes between two chains rather than cancel out
+    /// inside one.
+    ///
+    /// Its own root rather than part of the batch fixture: three of the File
+    /// View checks there assert a row per file, and `largestFiles` skips
+    /// duplicate links, so a hard link anywhere in that tree breaks them.
+    private static func buildLinkedPair(at root: URL) throws {
+        let manager = FileManager.default
+        for folder in ["left", "right"] {
+            try manager.createDirectory(
+                at: root.appendingPathComponent(folder),
+                withIntermediateDirectories: true
+            )
+        }
+        try write(root.appendingPathComponent("left/shared.dat"), bytes: 9_000)
+        try manager.linkItem(
+            at: root.appendingPathComponent("left/shared.dat"),
+            to: root.appendingPathComponent("right/mirror.dat")
+        )
+    }
+
+    /// A file inside the scan hard-linked to one outside it.
+    ///
+    /// The scan sees only one of its names, so nothing is marked duplicate and
+    /// there is no survivor to promote — deleting it really does take those
+    /// bytes out of the tree, and the totals have to drop.
+    private static func buildOutsideLink(at root: URL, outside: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        try manager.createDirectory(
+            at: outside.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try write(outside, bytes: 11_000)
+        try manager.linkItem(at: outside, to: root.appendingPathComponent("inside.dat"))
     }
 
     private static func write(_ url: URL, bytes: Int) throws {
@@ -946,7 +988,7 @@ enum SelfTest {
         guard let c = result.root.subdir(named: "c"),
             let duplicate = c.files.firstIndex(where: \.isDuplicateLink),
             let original = c.files.firstIndex(where: {
-                !$0.isDuplicateLink && $0.linkCount > 1
+                !$0.isDuplicateLink && $0.isHardLinked
             })
         else {
             check("the fixture still has its hard-linked pair", false, "missing")
@@ -974,7 +1016,7 @@ enum SelfTest {
             "it would have quoted a plain figure"
         )
 
-        let plain = c.files.firstIndex { $0.linkCount == 1 && !$0.isSymlink }
+        let plain = c.files.firstIndex { !$0.isHardLinked && !$0.isSymlink }
         if let plain {
             let ref = NodeRef(dir: c, fileIndex: plain)
             check(
@@ -983,6 +1025,286 @@ enum SelfTest {
                 "got \(model.reclaimableSize([ref])), expected \(ref.alloc)"
             )
         }
+    }
+
+    /// Deleting the name a hard-linked file was counted under must not take its
+    /// bytes out of the totals while another name still holds them.
+    ///
+    /// The scan counts those bytes once, under whichever name a worker reached
+    /// first, and marks the rest as duplicates worth nothing. Removing the
+    /// counted name used to subtract the full size anyway, so the tree reported
+    /// a folder as empty while the survivor still occupied the disk — and the
+    /// two disagreed until a rescan. The survivor takes over the count now.
+    @MainActor
+    private static func testDeletingTheCountedNameOfAPairPromotesTheOther() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-pair-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildLinkedPair(at: base)
+        } catch {
+            check("the cross-folder link fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        let links = result.root
+        guard let left = links.subdir(named: "left"),
+            let right = links.subdir(named: "right")
+        else {
+            check("the cross-folder link fixture scanned", false, "missing folders")
+            return
+        }
+
+        // Which side the scan counted is arbitrary, so the roles are looked up
+        // rather than assumed.
+        let counted: (dir: DirNode, index: Int)
+        let duplicate: (dir: DirNode, index: Int)
+        if let i = left.files.firstIndex(where: { !$0.isDuplicateLink }),
+            let j = right.files.firstIndex(where: \.isDuplicateLink)
+        {
+            counted = (left, i)
+            duplicate = (right, j)
+        } else if let i = right.files.firstIndex(where: { !$0.isDuplicateLink }),
+            let j = left.files.firstIndex(where: \.isDuplicateLink)
+        {
+            counted = (right, i)
+            duplicate = (left, j)
+        } else {
+            check(
+                "exactly one name of the pair is counted",
+                false,
+                "left=\(left.files.map(\.isDuplicateLink)) "
+                    + "right=\(right.files.map(\.isDuplicateLink))"
+            )
+            return
+        }
+
+        let size = counted.dir.files[counted.index].size
+        check(
+            "the pair is scanned as one counted name and one duplicate",
+            size == 9_000 && counted.dir.files[counted.index].isHardLinked,
+            "got \(size) bytes, hardLinked="
+                + "\(counted.dir.files[counted.index].isHardLinked)"
+        )
+
+        let rootBefore = result.root.totalSize
+        let linksBefore = links.totalSize
+        let survivorFolder = duplicate.dir
+        let survivorBefore = survivorFolder.totalSize
+
+        trash(model, [NodeRef(dir: counted.dir, fileIndex: counted.index)])
+
+        check(
+            "deleting the counted name reports no error",
+            model.actionError == nil,
+            model.actionError ?? ""
+        )
+        // The bytes never left the disk, so they must not leave the tree.
+        check(
+            "the bytes stay in the root's total",
+            result.root.totalSize == rootBefore,
+            "root is \(result.root.totalSize), expected \(rootBefore)"
+        )
+        check(
+            "and in the folder holding both names",
+            links.totalSize == linksBefore,
+            "links/ is \(links.totalSize), expected \(linksBefore)"
+        )
+        // They move, though: the surviving name now accounts for them.
+        check(
+            "the surviving name's folder gains them",
+            survivorFolder.totalSize == survivorBefore + size,
+            "got \(survivorFolder.totalSize), expected \(survivorBefore + size)"
+        )
+        check(
+            "the survivor stops being reported as a duplicate",
+            survivorFolder.files.first?.isDuplicateLink == false,
+            "still flagged"
+        )
+        check(
+            "the double-counting figure drops with it",
+            result.hardLinkSavings == 0,
+            "got \(result.hardLinkSavings), expected 0"
+        )
+        // Nothing is now hidden: the folder totals add up to the root again.
+        check(
+            "the root's total is the sum of its folders once more",
+            result.root.totalSize
+                == result.root.subdirs.reduce(0) { $0 + $1.totalSize }
+                    + result.root.files.reduce(0) { $0 + $1.size },
+            "root \(result.root.totalSize) vs children "
+                + "\(result.root.subdirs.reduce(0) { $0 + $1.totalSize })"
+        )
+
+        // The survivor is now the only name, so it no longer shares its storage
+        // and a delete can promise its bytes back. Left as-is, the dialog would
+        // offer 0 for a file the tree had just credited with 9,000 bytes.
+        let survivorRef = NodeRef(dir: survivorFolder, fileIndex: 0)
+        check(
+            "the last name left stops counting as shared",
+            survivorFolder.files[0].linkCount == 1
+                && !survivorFolder.files[0].sharesStorage,
+            "linkCount=\(survivorFolder.files[0].linkCount), "
+                + "sharesStorage=\(survivorFolder.files[0].sharesStorage)"
+        )
+        check(
+            "so deleting it promises its bytes back",
+            model.reclaimableSize([survivorRef]) == survivorRef.alloc
+                && survivorRef.alloc > 0,
+            "got \(model.reclaimableSize([survivorRef])), expected \(survivorRef.alloc)"
+        )
+
+        // And removing that last name does take the bytes with it.
+        trash(model, [survivorRef])
+        check(
+            "removing the last name finally drops the bytes",
+            result.root.totalSize == rootBefore - size,
+            "root is \(result.root.totalSize), expected \(rootBefore - size)"
+        )
+    }
+
+    /// `FileEntry` is allocated once per file, several million times on a
+    /// full-disk scan, so its width is a real memory budget rather than a
+    /// detail. `fileID` was added to it by narrowing the link count to a byte,
+    /// which kept the struct at 56; a field added carelessly would round it to
+    /// 64 and cost 32 MB with nothing to show that it had.
+    private static func testFileEntryStaysNarrow() {
+        check(
+            "FileEntry is still 56 bytes per file",
+            MemoryLayout<FileEntry>.stride == 56,
+            "got \(MemoryLayout<FileEntry>.stride), which is "
+                + "\((MemoryLayout<FileEntry>.stride - 56) * 4_000_000 / 1_000_000)"
+                + " MB more on a 4M-file scan"
+        )
+    }
+
+    /// The mirror of the above: deleting the *duplicate* name first.
+    ///
+    /// Nothing moves in the totals — the duplicate was never counted — but the
+    /// name still carrying the bytes loses a link, so it becomes the sole name
+    /// and can promise its space again.
+    @MainActor
+    private static func testDeletingTheDuplicateNameFreesTheOther() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-pair2-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildLinkedPair(at: base)
+        } catch {
+            check("the second link fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let left = result.root.subdir(named: "left"),
+            let right = result.root.subdir(named: "right")
+        else {
+            check("the second link fixture scanned", false, "missing folders")
+            return
+        }
+
+        let duplicate: (dir: DirNode, index: Int)
+        let counted: DirNode
+        if let i = left.files.firstIndex(where: \.isDuplicateLink) {
+            duplicate = (left, i)
+            counted = right
+        } else if let i = right.files.firstIndex(where: \.isDuplicateLink) {
+            duplicate = (right, i)
+            counted = left
+        } else {
+            check("one name of the pair is a duplicate", false, "neither is")
+            return
+        }
+
+        let rootBefore = result.root.totalSize
+        let countedBefore = counted.totalSize
+
+        trash(model, [NodeRef(dir: duplicate.dir, fileIndex: duplicate.index)])
+
+        check(
+            "removing the uncounted name moves nothing",
+            result.root.totalSize == rootBefore
+                && counted.totalSize == countedBefore,
+            "root \(result.root.totalSize) of \(rootBefore), "
+                + "counted \(counted.totalSize) of \(countedBefore)"
+        )
+        check(
+            "the name still holding the bytes stops counting as shared",
+            counted.files[0].linkCount == 1 && !counted.files[0].sharesStorage,
+            "linkCount=\(counted.files[0].linkCount)"
+        )
+        check(
+            "the double-counting figure goes to nothing",
+            result.hardLinkSavings == 0,
+            "got \(result.hardLinkSavings)"
+        )
+        check(
+            "and deleting it now promises its bytes",
+            model.reclaimableSize([NodeRef(dir: counted, fileIndex: 0)])
+                == counted.files[0].alloc,
+            "got \(model.reclaimableSize([NodeRef(dir: counted, fileIndex: 0)]))"
+        )
+    }
+
+    /// The other direction: a hard link whose partner is outside the scan.
+    ///
+    /// Nothing is marked duplicate, so there is no survivor to promote, and the
+    /// bytes genuinely leave the tree when the name does. The promotion must not
+    /// fire and swallow the subtraction.
+    @MainActor
+    private static func testDeletingALinkWithNoPartnerInTreeSubtracts() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-outside-\(getpid())")
+        let outside = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-outside-target-\(getpid())")
+            .appendingPathComponent("target.dat")
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: outside.deletingLastPathComponent())
+        }
+        do {
+            try buildOutsideLink(at: base, outside: outside)
+        } catch {
+            check("the outside-link fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let index = result.root.files.firstIndex(where: {
+            $0.name == "inside.dat"
+        }) else {
+            check("the outside-link fixture scanned", false, "missing file")
+            return
+        }
+        check(
+            "a link with its partner outside the scan isn't a duplicate",
+            result.root.files[index].isHardLinked
+                && !result.root.files[index].isDuplicateLink,
+            "hardLinked=\(result.root.files[index].isHardLinked) "
+                + "duplicate=\(result.root.files[index].isDuplicateLink)"
+        )
+
+        let before = result.root.totalSize
+        let size = result.root.files[index].size
+        trash(model, [NodeRef(dir: result.root, fileIndex: index)])
+
+        check(
+            "its bytes leave the tree, since no other name of it is in the tree",
+            result.root.totalSize == before - size,
+            "root is \(result.root.totalSize), expected \(before - size)"
+        )
+        check(
+            "the file it was linked to is untouched",
+            FileManager.default.fileExists(atPath: outside.path),
+            "the partner outside the scan was removed too"
+        )
     }
 
     /// Two files in one folder, trashed together. Removing an entry renumbers

@@ -1,11 +1,11 @@
 # Wizzzee 0.3 — release plan
 
-Current version: **0.2.3** (`CFBundleVersion` 5). Target: **0.3.0**, build 6.
+Shipped: **0.3.0** (build 6) and **0.3.1** (build 7). Started from 0.2.3.
 
 0.3 is a correctness release for the destructive path. 0.2.3 fixed the scanner
-reporting the wrong *numbers*; this one fixes it offering the wrong *actions* —
-a scan's root row is selected the moment a scan lands, and until now the context
-menu would delete it.
+reporting the wrong *numbers*; this series fixes it offering the wrong *actions*
+— a scan's root row is selected the moment a scan lands, and until 0.3.0 the
+context menu would delete it.
 
 Findings and verification are in [`../CODE_REVIEW.md`](../CODE_REVIEW.md).
 
@@ -13,8 +13,8 @@ Findings and verification are in [`../CODE_REVIEW.md`](../CODE_REVIEW.md).
 
 ## Status
 
-**Landed** (14 files, +1155/−196, self-test 88 → 125), across four stacked
-branches merged in order:
+**Landed** across four stacked branches for 0.3.0, plus one for 0.3.1.
+Self-test 88 → 144.
 
 | Area | Change |
 |---|---|
@@ -27,9 +27,10 @@ branches merged in order:
 | Performance | Legend ranking derived once per scan; filter search allocation-free; path built as the walk descends |
 | UI | Collapsed-folder zoom, stale hover outline, late progress tick, ⌘R gating |
 | Responsiveness | Deletes run off the main actor with progress, a Stop, and one batch at a time |
+| Accuracy (0.3.1) | A hard link's surviving name takes over the bytes rather than the tree losing them |
 
-**Nothing remains for 0.3.** Item 1 below has landed; items 2 and 3 are carried
-to 0.3.1 with a recommendation each.
+**0.3.0 shipped** items 1 and everything in the table above. **0.3.1** adds item
+2. Item 3 is still open, with a recommendation.
 
 ---
 
@@ -80,36 +81,44 @@ All nine existing delete checks kept passing unchanged once routed through
 run-loop-pumping helpers, and two new ones cover the asynchrony itself:
 `testDeleteReturnsBeforeItHasFinished` and `testDeleteCanBeStopped`.
 
-## 2. Hard-linked totals after a delete — *deferred to 0.3.1*
+## 2. Hard-linked totals after a delete — *done, shipped in 0.3.1*
 
-Half of review finding 2. The figure the confirmation dialog *promises* is now
-correct in both directions, but `detachFile` still subtracts a file's full size
-when the surviving name of a hard-linked pair is the one removed. The other name
-still holds the bytes, so the tree under-reports against disk until a rescan.
+The other half of review finding 2. `detachFile` subtracted a file's full size
+even when the surviving name of a hard-linked pair still held the bytes, so the
+tree under-reported against disk until a rescan.
 
-**Why it wasn't done.** Getting it right means knowing whether another name for
-the same inode is still inside the scan, and `FileEntry` deliberately does not
-store the inode — the type is sized to hold several million of them, and adding
-8 bytes costs ~32 MB on a full-disk scan before the inode→location index that
-would make it useful. Always subtracting zero for a linked file is wrong the
-other way round whenever the other name lives outside the scan, which is the
-common case for Time Machine local snapshots.
+Three options were costed here, and **option 3 — the exact one — was taken**,
+because the objection recorded against it turned out to be wrong.
 
-**Options, in increasing cost**
+That objection was memory: pairing two names needs the inode, and `FileEntry` is
+allocated once per file, so an extra `UInt64` looked like +32 MB on a full-disk
+scan. It isn't. The struct had six bytes of tail padding, and the link count was
+sitting in a `UInt32` whose value is only ever compared against 1. Narrowing it
+to a saturating `UInt8` paid for `fileID` exactly: **56 bytes before, 56 after**,
+now asserted by `testFileEntryStaysNarrow` so a future field can't quietly round
+it up to 64.
 
-1. Leave it, and rely on the dialog already saying the space is shared. The tree
-   is wrong only for a file the user was told frees nothing.
-2. Subtract zero for any `linkCount > 1` file and mark the containing folders as
-   approximate until a rescan. Cheap, and errs toward under-claiming reclaimed
-   space, which is the safer direction for this tool.
-3. Store the inode and a scan-wide index, and promote the surviving duplicate
-   when its partner goes. Exact, and the only option that keeps the tree honest,
-   but it is a memory-model change to the hottest struct in the app.
+Options 1 and 2 were both rejected on correctness once that was clear. Option 1
+leaves the tree disagreeing with the disk. Option 2 — subtract zero for any
+linked file — breaks a stronger invariant: `detachFile` removes the entry from
+its folder, so subtracting nothing leaves a folder total that no file in it
+accounts for, and "a folder's total is the sum of its parts" stops holding.
 
-**Recommendation** — option 1 for 0.3, with the behaviour written down here.
-Revisit only if someone reports a total drifting after repeated deletes.
+**What it does now.** Removing one name of a hard-linked file walks the tree
+once and does two things:
 
-## 3. Move treemap layout off the main thread — *deferred to 0.3.1*
+- Every surviving name loses a link. One left as the last name stops sharing its
+  storage, so the delete dialog will promise its bytes again — without this the
+  survivor would be credited with 9 KB by the tree and 0 by the dialog.
+- If the departing name was the one carrying the bytes, a survivor takes over
+  the count. The bytes move between the two folders' chains rather than leaving
+  the tree, since they are still on disk.
+
+When no other name is in the tree — a link whose partner lives outside the scan,
+the Time Machine case — nothing is promoted and the subtraction stands, which is
+correct: those bytes really have left the scanned tree.
+
+## 3. Move treemap layout off the main thread — *still open*
 
 `TreemapLayout.build` walks the live tree, allocating and sorting a `[NodeRef]`
 per visited directory, on the main thread; only the rasterisation goes to
@@ -127,7 +136,7 @@ weight, extIndex, children) once per `treeRevision`, then run both `build` and
 the `TreemapModel.ancestors` pinning, which exists only because the layout holds
 live `DirNode`s across a possible delete.
 
-**Recommendation** — 0.3.1. It is a real refactor of the layout's ownership
+**Recommendation** — 0.3.2 or later. It is a real refactor of the layout's ownership
 model with no correctness bug behind it, and 0.3 is stronger as a focused safety
 release.
 
@@ -137,7 +146,7 @@ release.
 
 Following [`releasing.md`](releasing.md):
 
-1. `swift build && ./.build/debug/Wizzzee --selftest` — expect **125/125**.
+1. `swift build && ./.build/debug/Wizzzee --selftest` — expect **144/144**.
 2. Release build, then re-run the self-test against it. Confirm no scan
    regression: `--scan ~/Library` should stay at ~6 s / 427k files, and
    `--treemap ~/Library` at ~20 ms layout.
@@ -152,7 +161,7 @@ Following [`releasing.md`](releasing.md):
    `gh workflow run "Release macOS app" -f tag=v0.3.0 -f ref="$(git rev-parse main)"`.
 7. Commit, tag `v0.3.0`, push with `--follow-tags`, watch the run.
 
-## Release-notes outline for `v0.3.0.md`
+## Release-notes outline for `v0.3.0.md` (shipped)
 
 Mark it **worth upgrading to**, as 0.2.3 was, and lead with the safety fix.
 
