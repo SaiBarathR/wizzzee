@@ -98,11 +98,6 @@ final class ScanEngine {
         stack?.stop()
     }
 
-    /// Whether `cancel()` was called. A nil result from `scanSynchronously`
-    /// means either this or an unreadable root, and callers need to tell the
-    /// two apart to report the right thing.
-    var wasCancelled: Bool { checkCancelled }
-
     private var checkCancelled: Bool {
         stateLock.withLock { isCancelled }
     }
@@ -141,6 +136,17 @@ final class ScanEngine {
         private var items: [WorkItem] = []
         private var activeWorkers = 0
         private var stopped = false
+        /// True only when `stop()` is what ended the walk, rather than the work
+        /// running out. A Stop that arrives after the tree is fully walked has
+        /// nothing left to abandon, and the finished result is worth keeping.
+        private var abandoned = false
+
+        /// Whether the walk was cut short. Read once the workers have joined.
+        var wasAbandoned: Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            return abandoned
+        }
 
         func seed(_ item: WorkItem) {
             condition.lock()
@@ -176,8 +182,11 @@ final class ScanEngine {
 
         func stop() {
             condition.lock()
-            stopped = true
-            items.removeAll()
+            if !stopped {
+                stopped = true
+                abandoned = true
+                items.removeAll()
+            }
             condition.broadcast()
             condition.unlock()
         }
@@ -185,14 +194,53 @@ final class ScanEngine {
 
     // MARK: - Entry points
 
-    /// Runs a scan on the calling thread. Returns nil if cancelled.
-    func scanSynchronously(rootPath: String) -> ScanResult? {
+    /// How a scan ended.
+    ///
+    /// One `nil` for four different endings meant the caller had to read
+    /// `wasCancelled` separately to tell them apart — two reads that a cancel
+    /// arriving between them could land in, throwing away a finished result. It
+    /// also collapsed "no such folder" and "not allowed to read it" into one
+    /// message, when only the second has an action attached to it.
+    enum Outcome {
+        case completed(ScanResult)
+        case cancelled
+        case notADirectory(String)
+        case unreadable(String, errno: Int32)
+
+        /// The scan's result, or nil if it didn't produce one.
+        var result: ScanResult? {
+            if case .completed(let result) = self { return result }
+            return nil
+        }
+
+        /// One line saying why there is no result, for the headless callers.
+        /// Nil when the scan completed.
+        var failureDescription: String? {
+            switch self {
+            case .completed:
+                return nil
+            case .cancelled:
+                return "scan cancelled"
+            case .notADirectory(let path):
+                return "not a directory: \(path)"
+            case .unreadable(let path, let code):
+                return "can't read \(path): \(String(cString: strerror(code)))"
+            }
+        }
+    }
+
+    /// Runs a scan on the calling thread.
+    func scanSynchronously(rootPath: String) -> Outcome {
         let started = Date()
         let normalized = Self.normalize(rootPath)
 
         var rootStat = stat()
-        guard stat(normalized, &rootStat) == 0, rootStat.st_mode & S_IFMT == S_IFDIR
-        else { return nil }
+        guard stat(normalized, &rootStat) == 0 else {
+            return .unreadable(normalized, errno: errno)
+        }
+        guard rootStat.st_mode & S_IFMT == S_IFDIR else {
+            return .notADirectory(normalized)
+        }
 
         let rootDev = rootStat.st_dev
         // On an APFS boot volume the sealed system volume and the data volume
@@ -237,7 +285,10 @@ final class ScanEngine {
         progressTimer.cancel()
         stateLock.withLock { workStack = nil }
 
-        if checkCancelled { return nil }
+        // Asked of the stack, not of the cancel flag: a Stop pressed in the
+        // instant a 90-second scan was landing set the flag but found a walk
+        // that had already drained, and the finished result was thrown away.
+        if stack.wasAbandoned { return .cancelled }
 
         // Bottom-up aggregation and extension statistics.
         var builder = ExtensionStatsBuilder()
@@ -254,20 +305,22 @@ final class ScanEngine {
             free = UInt64(fsInfo.f_bavail) * blockSize
         }
 
-        return stateLock.withLock {
-            ScanResult(
-                root: root,
-                rootPath: normalized,
-                extensionStats: stats,
-                elapsed: Date().timeIntervalSince(started),
-                deniedCount: deniedCount,
-                hardLinkSavings: hardLinkSavings,
-                volumeTotal: total,
-                volumeFree: free,
-                volumeUsed: total > free ? total - free : 0,
-                isSharedContainer: normalized == "/"
-            )
-        }
+        return .completed(
+            stateLock.withLock {
+                ScanResult(
+                    root: root,
+                    rootPath: normalized,
+                    extensionStats: stats,
+                    elapsed: Date().timeIntervalSince(started),
+                    deniedCount: deniedCount,
+                    hardLinkSavings: hardLinkSavings,
+                    volumeTotal: total,
+                    volumeFree: free,
+                    volumeUsed: total > free ? total - free : 0,
+                    isSharedContainer: normalized == "/"
+                )
+            }
+        )
     }
 
     private func startProgressReporting(since started: Date) -> DispatchSourceTimer {
@@ -394,8 +447,15 @@ final class ScanEngine {
             }
             close(fd)
 
-            if err != 0 && files.isEmpty && node.subdirs.isEmpty {
-                node.exclusion = .permissionDenied
+            // Any non-zero errno means enumeration stopped early, so what was
+            // collected is a prefix of the directory rather than all of it.
+            // Flagged either way: a folder that yielded 3,000 of its 40,000
+            // entries used to be reported as a complete reading, which for a
+            // measuring tool is worse than being visibly incomplete.
+            if err != 0 {
+                node.exclusion =
+                    files.isEmpty && node.subdirs.isEmpty
+                    ? .permissionDenied : .partiallyRead
                 localDenied += 1
             }
             node.files = files
@@ -430,55 +490,85 @@ final class ScanEngine {
 
     // MARK: - Aggregation
 
-    /// Sums sizes and counts bottom-up. Recursion depth is the tree's depth, not
-    /// its size, so it stays shallow even for millions of files.
+    /// Sums sizes and counts bottom-up.
+    ///
+    /// Iterative rather than recursive, defensively. This runs on a
+    /// `DispatchQueue.global` thread with a 512 KB stack, and a tree deep enough
+    /// to exhaust it would take the app down with `EXC_BAD_ACCESS` and nothing
+    /// to explain it.
+    ///
+    /// No such tree is reachable today: the workers `open` an absolute path per
+    /// directory, so `PATH_MAX` caps the depth a scan can walk at roughly 460
+    /// levels — measured — which costs well under 100 KB of stack. The bound is
+    /// a side effect of how directories are opened rather than anything this
+    /// code enforces, so it is not something to rely on; a future traversal
+    /// built on `openat` would lift it and bring the crash back.
+    ///
+    /// Two phases per node: the first visits it and queues its children, the
+    /// second folds the finished children into it, which is what the recursive
+    /// version got from the call stack.
     private static func aggregate(
-        _ node: DirNode,
+        _ root: DirNode,
         into builder: inout ExtensionStatsBuilder
     ) {
-        var size: UInt64 = 0
-        var alloc: UInt64 = 0
-        var fileCount = 0
-        var dirCount = 0
+        enum Step {
+            case visit(DirNode)
+            case fold(DirNode)
+        }
 
-        for i in node.files.indices {
-            let file = node.files[i]
-            let index = builder.index(forFileNamed: file.name)
-            node.files[i].extIndex = Int32(index)
-            if file.isDuplicateLink {
-                builder.add(index, size: 0, alloc: 0)
-            } else {
-                size += file.size
-                alloc += file.alloc
-                builder.add(index, size: file.size, alloc: file.alloc)
+        var stack: [Step] = [.visit(root)]
+        while let step = stack.popLast() {
+            switch step {
+            case .visit(let node):
+                var size: UInt64 = 0
+                var alloc: UInt64 = 0
+                for i in node.files.indices {
+                    let file = node.files[i]
+                    let index = builder.index(forFileNamed: file.name)
+                    node.files[i].extIndex = Int32(index)
+                    if file.isDuplicateLink {
+                        builder.add(index, size: 0, alloc: 0)
+                    } else {
+                        size += file.size
+                        alloc += file.alloc
+                        builder.add(index, size: file.size, alloc: file.alloc)
+                    }
+                }
+                // Seeded with this node's own files; the fold below adds the
+                // subtree totals once every child has been through both phases.
+                node.totalSize = size
+                node.totalAlloc = alloc
+                node.totalFiles = node.files.count
+                node.totalDirs = 0
+
+                stack.append(.fold(node))
+                for sub in node.subdirs { stack.append(.visit(sub)) }
+
+            case .fold(let node):
+                for sub in node.subdirs {
+                    node.totalSize += sub.totalSize
+                    node.totalAlloc += sub.totalAlloc
+                    node.totalFiles += sub.totalFiles
+                    node.totalDirs += sub.totalDirs + 1
+                }
             }
-            fileCount += 1
         }
-
-        for sub in node.subdirs {
-            aggregate(sub, into: &builder)
-            size += sub.totalSize
-            alloc += sub.totalAlloc
-            fileCount += sub.totalFiles
-            dirCount += sub.totalDirs + 1
-        }
-
-        node.totalSize = size
-        node.totalAlloc = alloc
-        node.totalFiles = fileCount
-        node.totalDirs = dirCount
     }
 
     /// Rewrites each file's `extIndex` from insertion order to the final
-    /// size-sorted order used by `ScanResult.extensionStats`.
-    private static func remapExtensionIndices(_ node: DirNode, using remap: [Int32]) {
-        for i in node.files.indices {
-            let old = Int(node.files[i].extIndex)
-            if old >= 0 && old < remap.count {
-                node.files[i].extIndex = remap[old]
+    /// size-sorted order used by `ScanResult.extensionStats`. Iterative for the
+    /// same reason as `aggregate`.
+    private static func remapExtensionIndices(_ root: DirNode, using remap: [Int32]) {
+        var stack: [DirNode] = [root]
+        while let node = stack.popLast() {
+            for i in node.files.indices {
+                let old = Int(node.files[i].extIndex)
+                if old >= 0 && old < remap.count {
+                    node.files[i].extIndex = remap[old]
+                }
             }
+            stack.append(contentsOf: node.subdirs)
         }
-        for sub in node.subdirs { remapExtensionIndices(sub, using: remap) }
     }
 
     // MARK: - Paths

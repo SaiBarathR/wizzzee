@@ -283,17 +283,19 @@ final class AppModel: ObservableObject {
         let engine = ScanEngine()
         self.engine = engine
         engine.onProgress = { [weak self] snapshot in
-            DispatchQueue.main.async { self?.progress = snapshot }
+            DispatchQueue.main.async {
+                // Cancelling the timer doesn't wait for a handler already
+                // running, so a tick can still be on its way here after the
+                // scan has ended. Applying it then would leave a mid-scan item
+                // count and path sitting behind a finished scan.
+                guard let self, self.phase == .scanning else { return }
+                self.progress = snapshot
+            }
         }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let scanned = engine.scanSynchronously(rootPath: path)
-            // A nil result is either a cancel or an unreadable root; only the
-            // engine knows which.
-            let cancelled = engine.wasCancelled
-            DispatchQueue.main.async {
-                self?.scanFinished(scanned, path: path, cancelled: cancelled)
-            }
+            let outcome = engine.scanSynchronously(rootPath: path)
+            DispatchQueue.main.async { self?.scanFinished(outcome) }
         }
     }
 
@@ -301,12 +303,28 @@ final class AppModel: ObservableObject {
         engine?.cancel()
     }
 
-    private func scanFinished(_ scanned: ScanResult?, path: String, cancelled: Bool) {
+    private func scanFinished(_ outcome: ScanEngine.Outcome) {
         engine = nil
-        guard let scanned else {
-            phase = cancelled ? .cancelled : .failed("Couldn’t scan “\(path)”.")
+        // A late progress tick can still be in flight on the main queue behind
+        // this; leaving a mid-scan snapshot behind would have anything reading
+        // `progress` outside `.scanning` describing a scan that has ended.
+        progress = ScanEngine.Progress()
+
+        let scanned: ScanResult
+        switch outcome {
+        case .completed(let result):
+            scanned = result
+        case .cancelled:
+            phase = .cancelled
+            return
+        case .notADirectory(let path):
+            phase = .failed("“\(path)” isn’t a folder.")
+            return
+        case .unreadable(let path, let code):
+            phase = .failed(Self.unreadableMessage(path: path, errno: code))
             return
         }
+
         result = scanned
         phase = .complete
         treemapRoot = scanned.root
@@ -315,6 +333,21 @@ final class AppModel: ObservableObject {
         expanded = [ObjectIdentifier(scanned.root)]
         rebuildTreeRows()
         refreshFileRows(immediately: true)
+    }
+
+    /// Says which of the three ways a root can be unreadable happened. "Couldn’t
+    /// scan it" covered all of them equally and left the most common cause —
+    /// Full Disk Access, which the app has a whole banner for — unnamed.
+    private static func unreadableMessage(path: String, errno code: Int32) -> String {
+        switch code {
+        case ENOENT, ENOTDIR:
+            return "There’s nothing at “\(path)”."
+        case EACCES, EPERM:
+            return "Wizzzee isn’t allowed to read “\(path)”. "
+                + "Granting Full Disk Access in System Settings usually fixes this."
+        default:
+            return "Couldn’t scan “\(path)” (\(String(cString: strerror(code))))."
+        }
     }
 
     // MARK: - Tree View rows

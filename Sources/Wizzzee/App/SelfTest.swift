@@ -39,6 +39,7 @@ enum SelfTest {
         testHardLinks(root)
         testExtensionStats(root)
         testFilterAndRanking(root)
+        testDeepestReachableTreeIsWalked()
         testTrashUpdatesTree(root)
         testPermanentDeleteFolder(root)
         testStaleReferencesSurviveADelete(batchRoot)
@@ -132,7 +133,9 @@ enum SelfTest {
     }
 
     private static func scan(_ root: URL) -> ScanResult {
-        guard let result = ScanEngine().scanSynchronously(rootPath: root.path) else {
+        guard case .completed(let result) =
+            ScanEngine().scanSynchronously(rootPath: root.path)
+        else {
             print("scan failed outright")
             exit(1)
         }
@@ -300,6 +303,66 @@ enum SelfTest {
             "got \(mixedCase.first?.name ?? "nil")"
         )
     }
+
+    /// Aggregation, the extension remap and the File View's walk each descend
+    /// once per directory level, on threads with a 512 KB stack.
+    ///
+    /// How deep that can go is bounded by `PATH_MAX`, not by the tree: the
+    /// workers `open` an absolute path per directory, so anything past ~1024
+    /// bytes of path is unreachable however deep it was built. This walks the
+    /// deepest tree the scanner can actually enter and checks that all three
+    /// traversals reach the bottom of it and come back with the right totals.
+    private static func testDeepestReachableTreeIsWalked() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-deep-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Two bytes of path per level ("/d"), leaving room for the file name at
+        // the bottom and whatever the temporary directory itself costs.
+        let depth = (Int(PATH_MAX) - base.path.utf8.count - 64) / 2
+        guard depth > 100 else {
+            check("there is room for a deep fixture", false, "depth \(depth)")
+            return
+        }
+
+        var deepest = base
+        for _ in 0..<depth { deepest.appendPathComponent("d") }
+        do {
+            try FileManager.default.createDirectory(
+                at: deepest,
+                withIntermediateDirectories: true
+            )
+            try write(deepest.appendingPathComponent("bottom.dat"), bytes: 1_234)
+        } catch {
+            check("a \(depth)-level fixture can be built", false, "\(error)")
+            return
+        }
+
+        let result = scan(base)
+        check(
+            "a \(depth)-level tree aggregates to the bottom",
+            result.root.totalSize == 1_234 && result.root.totalDirs == depth,
+            "got \(result.root.totalSize) bytes over \(result.root.totalDirs) "
+                + "folders, expected 1234 over \(depth)"
+        )
+        check(
+            "it reports no unreadable directories",
+            result.deniedCount == 0,
+            "got \(result.deniedCount)"
+        )
+        check(
+            "the File View's walk reaches the bottom of it",
+            result.largestFiles(limit: 10, metric: .logical).first?.name
+                == "bottom.dat",
+            "got \(result.largestFiles(limit: 10, metric: .logical).map(\.name))"
+        )
+        check(
+            "a path filter reaches the bottom of it too",
+            result.largestFiles(matching: "/d/", limit: 10).count == 1,
+            "got \(result.largestFiles(matching: "/d/", limit: 10).count)"
+        )
+    }
+
 
     @MainActor
     private static func testTrashUpdatesTree(_ root: URL) {

@@ -172,6 +172,7 @@ private struct NameCell: View {
         case .permissionDenied: return "no access"
         case .otherVolume: return "other volume"
         case .alreadyCounted: return "counted elsewhere"
+        case .partiallyRead: return "partly read"
         }
     }
 }
