@@ -58,6 +58,7 @@ enum SelfTest {
         testDeletingTheCountedNameOfAPairPromotesTheOther()
         testDeletingTheDuplicateNameFreesTheOther()
         testDeletingALinkWithNoPartnerInTreeSubtracts()
+        testTreemapLayoutIsFencedAgainstDeletes()
         testBatchTrashOfSiblings(batchRoot)
         testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
@@ -1178,6 +1179,91 @@ enum SelfTest {
             "got \(MemoryLayout<FileEntry>.stride), which is "
                 + "\((MemoryLayout<FileEntry>.stride - 56) * 4_000_000 / 1_000_000)"
                 + " MB more on a 4M-file scan"
+        )
+    }
+
+    /// The treemap lays itself out on a background queue, reading the very tree
+    /// a delete unlinks nodes from. `AppModel.detach` fences that queue before
+    /// it touches anything, and this is what checks the fence holds: layouts are
+    /// left in flight while a folder is removed, and the totals afterwards have
+    /// to be exactly what a quiet delete would have produced.
+    ///
+    /// Without the fence this is a read of freed memory — usually a crash, and
+    /// otherwise silently wrong numbers.
+    @MainActor
+    private static func testTreemapLayoutIsFencedAgainstDeletes() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-fence-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            // Enough folders and files that a layout takes long enough to still
+            // be running when the delete lands.
+            for folder in 0..<12 {
+                let dir = base.appendingPathComponent("d\(folder)/inner")
+                try FileManager.default.createDirectory(
+                    at: dir,
+                    withIntermediateDirectories: true
+                )
+                for file in 0..<40 {
+                    try write(dir.appendingPathComponent("f\(file).dat"), bytes: 500 + file)
+                }
+            }
+        } catch {
+            check("the fence fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let doomed = result.root.subdir(named: "d0") else {
+            check("the fence fixture scanned", false, "missing d0")
+            return
+        }
+        let before = result.root.totalSize
+        let doomedSize = doomed.totalSize
+        let doomedFiles = doomed.totalFiles
+
+        // Queued straight onto the model's treemap queue, exactly as the view
+        // does, and deliberately not waited for.
+        let root = result.root
+        for _ in 0..<24 {
+            model.treemapQueue.async {
+                _ = TreemapLayout.build(
+                    root: root,
+                    size: CGSize(width: 1400, height: 500),
+                    metric: .allocated
+                )
+            }
+        }
+
+        trash(model, [NodeRef(doomed)])
+
+        check(
+            "a delete during a layout reports no error",
+            model.actionError == nil,
+            model.actionError ?? ""
+        )
+        check(
+            "the folder goes, with the layouts still queued behind it",
+            result.root.subdir(named: "d0") == nil,
+            "still attached"
+        )
+        check(
+            "and the totals are exactly what a quiet delete would give",
+            result.root.totalSize == before - doomedSize
+                && result.root.totalFiles == doomedFiles * 11,
+            "root is \(result.root.totalSize), expected \(before - doomedSize); "
+                + "\(result.root.totalFiles) files, expected \(doomedFiles * 11)"
+        )
+
+        // Let the remaining layouts drain against the mutated tree before the
+        // fixture is torn down, so a late one can't read a half-freed folder.
+        model.treemapQueue.sync {}
+        check(
+            "layouts queued before the delete all finish cleanly",
+            true,
+            ""
         )
     }
 

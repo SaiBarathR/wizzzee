@@ -11,18 +11,18 @@ where the mechanism or severity was wrong, and rejected 1 outright.
 |---|---|---|---|---|---|---|---|
 | Critical | 1 | 1 | — | — | 1 | — | — |
 | High | 3 | 2 | 1 | — | 3 | — | — |
-| Medium | 8 | 6 | 1 | 1 | 6 | — | 1 |
+| Medium | 8 | 6 | 1 | 1 | 7 | — | — |
 | Low | 6 | 6 | — | — | 6 | — | — |
-| **Total** | **18** | **15** | **2** | **1** | **16** | **—** | **1** |
+| **Total** | **18** | **15** | **2** | **1** | **17** | **—** | **—** |
 
-0.3.0 shipped 15 of these; finding 2's remaining half landed in 0.3.1. The one
-still open is finding 12, treemap layout on the main thread — 19–20 ms in
-release, with no correctness bug behind it.
+0.3.0 shipped 15 of these. 0.3.1 closed the last two: finding 2's remaining half
+and finding 12. Nothing is outstanding.
 
 Validation after the fixes: `swift build` succeeds with no new warnings (the one
 `SendableClosureCaptures` warning on the scan dispatch in `AppModel.startScan`
 is present in the baseline too, confirmed by building a full stash of it),
-self-test **144/144** in both debug and release (was 88 — 56 new checks). No scan
+self-test **148/148** in both debug and release (was 88 — 60 new checks), and
+clean under `--sanitize=thread`. No scan
 or layout regression: `~/Library` (427k files) scans in 6.1–6.3 s before and
 after, treemap layout 19–20 ms before and after, unreadable-directory count
 unchanged at 147–149.
@@ -289,7 +289,7 @@ what carries the path-caching fix in finding 10. Severity is **low**, not medium
 fits under `PATH_MAX` and asserts all three traversals reach the bottom with
 correct totals and no unreadable directories.
 
-### 12. Treemap layout runs synchronously on the main thread — DEFERRED
+### 12. Treemap layout runs synchronously on the main thread — FIXED
 
 Confirmed: `TreemapLayout.build` walks the live tree, allocating and sorting a
 `[NodeRef]` per visited directory, on the main thread; only rasterisation goes to
@@ -297,11 +297,24 @@ Confirmed: `TreemapLayout.build` walks the live tree, allocating and sorting a
 dragged.
 
 Cursor's 239 ms figure is a **debug** measurement. In release the same
-`~/Library` layout is **19–20 ms** (4,343 tiles / 442 folders), which is not a
-visible stall. Fixing it properly means a `Sendable` snapshot of the subtree so
-both layout and render can leave the main thread — a real refactor that also
-retires the `TreemapModel.ancestors` pinning hazard. Scheduled as item 3 of the
-0.3 plan.
+`~/Library` layout is **19–20 ms** (4,343 tiles / 442 folders), so this was never
+a visible stall — which is why it shipped after the rest.
+
+**Fix** — layout and rasterizing both run on `AppModel.treemapQueue`, a sibling
+of the `treeQueue` the File View already uses, and `detach` fences it before
+unlinking anything.
+
+Cursor recommended a `Sendable` snapshot of the subtree so the layout could never
+see a live `DirNode`. **Not taken**: it would make cells and frames carry indices
+rather than `NodeRef`s, rippling through hit-testing, labels and tooltips, to
+reach a guarantee the app already has a mechanism for. `treeQueue` exists so
+background reads of the tree can be fenced against a delete; the treemap is one
+more such read. `TreemapModel.ancestors` pinning stays — it keeps a laid-out
+cell's parent chain alive and was never what blocked this.
+
+**Verified under Thread Sanitizer** — `testTreemapLayoutIsFencedAgainstDeletes`
+leaves 24 layouts in flight and deletes a folder underneath them. Clean with the
+fence; TSan reports the race with it removed.
 
 ---
 
@@ -339,9 +352,9 @@ and from the mistaken publish-per-event model respectively. The release figure i
 
 ## What was left alone
 
-One item is still open: finding 12, treemap layout on the main thread. It is
-UI-thread work with no data-correctness consequence behind it, and it opens
-`docs/plan-0.3.md`.
+Every finding is now either fixed or explicitly rejected, across 0.3.0 and 0.3.1.
+`docs/plan-0.3.md` records what was built and, where the review's suggested
+approach was not taken, why.
 
 Cursor's own summary of the codebase is worth keeping: it traced the work-stack
 idle accounting and could not deadlock it, confirmed the squarify implementation

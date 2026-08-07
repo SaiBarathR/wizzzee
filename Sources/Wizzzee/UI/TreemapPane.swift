@@ -16,6 +16,7 @@ struct TreemapPane: View {
                 metric: model.sizeMetric,
                 selection: model.primarySelection,
                 revision: model.treeRevision,
+                layoutQueue: model.treemapQueue,
                 onSelect: { ref in model.selection = [ref] },
                 onZoom: { dir in model.zoom(into: dir) },
                 onHover: { ref in model.hoveredRef = ref }
