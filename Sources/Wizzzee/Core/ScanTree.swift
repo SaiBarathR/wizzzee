@@ -42,6 +42,28 @@ enum DirExclusion: UInt8 {
 
 /// A directory in the scanned tree.
 final class DirNode {
+    /// Stable identity for the lifetime of the process.
+    ///
+    /// `ObjectIdentifier` would be the obvious key for the Tree View's expansion
+    /// set, but it is the object's address: once a delete unlinks a subtree and
+    /// frees it, a later allocation can be handed the same address and inherit
+    /// whatever state was filed under it. A counter is never reused.
+    let id: UInt64 = DirNode.nextID.increment()
+    private static let nextID = Counter()
+
+    /// Monotonic across every thread that builds tree nodes — the scan workers
+    /// all allocate concurrently.
+    private final class Counter {
+        private let lock = UnfairLock()
+        private var value: UInt64 = 0
+        func increment() -> UInt64 {
+            lock.withLock {
+                value += 1
+                return value
+            }
+        }
+    }
+
     let name: String
     /// Unowned because the root retains the whole tree top-down; making this
     /// strong would create a reference cycle and leak the tree on rescan.
@@ -231,6 +253,11 @@ final class ScanResult {
     let rootPath: String
     /// Sorted by total size, descending.
     let extensionStats: [ExtensionStat]
+    /// The same table ranked by space on disk, capped at what the legend shows.
+    /// Derived once here because the legend's ranking cannot change for a given
+    /// scan, and recomputing it per SwiftUI body evaluation meant sorting every
+    /// extension on the disk each time anything at all was published.
+    let topByAllocated: [ExtensionStat]
     private let extensionIndex: [String: Int]
 
     let elapsed: TimeInterval
@@ -258,6 +285,9 @@ final class ScanResult {
         self.root = root
         self.rootPath = rootPath
         self.extensionStats = extensionStats
+        self.topByAllocated = Array(
+            extensionStats.sorted { $0.alloc > $1.alloc }.prefix(40)
+        )
         self.elapsed = elapsed
         self.deniedCount = deniedCount
         self.hardLinkSavings = hardLinkSavings
@@ -297,28 +327,40 @@ final class ScanResult {
         let matchPath = needle.contains("/")
         var heap = SizeHeap(limit: limit)
 
-        func walk(_ dir: DirNode) {
-            if !dir.files.isEmpty {
-                // Only build the (expensive) full path string when the filter
-                // actually needs it and the file is big enough to make the cut.
-                let dirPath = matchPath && !needle.isEmpty ? dir.path : ""
-                for i in dir.files.indices {
-                    let file = dir.files[i]
-                    if file.isDuplicateLink { continue }
-                    let weight = metric == .logical ? file.size : file.alloc
-                    if !heap.wouldAccept(weight) { continue }
-                    if !needle.isEmpty {
-                        let haystack =
-                            matchPath
-                            ? (dirPath + "/" + file.name) : file.name
-                        if !haystack.containsCaseInsensitive(needle) { continue }
-                    }
-                    heap.insert(NodeRef(dir: dir, fileIndex: i), size: weight)
+        // An explicit stack rather than recursion: nothing bounds how deep a
+        // scanned tree goes, and this walk runs on a queue whose threads get a
+        // 512 KB stack. Each entry carries its own path, so a path filter
+        // extends the parent's string instead of rebuilding an absolute path
+        // from the parent chain once per directory.
+        var stack: [(dir: DirNode, path: String)] = [
+            (root, matchPath ? root.path : "")
+        ]
+        while let (dir, dirPath) = stack.popLast() {
+            for i in dir.files.indices {
+                let file = dir.files[i]
+                if file.isDuplicateLink { continue }
+                let weight = metric == .logical ? file.size : file.alloc
+                if !heap.wouldAccept(weight) { continue }
+                if !needle.isEmpty {
+                    let haystack =
+                        matchPath
+                        ? (dirPath + "/" + file.name) : file.name
+                    if !haystack.containsCaseInsensitive(needle) { continue }
                 }
+                heap.insert(NodeRef(dir: dir, fileIndex: i), size: weight)
             }
-            for sub in dir.subdirs { walk(sub) }
+            for sub in dir.subdirs {
+                stack.append(
+                    (
+                        sub,
+                        matchPath
+                            ? (dirPath.hasSuffix("/")
+                                ? dirPath + sub.name : dirPath + "/" + sub.name)
+                            : ""
+                    )
+                )
+            }
         }
-        walk(root)
         return heap.sortedDescending()
     }
 
@@ -389,13 +431,37 @@ private struct SizeHeap {
 }
 
 extension String {
+    /// Reads this string's UTF-8 as a contiguous buffer without copying it,
+    /// which is what every natively created Swift string can offer. Only a
+    /// string bridged from `NSString` takes the copying fallback.
+    @inline(__always)
+    func withUTF8Bytes<T>(_ body: (UnsafeBufferPointer<UInt8>) -> T) -> T {
+        if let result = utf8.withContiguousStorageIfAvailable(body) { return result }
+        var copy = self
+        return copy.withUTF8(body)
+    }
+
     /// ASCII-focused case-insensitive substring test. `localizedCaseInsensitive`
     /// variants are far too slow to run across millions of filenames per
     /// keystroke; `needle` is expected to be already lowercased.
+    ///
+    /// Both sides are read in place. Materializing `[UInt8]` arrays here instead
+    /// put two heap allocations inside a loop that runs over every file in the
+    /// scan that clears the size prefilter, on each keystroke.
     func containsCaseInsensitive(_ needle: String) -> Bool {
         if needle.isEmpty { return true }
-        let hay = Array(utf8)
-        let pin = Array(needle.utf8)
+        return withUTF8Bytes { hay in
+            needle.withUTF8Bytes { pin in
+                String.contains(hay: hay, pin: pin)
+            }
+        }
+    }
+
+    private static func contains(
+        hay: UnsafeBufferPointer<UInt8>,
+        pin: UnsafeBufferPointer<UInt8>
+    ) -> Bool {
+        if pin.isEmpty { return true }
         if pin.count > hay.count { return false }
 
         @inline(__always) func lower(_ c: UInt8) -> UInt8 {

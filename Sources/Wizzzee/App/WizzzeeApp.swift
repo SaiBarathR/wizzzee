@@ -22,8 +22,12 @@ struct WizzzeeApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .toolbar) {
+                // Disabled rather than silently ignored: `startScan` refuses
+                // while a scan is running, so ⌘R mid-scan looked like a broken
+                // shortcut or a wedged app.
                 Button("Rescan") { model.startScan() }
                     .keyboardShortcut("r", modifiers: .command)
+                    .disabled(model.phase == .scanning)
                 Divider()
                 // One item with a changing verb rather than a checkmark, which
                 // is how the system apps title a pane they can hide.
