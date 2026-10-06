@@ -41,6 +41,9 @@ enum SelfTest {
         testHardLinkPromisesNoSpace(root)
         testExtensionStats(root)
         testFilterAndRanking(root)
+        testFilteringFoldsCaseBeyondASCII()
+        testPercentOfParentSortsByTheMetricOnShow()
+        testASupersededWalkNeverDelivers()
         testDeepestReachableTreeIsWalked()
         // Runs before anything that deletes from the fixture: it asserts the
         // fixture is *still there* afterwards, which a later check couldn't
@@ -450,6 +453,275 @@ enum SelfTest {
             mixedCase.first?.name == "three.dat",
             "got \(mixedCase.first?.name ?? "nil")"
         )
+    }
+
+    /// The File View filter lowercased what was typed with full Unicode rules
+    /// and then compared it against file names folding only A–Z, so a name with
+    /// an accented capital could not be found by typing it — in either case.
+    /// Normalization hid more than that: most of macOS writes `é` as `e` plus a
+    /// combining accent, and a text field types the single precomposed scalar,
+    /// so an accent typed into the filter matched almost nothing at all.
+    ///
+    /// The names are created through `open(2)` rather than `FileManager`, which
+    /// would decompose them all on the way to disk; this needs one of each.
+    private static func testFilteringFoldsCaseBeyondASCII() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-fold-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let precomposed = "\u{C9}lan.MOV"  // É as one scalar
+        let decomposed = "RE\u{301}SUME\u{301}.pdf"  // É as E + combining acute
+        let umlaut = "\u{DC}BUNG.pdf"  // Ü as one scalar
+        let cyrillic = "\u{414}\u{41E}\u{41A}\u{41B}\u{410}\u{414}.txt"  // ДОКЛАД
+        let names = [precomposed, decomposed, umlaut, cyrillic, "plain.txt"]
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            for (i, name) in names.enumerated() {
+                let fd = (base.path + "/" + name).withCString {
+                    open($0, O_CREAT | O_WRONLY, 0o644)
+                }
+                guard fd >= 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                let bytes = [UInt8](repeating: 0x41, count: 1_000 + i * 100)
+                _ = bytes.withUnsafeBytes { Foundation.write(fd, $0.baseAddress, $0.count) }
+                close(fd)
+            }
+        } catch {
+            check("the folding fixture can be built", false, "\(error)")
+            return
+        }
+
+        let result = scan(base)
+        check(
+            "the folding fixture scanned",
+            result.root.files.count == names.count,
+            "got \(result.root.files.map(\.name))"
+        )
+        func found(_ query: String) -> [String] {
+            result.largestFiles(matching: query, limit: 10).map(\.name)
+        }
+        func finds(_ query: String, _ name: String) -> Bool {
+            // String equality is canonical equivalence, so this holds however
+            // the filesystem chose to store the name.
+            found(query).count == 1 && found(query).first == name
+        }
+
+        check(
+            "an accented capital is found by typing it",
+            finds("\u{C9}lan", precomposed),
+            "got \(found("\u{C9}lan"))"
+        )
+        check(
+            "and by typing it in lower case",
+            finds("\u{E9}lan", precomposed),
+            "got \(found("\u{E9}lan"))"
+        )
+        check(
+            "an upper-case umlaut is found either way too",
+            finds("\u{DC}BUNG", umlaut) && finds("\u{FC}bung", umlaut),
+            "got \(found("\u{DC}BUNG")) and \(found("\u{FC}bung"))"
+        )
+        check(
+            "a typed accent finds a name stored as a letter plus a combining mark",
+            finds("r\u{E9}sum\u{E9}", decomposed),
+            "got \(found("r\u{E9}sum\u{E9}"))"
+        )
+        check(
+            "and a combining mark in the filter finds a name stored precomposed",
+            finds("e\u{301}lan", precomposed),
+            "got \(found("e\u{301}lan"))"
+        )
+        check(
+            "capitals with no ASCII letter under them fold as well",
+            finds("\u{434}\u{43E}\u{43A}\u{43B}\u{430}\u{434}", cyrillic),
+            "got \(found("\u{434}\u{43E}\u{43A}\u{43B}\u{430}\u{434}"))"
+        )
+        check(
+            "a path filter folds the same way",
+            finds("/\u{E9}lan", precomposed),
+            "got \(found("/\u{E9}lan"))"
+        )
+        check(
+            "a letter that is in none of the names matches none of them",
+            found("\u{F1}").isEmpty,
+            "got \(found("\u{F1}"))"
+        )
+        // The byte-for-byte path most filters take is untouched.
+        check(
+            "plain ASCII filters still match, across an accented name too",
+            finds("PLAIN", "plain.txt") && finds("lan.mov", precomposed),
+            "got \(found("PLAIN")) and \(found("lan.mov"))"
+        )
+    }
+
+    /// A sparse file and a smaller one that is fully allocated, so the two size
+    /// metrics rank them in opposite orders.
+    ///
+    /// sparse.img  8,000,000 bytes long, next to nothing on disk
+    /// solid.dat     200,000 bytes, all of them written
+    private static func buildSparseFixture(at root: URL) throws {
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        let sparse = root.appendingPathComponent("sparse.img")
+        FileManager.default.createFile(atPath: sparse.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: sparse)
+        try handle.truncate(atOffset: 8_000_000)
+        try handle.close()
+        try write(root.appendingPathComponent("solid.dat"), bytes: 200_000)
+    }
+
+    /// "% of Parent" is drawn with the metric on show, but sorting by it ranked
+    /// rows by logical size whatever that metric was. With On Disk showing —
+    /// the default — a sparse image sorted above a file that visibly took far
+    /// more of the folder, and the column read out of order.
+    @MainActor
+    private static func testPercentOfParentSortsByTheMetricOnShow() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-percent-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildSparseFixture(at: base)
+        } catch {
+            check("the sparse fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let sparse = result.root.files.first(where: { $0.name == "sparse.img" }),
+            let solid = result.root.files.first(where: { $0.name == "solid.dat" }),
+            sparse.size > solid.size, sparse.alloc < solid.alloc
+        else {
+            check(
+                "the sparse fixture ranks differently by size and on disk",
+                false,
+                "\(result.root.files.map { "\($0.name) \($0.size)/\($0.alloc)" })"
+            )
+            return
+        }
+
+        func order() -> [String] {
+            model.treeRows.filter { !$0.ref.isDirectory }.map(\.ref.name)
+        }
+        func percentages() -> [Double] {
+            model.treeRows.filter { !$0.ref.isDirectory }
+                .map { $0.ref.fractionOfParent(using: model.sizeMetric) }
+        }
+
+        model.treeSort = [TreeSort(.percent)]
+        model.rebuildTreeRows()
+        check(
+            "sorted by % of Parent with On Disk showing, the fuller file leads",
+            order() == ["solid.dat", "sparse.img"],
+            "got \(order())"
+        )
+        check(
+            "so the percentages on show run in order",
+            percentages() == percentages().sorted(by: >),
+            "got \(percentages())"
+        )
+
+        model.sizeMetric = .logical
+        model.rebuildTreeRows()
+        check(
+            "and with Size showing, the longer one does",
+            order() == ["sparse.img", "solid.dat"]
+                && percentages() == percentages().sorted(by: >),
+            "got \(order()) at \(percentages())"
+        )
+
+        model.treeSort = [TreeSort(.percent, order: .forward)]
+        model.rebuildTreeRows()
+        check(
+            "ascending reverses it rather than falling back to another column",
+            order() == ["solid.dat", "sparse.img"],
+            "got \(order())"
+        )
+    }
+
+    /// A newer File View walk replaced the older one's token without cancelling
+    /// it, so a walk already under way ran its full pass over the scan for rows
+    /// nobody would be shown, with its replacement queued behind it. Worse, a
+    /// walk that had already finished still delivered: its rows — ranked by a
+    /// metric no longer on show — landed first and stopped the spinner while
+    /// the real answer was still on its way.
+    @MainActor
+    private static func testASupersededWalkNeverDelivers() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-supersede-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildSparseFixture(at: base)
+        } catch {
+            check("the supersede fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard loadSynchronously(into: model) != nil else { return }
+        pumpUntilFileRowsSettle(model, expecting: 2)
+
+        // The first walk is given time to finish its pass, so its rows are
+        // sitting on the main queue when the metric changes under them.
+        model.refreshFileRows(immediately: true)
+        let first = model.fileWalkToken
+        usleep(300_000)
+        model.sizeMetric = .logical
+        model.refreshFileRows(immediately: true)
+        let second = model.fileWalkToken
+
+        check(
+            "a walk that has been replaced is told to stop",
+            first !== second && first.isCancelled,
+            "it was left to run its full pass"
+        )
+        check(
+            "the walk that replaced it is not",
+            !second.isCancelled,
+            "the new walk was cancelled along with the old"
+        )
+
+        // Caught at the first moment the spinner stops, not once everything
+        // has settled: the list keeps its old rows while a walk is running, so
+        // what matters is which walk is allowed to say it has finished — and
+        // the replacement would paper over a wrong answer a moment later.
+        let deadline = Date().addingTimeInterval(10)
+        while model.isFilteringFiles && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        // The sparse file is nearly all of the scan by length and almost none
+        // of it on disk, so its share says which metric the rows were built
+        // for. The table's own sort column decides their order, not this.
+        let share = model.fileRows.first { $0.name == "sparse.img" }?.fractionOfRoot
+        check(
+            "its rows never reach the list",
+            (share ?? 0) > 0.9,
+            "the spinner stopped on rows built for the metric just switched "
+                + "away from: sparse.img at \(String(describing: share)) of the scan"
+        )
+        check(
+            "and the replacement's rows do",
+            !model.isFilteringFiles && model.fileRows.count == 2,
+            "filtering=\(model.isFilteringFiles), rows \(model.fileRows.map(\.name))"
+        )
+
+        model.refreshFileRows(immediately: true)
+        let third = model.fileWalkToken
+        model.startScan()
+        check(
+            "a rescan stops a walk over the tree it is throwing away",
+            third.isCancelled,
+            "it was left to finish, holding the old scan in memory"
+        )
+        pumpUntilSettled(model)
     }
 
     /// Aggregation, the extension remap and the File View's walk each descend

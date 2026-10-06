@@ -49,6 +49,8 @@ struct TreeSort: SortComparator, Hashable {
         switch key {
         case .name:
             result = lhs.name.localizedStandardCompare(rhs.name)
+        // `.percent` never gets this far in practice: `rebuildTreeRows` turns
+        // it into whichever of the two size keys the column is drawn with.
         case .size, .percent:
             result = numeric(lhs.size, rhs.size)
         case .allocated:
@@ -253,7 +255,11 @@ final class AppModel: ObservableObject {
     /// nodes that walk is reading — but with this the wait is the few
     /// microseconds to the walk's next check rather than a full pass over every
     /// file in the scan.
-    private var fileWalkToken = WalkToken()
+    ///
+    /// A newer walk and a rescan cancel it too, for a plainer reason: nobody is
+    /// going to be shown its rows. It is also how a walk knows it is still the
+    /// current one when it comes back with them.
+    private(set) var fileWalkToken = WalkToken()
     /// Every background read of the scan tree runs here, so a delete can make
     /// itself exclusive by syncing against it. Serial by design: two concurrent
     /// walks would buy nothing, and the barrier below depends on the ordering.
@@ -340,6 +346,9 @@ final class AppModel: ObservableObject {
         // describes the scan being thrown away.
         fileFilterWork?.cancel()
         fileFilterWork = nil
+        // One already under way is told to stop as well, rather than finishing
+        // its pass and keeping the old scan in memory until it has.
+        fileWalkToken.cancel()
         isFilteringFiles = false
         fileRows = []
         selection = []
@@ -462,7 +471,15 @@ final class AppModel: ObservableObject {
             treeRows = []
             return
         }
-        let sort = treeSort.first ?? TreeSort(.size)
+        var sort = treeSort.first ?? TreeSort(.size)
+        // "% of Parent" is drawn with the metric on show, and rows are only
+        // ever ranked against their siblings, which share a parent — so
+        // ordering by the percentage is ordering by that metric's bytes. Ranked
+        // by logical size regardless, a sparse image sorted above a file that
+        // visibly took far more of the folder.
+        if sort.key == .percent {
+            sort.key = sizeMetric == .logical ? .size : .allocated
+        }
         var rows: [TreeRow] = []
         rows.reserveCapacity(min(4096, root.subdirs.count * 4 + 16))
         appendRows(for: root, depth: 0, isLast: true, sort: sort, into: &rows)
@@ -528,6 +545,11 @@ final class AppModel: ObservableObject {
     /// tree, so it runs off the main thread and coalesces keystrokes.
     func refreshFileRows(immediately: Bool = false) {
         fileFilterWork?.cancel()
+        // That only stops a walk that hasn't started. One already running is
+        // told through its token, or it finishes a pass over every file in the
+        // scan for rows nobody will see — with the walk replacing it waiting
+        // behind it on the same serial queue.
+        fileWalkToken.cancel()
         guard let result else {
             fileRows = []
             return
@@ -571,7 +593,12 @@ final class AppModel: ObservableObject {
                 )
             }
             DispatchQueue.main.async {
-                guard let self, self.fileQuery == query,
+                // Only the newest walk delivers. One that had finished its pass
+                // before being replaced would otherwise land first, with rows
+                // built for a metric no longer on show, and stop the spinner
+                // while the real answer was still on its way.
+                guard let self, self.fileWalkToken === token,
+                    self.fileQuery == query,
                     self.treeRevision == revision, self.result === source
                 else { return }
                 self.fileRows = rows.sorted(using: self.fileSort)
