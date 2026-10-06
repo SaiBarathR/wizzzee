@@ -459,6 +459,67 @@ final class ScanResult {
         return promoted
     }
 
+    /// As `releaseHardLink`, for every name under a folder that is being
+    /// removed whole.
+    ///
+    /// A folder's totals come off in one step, so nothing looked at the files
+    /// inside it: a counted name went with its folder and took the bytes out of
+    /// the tree while another name still held them on disk, and a duplicate
+    /// went without its partner ever losing a link.
+    ///
+    /// The names leaving are gathered first and the rest of the tree is walked
+    /// once for all of them. `releaseHardLink` per file would be a full walk
+    /// each, and one folder can hold hundreds of thousands of links. Call it
+    /// while `removed` is still attached, so it can be told apart from what
+    /// survives it. Returns each promoted name's folder and the bytes it now
+    /// accounts for.
+    func releaseHardLinks(
+        under removed: DirNode
+    ) -> [(dir: DirNode, size: UInt64, alloc: UInt64)] {
+        // Per inode: how many of its names are leaving, and whether one of
+        // them is the name its bytes are counted under.
+        var leaving: [UInt64: (names: Int, counted: Bool)] = [:]
+        var stack: [DirNode] = [removed]
+        while let dir = stack.popLast() {
+            for i in dir.files.indices where dir.files[i].sharesStorage {
+                var going = leaving[dir.files[i].fileID] ?? (0, false)
+                going.names += 1
+                if dir.files[i].isDuplicateLink {
+                    hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                } else {
+                    going.counted = true
+                }
+                leaving[dir.files[i].fileID] = going
+            }
+            stack.append(contentsOf: dir.subdirs)
+        }
+        guard !leaving.isEmpty else { return [] }
+
+        var promoted: [(dir: DirNode, size: UInt64, alloc: UInt64)] = []
+        stack = [root]
+        while let dir = stack.popLast() {
+            if dir === removed { continue }
+            for i in dir.files.indices where dir.files[i].sharesStorage {
+                guard let going = leaving[dir.files[i].fileID] else { continue }
+
+                // A saturated count is left alone, as above.
+                if dir.files[i].linkCount < .max {
+                    let left = Int(dir.files[i].linkCount) - going.names
+                    dir.files[i].linkCount = UInt8(max(1, left))
+                }
+                if going.counted, dir.files[i].isDuplicateLink {
+                    dir.files[i].isDuplicateLink = false
+                    promoted.append((dir, dir.files[i].size, dir.files[i].alloc))
+                    hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                    // Only the first survivor takes the bytes over.
+                    leaving[dir.files[i].fileID]?.counted = false
+                }
+            }
+            stack.append(contentsOf: dir.subdirs)
+        }
+        return promoted
+    }
+
     /// Drops `size` from the double-counting statistic when a duplicate name is
     /// removed outright rather than promoted.
     func forgetDuplicate(size: UInt64) {

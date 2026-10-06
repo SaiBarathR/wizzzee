@@ -225,6 +225,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// What a folder holds that deleting it would not free.
+    private struct SharedStorage {
+        var size: UInt64 = 0
+        var alloc: UInt64 = 0
+        /// Names under the folder whose data has another name outside it.
+        var names = 0
+    }
+
+    /// `sharedStorage(under:)` for each folder asked about, keyed on
+    /// `DirNode.id`.
+    ///
+    /// `reclaimableSize` is read from view bodies — the header and the status
+    /// line re-evaluate on every hover — and answering it for a folder means
+    /// looking at every file underneath. The answer can only change when the
+    /// tree does, so it is worked out once per folder and thrown away by a
+    /// delete or a rescan.
+    private var sharedStorageCache: [UInt64: SharedStorage] = [:]
+
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?
     private var fileFilterWork: DispatchWorkItem?
@@ -328,6 +346,7 @@ final class AppModel: ObservableObject {
         // A delete still awaiting confirmation names items in the tree being
         // thrown away, so it goes with the selection.
         permanentDeleteTargets = []
+        sharedStorageCache = [:]
         treemapRoot = nil
         expanded = []
         progress = ScanEngine.Progress()
@@ -672,17 +691,74 @@ final class AppModel: ObservableObject {
     /// allocated promised 200 GB back from a sparse image that occupies 8 GB;
     /// counting a hard link's bytes promised space that deleting one of its
     /// names never frees.
+    ///
+    /// That holds inside a folder too. Its total counts every hard-linked file
+    /// in it in full, so the ones with a name left over outside the folder are
+    /// taken back off.
     func reclaimableSize(_ refs: Set<NodeRef>) -> UInt64 {
         distinctTargets(refs).reduce(0) { total, ref in
             if let file = ref.file, file.sharesStorage { return total }
-            return total + (sizeMetric == .logical ? ref.size : ref.alloc)
+            let weight = sizeMetric == .logical ? ref.size : ref.alloc
+            guard ref.isDirectory else { return total + weight }
+            let shared = sharedStorage(under: ref.dir)
+            let staying = sizeMetric == .logical ? shared.size : shared.alloc
+            return total + weight - min(weight, staying)
         }
     }
 
     /// Whether any target's bytes live under more than one name, which makes the
     /// reclaimable figure a ceiling rather than a promise.
     func selectionSharesStorage(_ refs: Set<NodeRef>) -> Bool {
-        distinctTargets(refs).contains { $0.file?.sharesStorage == true }
+        distinctTargets(refs).contains { ref in
+            ref.isDirectory
+                ? sharedStorage(under: ref.dir).names > 0
+                : ref.file?.sharesStorage == true
+        }
+    }
+
+    /// The bytes under `dir` that would still be on disk once it was deleted.
+    ///
+    /// An inode goes with the folder only if every one of its names is in
+    /// there. One with a name left over anywhere else — elsewhere in the scan,
+    /// or outside it altogether, which only the link count can say — stays, and
+    /// so does not count towards what the delete frees.
+    ///
+    /// Judged one folder at a time: a pair split across two folders that are
+    /// both selected is counted as staying for each. That errs low, which is
+    /// the side this figure is meant to err on.
+    private func sharedStorage(under dir: DirNode) -> SharedStorage {
+        if let known = sharedStorageCache[dir.id] { return known }
+
+        // Per inode: the names found under `dir`, the most names it was ever
+        // seen to have, and the bytes its counted name carries.
+        var inodes: [UInt64: (names: Int, links: UInt8, size: UInt64, alloc: UInt64)] =
+            [:]
+        var stack: [DirNode] = [dir]
+        while let step = stack.popLast() {
+            for i in step.files.indices where step.files[i].sharesStorage {
+                var seen = inodes[step.files[i].fileID] ?? (0, 0, 0, 0)
+                seen.names += 1
+                seen.links = max(seen.links, step.files[i].linkCount)
+                if !step.files[i].isDuplicateLink {
+                    seen.size = step.files[i].size
+                    seen.alloc = step.files[i].alloc
+                }
+                inodes[step.files[i].fileID] = seen
+            }
+            stack.append(contentsOf: step.subdirs)
+        }
+
+        var shared = SharedStorage()
+        // A saturated count hides how many names there really are, so it is
+        // taken to mean there is always one more.
+        for seen in inodes.values
+        where seen.links == .max || seen.names < Int(seen.links) {
+            shared.size += seen.size
+            shared.alloc += seen.alloc
+            shared.names += seen.names
+        }
+        sharedStorageCache[dir.id] = shared
+        return shared
     }
 
     /// Runs a delete batch off the main actor, reporting progress as it goes.
@@ -864,6 +940,7 @@ final class AppModel: ObservableObject {
         selection = []
         permanentDeleteTargets = []
         hoveredRef = nil
+        sharedStorageCache = [:]
         treeRevision += 1
         // Dropped here and now, not when the walk below returns with fresh ones.
         // A row names its file by index, so the rows already on screen name
@@ -913,6 +990,14 @@ final class AppModel: ObservableObject {
 
     private func detachDirectory(_ node: DirNode) {
         guard let parent = node.parent else { return }
+        // Hard links first, while the folder is still attached. A name under it
+        // that carried an inode's bytes hands them to a name outside it, as a
+        // single file does — otherwise they leave the totals with the folder
+        // while still on disk — and every surviving name loses the links that
+        // are going.
+        for promoted in result?.releaseHardLinks(under: node) ?? [] {
+            add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
+        }
         subtract(
             size: node.totalSize,
             alloc: node.totalAlloc,

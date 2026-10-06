@@ -59,6 +59,8 @@ enum SelfTest {
         testAncestorDedupe(batchRoot)
         testDeletingTheCountedNameOfAPairPromotesTheOther()
         testDeletingTheDuplicateNameFreesTheOther()
+        testDeletingAFolderHandsItsHardLinksOn()
+        testAFolderPromisesOnlyWhatDeletingItFrees()
         testDeletingALinkWithNoPartnerInTreeSubtracts()
         testTreemapLayoutIsFencedAgainstDeletes()
         testAQueuedLayoutPinsTheFoldersAboveItsRoot()
@@ -180,6 +182,97 @@ enum SelfTest {
         )
         try write(outside, bytes: 11_000)
         try manager.linkItem(at: outside, to: root.appendingPathComponent("inside.dat"))
+    }
+
+    /// Hard links in every arrangement a folder delete has to get right.
+    ///
+    /// plain/p.dat        5,000
+    /// left/shared.dat    9,000  one inode, a name in each of two folders
+    /// right/mirror.dat
+    /// both/x.dat         7,000  one inode, both names under one folder
+    /// both/inner/y.dat
+    /// trio/{a,b,c}/t.dat 2,000  one inode, three names in three folders
+    /// mixed/m.dat        3,000
+    /// mixed/out.dat     11,000  its other name is outside the scan
+    private static func buildLinkFarm(at root: URL, outside: URL) throws {
+        let manager = FileManager.default
+        for folder in [
+            "plain", "left", "right", "both/inner", "trio/a", "trio/b", "trio/c",
+            "mixed",
+        ] {
+            try manager.createDirectory(
+                at: root.appendingPathComponent(folder),
+                withIntermediateDirectories: true
+            )
+        }
+        try manager.createDirectory(
+            at: outside.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        func link(_ from: String, _ to: String) throws {
+            try manager.linkItem(
+                at: root.appendingPathComponent(from),
+                to: root.appendingPathComponent(to)
+            )
+        }
+        try write(root.appendingPathComponent("plain/p.dat"), bytes: 5_000)
+        try write(root.appendingPathComponent("left/shared.dat"), bytes: 9_000)
+        try link("left/shared.dat", "right/mirror.dat")
+        try write(root.appendingPathComponent("both/x.dat"), bytes: 7_000)
+        try link("both/x.dat", "both/inner/y.dat")
+        try write(root.appendingPathComponent("trio/a/t.dat"), bytes: 2_000)
+        try link("trio/a/t.dat", "trio/b/t.dat")
+        try link("trio/a/t.dat", "trio/c/t.dat")
+        try write(root.appendingPathComponent("mixed/m.dat"), bytes: 3_000)
+        try write(outside, bytes: 11_000)
+        try manager.linkItem(
+            at: outside,
+            to: root.appendingPathComponent("mixed/out.dat")
+        )
+    }
+
+    /// Builds a link farm of its own, scans it through a model, and hands both
+    /// to `body`. Every check that deletes from one gets a fresh copy, so none
+    /// of their expected totals depend on what ran before.
+    @MainActor
+    private static func withLinkFarm(
+        _ tag: String,
+        _ body: (AppModel, ScanResult) -> Void
+    ) {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-farm-\(tag)-\(getpid())")
+        let outside = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-farm-\(tag)-outside-\(getpid())")
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        do {
+            try buildLinkFarm(
+                at: base,
+                outside: outside.appendingPathComponent("target.dat")
+            )
+        } catch {
+            check("the link farm (\(tag)) can be built", false, "\(error)")
+            return
+        }
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        body(model, result)
+    }
+
+    /// Which of two folders holds a pair's counted name and which its
+    /// duplicate. The scan counts whichever a worker reaches first, so the
+    /// roles are looked up rather than assumed.
+    private static func roles(
+        _ a: DirNode?,
+        _ b: DirNode?
+    ) -> (counted: DirNode, duplicate: DirNode)? {
+        guard let a, let b else { return nil }
+        if a.files.contains(where: \.isDuplicateLink) { return (b, a) }
+        if b.files.contains(where: \.isDuplicateLink) { return (a, b) }
+        return nil
     }
 
     private static func write(_ url: URL, bytes: Int) throws {
@@ -1674,6 +1767,301 @@ enum SelfTest {
             FileManager.default.fileExists(atPath: outside.path),
             "the partner outside the scan was removed too"
         )
+    }
+
+    /// Removing a folder subtracts its totals in one step, so nothing looked at
+    /// the files inside it. A counted name went with its folder and took the
+    /// bytes out of the tree while another name still held them on disk, and a
+    /// duplicate went without its partner ever losing a link — the same two
+    /// faults the single-file path was fixed for, reached by deleting the
+    /// folder instead of the file.
+    @MainActor
+    private static func testDeletingAFolderHandsItsHardLinksOn() {
+        // The folder holding the counted name of a cross-folder pair.
+        withLinkFarm("counted") { model, result in
+            guard
+                let pair = roles(
+                    result.root.subdir(named: "left"),
+                    result.root.subdir(named: "right")
+                )
+            else {
+                check("the farm's cross-folder pair scanned", false, "no duplicate")
+                return
+            }
+            check(
+                "the farm starts with every duplicate name set aside",
+                result.hardLinkSavings == 20_000,
+                "got \(result.hardLinkSavings), expected 20000"
+            )
+            let rootBefore = result.root.totalSize
+            let survivorBefore = pair.duplicate.totalSize
+            let filesBefore = result.root.totalFiles
+
+            deletePermanently(model, [NodeRef(pair.counted)])
+
+            check(
+                "deleting the counted name's folder reports no error",
+                model.actionError == nil,
+                model.actionError ?? ""
+            )
+            check(
+                "the bytes stay in the root's total, since they are still on disk",
+                result.root.totalSize == rootBefore,
+                "root is \(result.root.totalSize), expected \(rootBefore)"
+            )
+            check(
+                "the surviving name's folder takes them over",
+                pair.duplicate.totalSize == survivorBefore + 9_000,
+                "got \(pair.duplicate.totalSize), "
+                    + "expected \(survivorBefore + 9_000)"
+            )
+            check(
+                "the survivor stops being a duplicate, and stops sharing",
+                pair.duplicate.files.first?.isDuplicateLink == false
+                    && pair.duplicate.files.first?.sharesStorage == false,
+                "duplicate=\(String(describing: pair.duplicate.files.first?.isDuplicateLink)), "
+                    + "linkCount=\(String(describing: pair.duplicate.files.first?.linkCount))"
+            )
+            check(
+                "the double-counting figure drops by that one file",
+                result.hardLinkSavings == 11_000,
+                "got \(result.hardLinkSavings), expected 11000"
+            )
+            check(
+                "the counts lose the folder and the one name in it",
+                result.root.totalFiles == filesBefore - 1,
+                "\(result.root.totalFiles) files, expected \(filesBefore - 1)"
+            )
+            check(
+                "the root's total is still the sum of its folders",
+                result.root.totalSize
+                    == result.root.subdirs.reduce(0) { $0 + $1.totalSize },
+                "root \(result.root.totalSize) vs folders "
+                    + "\(result.root.subdirs.reduce(0) { $0 + $1.totalSize })"
+            )
+        }
+
+        // The mirror: the folder holding the duplicate. Nothing moves, but the
+        // name left behind is now the only one.
+        withLinkFarm("duplicate") { model, result in
+            guard
+                let pair = roles(
+                    result.root.subdir(named: "left"),
+                    result.root.subdir(named: "right")
+                )
+            else {
+                check("the second farm's pair scanned", false, "no duplicate")
+                return
+            }
+            let rootBefore = result.root.totalSize
+            let countedBefore = pair.counted.totalSize
+
+            deletePermanently(model, [NodeRef(pair.duplicate)])
+
+            check(
+                "removing the duplicate's folder moves nothing",
+                result.root.totalSize == rootBefore
+                    && pair.counted.totalSize == countedBefore,
+                "root \(result.root.totalSize) of \(rootBefore), "
+                    + "counted \(pair.counted.totalSize) of \(countedBefore)"
+            )
+            check(
+                "the name still holding the bytes stops counting as shared",
+                pair.counted.files.first?.linkCount == 1
+                    && pair.counted.files.first?.sharesStorage == false,
+                "linkCount=\(String(describing: pair.counted.files.first?.linkCount))"
+            )
+            check(
+                "and the double-counting figure forgets the name that went",
+                result.hardLinkSavings == 11_000,
+                "got \(result.hardLinkSavings), expected 11000"
+            )
+        }
+
+        // Both names under the folder being removed, then three names removed
+        // a folder at a time.
+        withLinkFarm("inside") { model, result in
+            guard let both = result.root.subdir(named: "both"),
+                let trio = result.root.subdir(named: "trio")
+            else {
+                check("the third farm scanned", false, "missing folders")
+                return
+            }
+            let rootBefore = result.root.totalSize
+
+            deletePermanently(model, [NodeRef(both)])
+            check(
+                "a pair wholly inside the folder leaves with it, once",
+                result.root.totalSize == rootBefore - 7_000
+                    && result.hardLinkSavings == 13_000,
+                "root \(result.root.totalSize), expected \(rootBefore - 7_000); "
+                    + "savings \(result.hardLinkSavings), expected 13000"
+            )
+
+            let trioBefore = trio.totalSize
+            guard
+                let counted = trio.subdirs.first(where: {
+                    $0.files.first?.isDuplicateLink == false
+                })
+            else {
+                check("one of the three names is counted", false, "none is")
+                return
+            }
+            deletePermanently(model, [NodeRef(counted)])
+            let promoted = trio.subdirs.filter {
+                $0.files.first?.isDuplicateLink == false
+            }
+            check(
+                "exactly one of the two names left takes the bytes over",
+                trio.subdirs.count == 2 && promoted.count == 1
+                    && trio.totalSize == trioBefore,
+                "\(promoted.count) promoted of \(trio.subdirs.count), "
+                    + "trio is \(trio.totalSize), expected \(trioBefore)"
+            )
+            check(
+                "both still share their storage, with one link fewer each",
+                trio.subdirs.allSatisfy { $0.files.first?.linkCount == 2 },
+                "link counts \(trio.subdirs.map { $0.files.first?.linkCount ?? 0 })"
+            )
+            check(
+                "and only one of them is still set aside as a duplicate",
+                result.hardLinkSavings == 11_000,
+                "got \(result.hardLinkSavings), expected 11000"
+            )
+
+            guard let next = promoted.first else { return }
+            deletePermanently(model, [NodeRef(next)])
+            check(
+                "the last name of the three ends up alone holding the bytes",
+                trio.subdirs.count == 1
+                    && trio.subdirs.first?.files.first?.sharesStorage == false
+                    && trio.totalSize == trioBefore
+                    && result.hardLinkSavings == 9_000,
+                "trio is \(trio.totalSize), expected \(trioBefore); "
+                    + "savings \(result.hardLinkSavings), expected 9000"
+            )
+        }
+
+        // Both folders of the pair in one batch: the bytes move to the second
+        // when the first goes, and must then leave with it — once.
+        withLinkFarm("batch") { model, result in
+            guard let left = result.root.subdir(named: "left"),
+                let right = result.root.subdir(named: "right")
+            else {
+                check("the fourth farm scanned", false, "missing folders")
+                return
+            }
+            let rootBefore = result.root.totalSize
+            deletePermanently(model, [NodeRef(left), NodeRef(right)])
+            check(
+                "deleting both folders of a pair drops its bytes exactly once",
+                result.root.totalSize == rootBefore - 9_000
+                    && result.hardLinkSavings == 11_000,
+                "root \(result.root.totalSize), expected \(rootBefore - 9_000); "
+                    + "savings \(result.hardLinkSavings), expected 11000"
+            )
+        }
+    }
+
+    /// The figure in the delete confirmation is the last thing read before an
+    /// irreversible delete, and for a folder it was the folder's whole total —
+    /// including every hard-linked file in it whose data has another name
+    /// somewhere else. Deleting the folder frees none of those, so the dialog
+    /// promised space that never came back, with no hard-link caveat either.
+    @MainActor
+    private static func testAFolderPromisesOnlyWhatDeletingItFrees() {
+        withLinkFarm("promise") { model, result in
+            guard
+                let pair = roles(
+                    result.root.subdir(named: "left"),
+                    result.root.subdir(named: "right")
+                ),
+                let plain = result.root.subdir(named: "plain"),
+                let both = result.root.subdir(named: "both"),
+                let trio = result.root.subdir(named: "trio"),
+                let mixed = result.root.subdir(named: "mixed"),
+                let ordinary = mixed.files.first(where: { $0.name == "m.dat" })
+            else {
+                check("the promise farm scanned", false, "missing folders")
+                return
+            }
+
+            check(
+                "a folder of ordinary files promises all of it",
+                model.reclaimableSize([NodeRef(plain)]) == plain.totalAlloc
+                    && plain.totalAlloc > 0
+                    && !model.selectionSharesStorage([NodeRef(plain)]),
+                "got \(model.reclaimableSize([NodeRef(plain)])) "
+                    + "of \(plain.totalAlloc)"
+            )
+            check(
+                "a folder whose only file has another name elsewhere promises nothing",
+                model.reclaimableSize([NodeRef(pair.counted)]) == 0
+                    && pair.counted.totalAlloc > 0,
+                "got \(model.reclaimableSize([NodeRef(pair.counted)])) for a "
+                    + "folder of \(pair.counted.totalAlloc)"
+            )
+            check(
+                "and the dialog is told why",
+                model.selectionSharesStorage([NodeRef(pair.counted)])
+                    && model.selectionSharesStorage([NodeRef(pair.duplicate)]),
+                "it would have quoted a plain figure"
+            )
+            check(
+                "a folder holding every name of a file still promises it",
+                model.reclaimableSize([NodeRef(both)]) == both.totalAlloc
+                    && model.reclaimableSize([NodeRef(trio)]) == trio.totalAlloc
+                    && both.totalAlloc > 0 && trio.totalAlloc > 0
+                    && !model.selectionSharesStorage([NodeRef(both), NodeRef(trio)]),
+                "both: \(model.reclaimableSize([NodeRef(both)])) of "
+                    + "\(both.totalAlloc), trio: "
+                    + "\(model.reclaimableSize([NodeRef(trio)])) of \(trio.totalAlloc)"
+            )
+            // The other name isn't in the tree at all here, so only the link
+            // count says it exists.
+            check(
+                "a name whose partner is outside the scan is left out too",
+                model.reclaimableSize([NodeRef(mixed)]) == ordinary.alloc
+                    && ordinary.alloc > 0
+                    && model.selectionSharesStorage([NodeRef(mixed)]),
+                "got \(model.reclaimableSize([NodeRef(mixed)])), "
+                    + "expected \(ordinary.alloc)"
+            )
+            check(
+                "a batch adds up the same way",
+                model.reclaimableSize([
+                    NodeRef(plain), NodeRef(pair.counted), NodeRef(mixed),
+                ]) == plain.totalAlloc + ordinary.alloc,
+                "got "
+                    + "\(model.reclaimableSize([NodeRef(plain), NodeRef(pair.counted), NodeRef(mixed)]))"
+                    + ", expected \(plain.totalAlloc + ordinary.alloc)"
+            )
+
+            model.sizeMetric = .logical
+            check(
+                "the logical metric leaves the same files out",
+                model.reclaimableSize([NodeRef(mixed)]) == 3_000
+                    && model.reclaimableSize([NodeRef(pair.counted)]) == 0
+                    && model.reclaimableSize([NodeRef(both)]) == 7_000,
+                "mixed \(model.reclaimableSize([NodeRef(mixed)])), "
+                    + "pair \(model.reclaimableSize([NodeRef(pair.counted)])), "
+                    + "both \(model.reclaimableSize([NodeRef(both)]))"
+            )
+            model.sizeMetric = .allocated
+
+            // Once the other name is gone the bytes really are this folder's to
+            // free, and an answer worked out before the delete must not be the
+            // one given after it.
+            deletePermanently(model, [NodeRef(pair.duplicate)])
+            check(
+                "the same folder promises its file once the other name is gone",
+                model.reclaimableSize([NodeRef(pair.counted)])
+                    == pair.counted.totalAlloc
+                    && !model.selectionSharesStorage([NodeRef(pair.counted)]),
+                "got \(model.reclaimableSize([NodeRef(pair.counted)])) "
+                    + "of \(pair.counted.totalAlloc)"
+            )
+        }
     }
 
     /// Two files in one folder, trashed together. Removing an entry renumbers
