@@ -307,7 +307,31 @@ final class AppModel: ObservableObject {
                 workspace.publisher(for: NSWorkspace.didRenameVolumeNotification)
             )
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.refreshVolumes() }
+            .sink { [weak self] note in
+                guard let self else { return }
+                self.selectedVolumePath = Self.selection(
+                    self.selectedVolumePath,
+                    following: note
+                )
+                self.refreshVolumes()
+            }
+    }
+
+    /// Where a selection at `path` should point once `note` has happened: the
+    /// volume's new mount point if it is the one that was just renamed, and
+    /// wherever it already was otherwise.
+    ///
+    /// Renaming a volume moves its mount point. Left to `refreshVolumes`, the
+    /// old path is simply missing from the list, the selected disk is taken for
+    /// an ejected one, and the selection falls back to the boot volume — so the
+    /// next Scan reads a different disk from the one that was picked.
+    static func selection(_ path: String, following note: Notification) -> String {
+        guard note.name == NSWorkspace.didRenameVolumeNotification,
+            let old = note.userInfo?[NSWorkspace.oldVolumeURLUserInfoKey] as? URL,
+            let new = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL,
+            old.path == path
+        else { return path }
+        return new.path
     }
 
     /// The one selected item, when exactly one is selected. The treemap

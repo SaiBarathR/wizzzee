@@ -2894,6 +2894,59 @@ enum SelfTest {
             "the list is \(model.volumes.map(\.path))"
         )
 
+        // A rename moves the mount point, and the selection has to move with
+        // it. Treated as an eject, it fell back to the boot volume and the next
+        // Scan read a different disk from the one that had been picked.
+        let before = URL(fileURLWithPath: "/Volumes/wizzzee-selftest-old-\(getpid())")
+        let renamed = URL(fileURLWithPath: "/Volumes/wizzzee-selftest-new-\(getpid())")
+        func rename(_ name: Notification.Name, to new: URL) -> Notification {
+            Notification(
+                name: name,
+                object: NSWorkspace.shared,
+                userInfo: [
+                    NSWorkspace.oldVolumeURLUserInfoKey: before,
+                    NSWorkspace.volumeURLUserInfoKey: new,
+                ]
+            )
+        }
+        let renameNote = rename(NSWorkspace.didRenameVolumeNotification, to: renamed)
+        check(
+            "a renamed volume keeps the selection, at its new mount point",
+            AppModel.selection(before.path, following: renameNote) == renamed.path,
+            "got \(AppModel.selection(before.path, following: renameNote))"
+        )
+        check(
+            "a selection on some other volume is left where it was",
+            AppModel.selection(boot, following: renameNote) == boot,
+            "got \(AppModel.selection(boot, following: renameNote))"
+        )
+        check(
+            "and only a rename moves it",
+            AppModel.selection(
+                before.path,
+                following: rename(NSWorkspace.didUnmountNotification, to: renamed)
+            ) == before.path,
+            "an unmount carrying the same paths moved the selection"
+        )
+        // Through the model, onto a volume that is really mounted — the last in
+        // the list, so that where there is more than one it can't be mistaken
+        // for the fallback to the first.
+        if let target = model.volumes.last?.path {
+            model.selectedVolumePath = before.path
+            NSWorkspace.shared.notificationCenter.post(
+                rename(
+                    NSWorkspace.didRenameVolumeNotification,
+                    to: URL(fileURLWithPath: target)
+                )
+            )
+            pump { model.selectedVolumePath == target }
+            check(
+                "the model follows a rename of the volume it has selected",
+                model.selectedVolumePath == target,
+                "on \(model.selectedVolumePath), expected \(target)"
+            )
+        }
+
         // Watching for mounts must not be what keeps a model alive.
         final class Watch { weak var model: AppModel? }
         let watch = Watch()
