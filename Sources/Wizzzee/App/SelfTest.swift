@@ -61,6 +61,7 @@ enum SelfTest {
         testDeletingTheDuplicateNameFreesTheOther()
         testDeletingAFolderHandsItsHardLinksOn()
         testAFolderPromisesOnlyWhatDeletingItFrees()
+        testATrashedNameStillSharesItsStorage()
         testDeletingALinkWithNoPartnerInTreeSubtracts()
         testTreemapLayoutIsFencedAgainstDeletes()
         testAQueuedLayoutPinsTheFoldersAboveItsRoot()
@@ -1379,7 +1380,13 @@ enum SelfTest {
         let survivorFolder = duplicate.dir
         let survivorBefore = survivorFolder.totalSize
 
-        trash(model, [NodeRef(dir: counted.dir, fileIndex: counted.index)])
+        // Removed outright rather than trashed: a name in the Trash would still
+        // be a second name for these bytes, and the survivor would go on
+        // sharing them.
+        deletePermanently(
+            model,
+            [NodeRef(dir: counted.dir, fileIndex: counted.index)]
+        )
 
         check(
             "deleting the counted name reports no error",
@@ -1686,7 +1693,10 @@ enum SelfTest {
         let rootBefore = result.root.totalSize
         let countedBefore = counted.totalSize
 
-        trash(model, [NodeRef(dir: duplicate.dir, fileIndex: duplicate.index)])
+        deletePermanently(
+            model,
+            [NodeRef(dir: duplicate.dir, fileIndex: duplicate.index)]
+        )
 
         check(
             "removing the uncounted name moves nothing",
@@ -2060,6 +2070,105 @@ enum SelfTest {
                     && !model.selectionSharesStorage([NodeRef(pair.counted)]),
                 "got \(model.reclaimableSize([NodeRef(pair.counted)])) "
                     + "of \(pair.counted.totalAlloc)"
+            )
+        }
+    }
+
+    /// Moving a name to the Trash takes it out of the tree but not off its
+    /// inode — the file in the Trash is still a second name for the same bytes.
+    /// Treated as gone, it left the survivor looking like the only name, and
+    /// the delete confirmation promised back bytes that stay on disk until the
+    /// Trash is emptied. The bytes still move to the survivor in the tree; what
+    /// it keeps is its link count.
+    @MainActor
+    private static func testATrashedNameStillSharesItsStorage() {
+        func names(atPath path: String) -> Int {
+            var info = stat()
+            return lstat(path, &info) == 0 ? Int(info.st_nlink) : -1
+        }
+
+        // The folder holding the counted name, sent to the Trash.
+        withLinkFarm("trash-folder") { model, result in
+            guard
+                let pair = roles(
+                    result.root.subdir(named: "left"),
+                    result.root.subdir(named: "right")
+                )
+            else {
+                check("the trashed farm's pair scanned", false, "no duplicate")
+                return
+            }
+            let survivor = NodeRef(dir: pair.duplicate, fileIndex: 0)
+            let rootBefore = result.root.totalSize
+
+            trash(model, [NodeRef(pair.counted)])
+
+            check(
+                "the disk still has two names for a file whose folder was trashed",
+                names(atPath: survivor.path) == 2,
+                "lstat reports \(names(atPath: survivor.path))"
+            )
+            check(
+                "the survivor takes the bytes over in the tree all the same",
+                pair.duplicate.totalSize == 9_000
+                    && result.root.totalSize == rootBefore
+                    && survivor.file?.isDuplicateLink == false,
+                "its folder is \(pair.duplicate.totalSize), root "
+                    + "\(result.root.totalSize) of \(rootBefore)"
+            )
+            check(
+                "but goes on sharing them with the name in the Trash",
+                survivor.file?.linkCount == 2 && survivor.file?.sharesStorage == true,
+                "linkCount=\(String(describing: survivor.file?.linkCount))"
+            )
+            check(
+                "so deleting it, or its folder, promises nothing back",
+                model.reclaimableSize([survivor]) == 0
+                    && model.reclaimableSize([NodeRef(pair.duplicate)]) == 0
+                    && model.selectionSharesStorage([NodeRef(pair.duplicate)]),
+                "file \(model.reclaimableSize([survivor])), folder "
+                    + "\(model.reclaimableSize([NodeRef(pair.duplicate)]))"
+            )
+        }
+
+        // Single files: a duplicate name, which hands nothing on, and a counted
+        // one of three, which does.
+        withLinkFarm("trash-file") { model, result in
+            guard
+                let pair = roles(
+                    result.root.subdir(named: "left"),
+                    result.root.subdir(named: "right")
+                ),
+                let trio = result.root.subdir(named: "trio"),
+                let counted = trio.subdirs.first(where: {
+                    $0.files.first?.isDuplicateLink == false
+                })
+            else {
+                check("the second trashed farm scanned", false, "missing folders")
+                return
+            }
+            let holder = NodeRef(dir: pair.counted, fileIndex: 0)
+
+            trash(model, [NodeRef(dir: pair.duplicate, fileIndex: 0)])
+            check(
+                "trashing the duplicate name leaves the counted one sharing",
+                holder.file?.linkCount == 2 && model.reclaimableSize([holder]) == 0
+                    && names(atPath: holder.path) == 2,
+                "linkCount=\(String(describing: holder.file?.linkCount)), "
+                    + "promised \(model.reclaimableSize([holder]))"
+            )
+
+            let trioBefore = trio.totalSize
+            trash(model, [NodeRef(dir: counted, fileIndex: 0)])
+            let left = trio.subdirs.compactMap(\.files.first)
+            check(
+                "trashing the counted name of three promotes one and unlinks none",
+                left.count == 2
+                    && left.filter { !$0.isDuplicateLink }.count == 1
+                    && left.allSatisfy { $0.linkCount == 3 }
+                    && trio.totalSize == trioBefore,
+                "link counts \(left.map(\.linkCount)), duplicates "
+                    + "\(left.map(\.isDuplicateLink)), trio \(trio.totalSize)"
             )
         }
     }

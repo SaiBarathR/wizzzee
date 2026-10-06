@@ -627,13 +627,17 @@ final class AppModel: ObservableObject {
     func moveToTrash(_ ref: NodeRef) { moveToTrash([ref]) }
 
     func moveToTrash(_ refs: Set<NodeRef>) {
-        performBatch(on: refs) { try FileActions.moveToTrash($0) }
+        // A name in the Trash is moved, not removed: it is still a name for its
+        // inode, so whatever shared storage with it still does.
+        performBatch(on: refs, unlinks: false) { try FileActions.moveToTrash($0) }
     }
 
     func deletePermanently(_ ref: NodeRef) { deletePermanently([ref]) }
 
     func deletePermanently(_ refs: Set<NodeRef>) {
-        performBatch(on: refs) { try FileActions.deletePermanently($0) }
+        performBatch(on: refs, unlinks: true) {
+            try FileActions.deletePermanently($0)
+        }
     }
 
     /// `refs` with anything already covered by a selected ancestor dropped.
@@ -773,8 +777,12 @@ final class AppModel: ObservableObject {
     /// One target at a time rather than concurrently: the batch is already
     /// deduplicated to non-overlapping subtrees, and deleting several huge trees
     /// at once only makes the disk seek more.
+    ///
+    /// `unlinks` says whether `body` removes a name outright or only moves it
+    /// out of the tree, which decides what its hard-linked partners are told.
     private func performBatch(
         on refs: Set<NodeRef>,
+        unlinks: Bool,
         _ body: @escaping @Sendable (String) throws -> Void
     ) {
         // One batch at a time. A second started mid-flight would resolve its
@@ -852,7 +860,7 @@ final class AppModel: ObservableObject {
             self.deleteProgress = nil
             // Successes are applied even when part of the batch failed or was
             // stopped, so the tree never claims space that is already gone.
-            self.detach(deleted)
+            self.detach(deleted, unlinked: unlinks)
             self.report(
                 failures: failures,
                 refusals: refusals,
@@ -903,7 +911,11 @@ final class AppModel: ObservableObject {
 
     /// Drops deleted items from the tree and walks the size change up to the
     /// root, so the whole UI updates without rescanning.
-    private func detach(_ refs: [NodeRef]) {
+    ///
+    /// `unlinked` is false when the items went to the Trash. They leave the
+    /// tree either way, but a trashed name still holds its inode, so the names
+    /// that share storage with it keep their link counts.
+    private func detach(_ refs: [NodeRef], unlinked: Bool) {
         guard !refs.isEmpty else { return }
 
         // The File View walk reads this tree on `treeQueue`. Drop any walk that
@@ -929,8 +941,10 @@ final class AppModel: ObservableObject {
         // folders can't disturb each other's indices.
         let files = refs.lazy.filter { !$0.isDirectory }
             .sorted { $0.fileIndex > $1.fileIndex }
-        for ref in files { detachFile(ref) }
-        for ref in refs where ref.isDirectory { detachDirectory(ref.dir) }
+        for ref in files { detachFile(ref, unlinked: unlinked) }
+        for ref in refs where ref.isDirectory {
+            detachDirectory(ref.dir, unlinked: unlinked)
+        }
 
         // Removing a file shifts the indices of its siblings, invalidating any
         // NodeRef held elsewhere, so all derived rows are rebuilt and the
@@ -953,7 +967,7 @@ final class AppModel: ObservableObject {
         refreshFileRows(immediately: true)
     }
 
-    private func detachFile(_ ref: NodeRef) {
+    private func detachFile(_ ref: NodeRef, unlinked: Bool) {
         let dir = ref.dir
         let index = Int(ref.fileIndex)
         guard index < dir.files.count else { return }
@@ -961,9 +975,14 @@ final class AppModel: ObservableObject {
 
         if file.isDuplicateLink {
             // Its bytes were never in the totals — they are counted under the
-            // name the scan reached first, which is still there. The survivors
-            // still lose a link, so one left alone can promise its bytes again.
-            result?.releaseHardLink(at: (dir, index), promoting: false)
+            // name the scan reached first, which is still there. If the name
+            // was really removed the survivors still lose a link, so one left
+            // alone can promise its bytes again.
+            result?.releaseHardLink(
+                at: (dir, index),
+                promoting: false,
+                unlinking: unlinked
+            )
             result?.forgetDuplicate(size: file.size)
             subtract(size: 0, alloc: 0, files: 1, dirs: 0, from: dir)
             dir.files.remove(at: index)
@@ -979,7 +998,11 @@ final class AppModel: ObservableObject {
         // names can be in different folders — and if there is no survivor in
         // the tree, the bytes really do leave it and only the subtraction runs.
         if file.isHardLinked,
-            let promoted = result?.releaseHardLink(at: (dir, index), promoting: true)
+            let promoted = result?.releaseHardLink(
+                at: (dir, index),
+                promoting: true,
+                unlinking: unlinked
+            )
         {
             add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
         }
@@ -988,14 +1011,16 @@ final class AppModel: ObservableObject {
         dir.files.remove(at: index)
     }
 
-    private func detachDirectory(_ node: DirNode) {
+    private func detachDirectory(_ node: DirNode, unlinked: Bool) {
         guard let parent = node.parent else { return }
         // Hard links first, while the folder is still attached. A name under it
         // that carried an inode's bytes hands them to a name outside it, as a
         // single file does — otherwise they leave the totals with the folder
-        // while still on disk — and every surviving name loses the links that
-        // are going.
-        for promoted in result?.releaseHardLinks(under: node) ?? [] {
+        // while still on disk — and, if the folder was really removed, every
+        // surviving name loses the links that went with it.
+        let promotions =
+            result?.releaseHardLinks(under: node, unlinking: unlinked) ?? []
+        for promoted in promotions {
             add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
         }
         subtract(

@@ -422,6 +422,9 @@ final class ScanResult {
     ///
     /// - Every surviving name loses a link. One left as the last name stops
     ///   sharing its storage, so a delete can promise its bytes back again.
+    ///   Only when `unlinking`, though: a name moved to the Trash is still a
+    ///   name for the inode, and deleting a survivor frees nothing until the
+    ///   Trash is emptied, so its count stands.
     /// - If the name leaving is the one carrying the bytes, a survivor takes
     ///   over the count — the bytes are still on disk under that other name,
     ///   and dropping them from the totals would have the tree disagree with
@@ -433,8 +436,11 @@ final class ScanResult {
     @discardableResult
     func releaseHardLink(
         at leaving: (dir: DirNode, index: Int),
-        promoting wantsPromotion: Bool
+        promoting wantsPromotion: Bool,
+        unlinking: Bool
     ) -> (dir: DirNode, size: UInt64, alloc: UInt64)? {
+        // Trashing a name that carried no bytes changes nothing for the rest.
+        guard wantsPromotion || unlinking else { return nil }
         let fileID = leaving.dir.files[leaving.index].fileID
         var promoted: (dir: DirNode, size: UInt64, alloc: UInt64)?
 
@@ -445,7 +451,9 @@ final class ScanResult {
 
                 // A saturated count is left alone: the real number of names is
                 // unknown, so decrementing could wrongly reach 1.
-                if dir.files[i].linkCount > 1, dir.files[i].linkCount < .max {
+                if unlinking, dir.files[i].linkCount > 1,
+                    dir.files[i].linkCount < .max
+                {
                     dir.files[i].linkCount -= 1
                 }
                 if wantsPromotion, promoted == nil, dir.files[i].isDuplicateLink {
@@ -473,8 +481,13 @@ final class ScanResult {
     /// while `removed` is still attached, so it can be told apart from what
     /// survives it. Returns each promoted name's folder and the bytes it now
     /// accounts for.
+    ///
+    /// `unlinking` is as for `releaseHardLink`: a trashed folder's names still
+    /// exist, so the survivors keep their link counts and only the promotion
+    /// happens.
     func releaseHardLinks(
-        under removed: DirNode
+        under removed: DirNode,
+        unlinking: Bool
     ) -> [(dir: DirNode, size: UInt64, alloc: UInt64)] {
         // Per inode: how many of its names are leaving, and whether one of
         // them is the name its bytes are counted under.
@@ -493,7 +506,11 @@ final class ScanResult {
             }
             stack.append(contentsOf: dir.subdirs)
         }
-        guard !leaving.isEmpty else { return [] }
+        // With no count to lower and no bytes to hand on, nothing outside the
+        // folder changes and the second walk has nothing to do.
+        guard unlinking || leaving.values.contains(where: \.counted) else {
+            return []
+        }
 
         var promoted: [(dir: DirNode, size: UInt64, alloc: UInt64)] = []
         stack = [root]
@@ -503,7 +520,7 @@ final class ScanResult {
                 guard let going = leaving[dir.files[i].fileID] else { continue }
 
                 // A saturated count is left alone, as above.
-                if dir.files[i].linkCount < .max {
+                if unlinking, dir.files[i].linkCount < .max {
                     let left = Int(dir.files[i].linkCount) - going.names
                     dir.files[i].linkCount = UInt8(max(1, left))
                 }
