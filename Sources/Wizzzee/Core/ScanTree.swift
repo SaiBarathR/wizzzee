@@ -506,8 +506,11 @@ final class ScanResult {
             }
             stack.append(contentsOf: dir.subdirs)
         }
-        // With no count to lower and no bytes to hand on, nothing outside the
-        // folder changes and the second walk has nothing to do.
+        // Most folders hold no hard links at all, and the walk below is a pass
+        // over everything else in the scan — once per folder in a batch.
+        guard !leaving.isEmpty else { return [] }
+        // Nor is it needed with no count to lower and no bytes to hand on:
+        // nothing outside the folder changes.
         guard unlinking || leaving.values.contains(where: \.counted) else {
             return []
         }
