@@ -9,6 +9,9 @@ struct TreemapCanvas: NSViewRepresentable {
     let selection: NodeRef?
     /// Bumped whenever the tree is mutated, to force a fresh layout.
     let revision: Int
+    /// The tree's revision at the moment of asking, rather than as of the last
+    /// update — see `TreemapNSView.showsCurrentTree`.
+    let liveRevision: () -> Int
     /// The model's treemap queue, which a delete fences before unlinking nodes.
     let layoutQueue: DispatchQueue
 
@@ -19,6 +22,7 @@ struct TreemapCanvas: NSViewRepresentable {
     func makeNSView(context: Context) -> TreemapNSView {
         let view = TreemapNSView()
         view.layoutQueue = layoutQueue
+        view.liveRevision = liveRevision
         view.onSelect = onSelect
         view.onZoom = onZoom
         view.onHover = onHover
@@ -27,6 +31,7 @@ struct TreemapCanvas: NSViewRepresentable {
 
     func updateNSView(_ view: TreemapNSView, context: Context) {
         view.layoutQueue = layoutQueue
+        view.liveRevision = liveRevision
         view.onSelect = onSelect
         view.onZoom = onZoom
         view.onHover = onHover
@@ -39,6 +44,8 @@ final class TreemapNSView: NSView {
     var onSelect: ((NodeRef) -> Void)?
     var onZoom: ((DirNode) -> Void)?
     var onHover: ((NodeRef?) -> Void)?
+    /// Asks the model for the tree's revision as it is this instant.
+    var liveRevision: (() -> Int)?
 
     var selection: NodeRef? {
         didSet { if selection != oldValue { needsDisplay = true } }
@@ -56,6 +63,8 @@ final class TreemapNSView: NSView {
     private var revision = -1
 
     private var model = TreemapModel()
+    /// The tree revision the layout in `model` was built from.
+    private var modelRevision = -1
     private var image: NSImage?
     private var hovered: TreemapCell?
     private var pointerLocation: CGPoint?
@@ -67,6 +76,24 @@ final class TreemapNSView: NSView {
     /// Where layout and rasterizing run. Supplied by the model rather than made
     /// here, because a delete has to be able to fence against it.
     var layoutQueue: DispatchQueue?
+
+    /// False from the moment a delete changes the tree until a layout of the
+    /// changed tree has landed.
+    ///
+    /// Layout is asynchronous, so for that long the tiles on show are the old
+    /// ones, tiles for folders the delete has just unlinked among them. Those
+    /// nodes are alive only because this layout still holds them. A click that
+    /// handed one to the model left it holding a node whose parents are freed
+    /// the moment the new layout replaces this one, and the next thing to ask
+    /// for its path read freed memory. So the map answers nothing until what
+    /// it shows is the tree as it now is.
+    ///
+    /// Asked of the model, not judged from `revision`: that is only as new as
+    /// SwiftUI's last update, and a click can arrive between a delete and it.
+    private var showsCurrentTree: Bool {
+        guard let liveRevision else { return true }
+        return liveRevision() == modelRevision
+    }
 
     // Layout uses a top-left origin, like the tree table.
     override var isFlipped: Bool { true }
@@ -152,6 +179,7 @@ final class TreemapNSView: NSView {
         // `root`, and the folders above it through `ancestors`.
         let metric = self.metric
         let ancestors = self.ancestors
+        let revision = self.revision
         let scale = window?.backingScaleFactor ?? 2
 
         queue.async { [weak self] in
@@ -167,6 +195,7 @@ final class TreemapNSView: NSView {
                 // Both land together, so the borders and labels drawn from the
                 // model always describe the image underneath them.
                 self.model = built
+                self.modelRevision = revision
                 self.image = rendered.map { NSImage(cgImage: $0, size: size) }
                 self.needsDisplay = true
             }
@@ -415,7 +444,7 @@ final class TreemapNSView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         pointerLocation = point
-        let found = model.cell(at: point)
+        let found = showsCurrentTree ? model.cell(at: point) : nil
         let changed = found?.ref != hovered?.ref
         if changed {
             hovered = found
@@ -437,6 +466,7 @@ final class TreemapNSView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard showsCurrentTree else { return }
         let point = convert(event.locationInWindow, from: nil)
 
         if event.clickCount >= 2 {
@@ -467,7 +497,7 @@ final class TreemapNSView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let cell = model.cell(at: point) else { return }
+        guard showsCurrentTree, let cell = model.cell(at: point) else { return }
         selection = cell.ref
         onSelect?(cell.ref)
         super.rightMouseDown(with: event)
