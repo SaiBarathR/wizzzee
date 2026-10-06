@@ -37,6 +37,8 @@ struct ContentView: View {
             // The file list is ranked by the active metric, so it has to be
             // recomputed when the metric changes.
             model.refreshFileRows(immediately: true)
+            // So is the tree, when it is ordered by "% of Parent".
+            if model.treeSort.first?.key == .percent { model.rebuildTreeRows() }
         }
         .alert(
             model.actionError ?? "Something went wrong",

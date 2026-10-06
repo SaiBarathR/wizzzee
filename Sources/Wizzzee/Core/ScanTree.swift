@@ -361,7 +361,15 @@ final class ScanResult {
         metric: SizeMetric = .allocated,
         token: WalkToken? = nil
     ) -> [NodeRef] {
-        let needle = query.lowercased()
+        let needle = query.foldedForSearch
+        // Nearly every filter is plain ASCII, and is matched byte for byte
+        // against names as they are stored. Anything else needs each name
+        // folded the same way as the needle before the two can be compared.
+        //
+        // Asked of what was typed, not of the needle. Folding can leave a
+        // needle that is pure ASCII — `ß` becomes "ss" — and the name it was
+        // typed to find still has the `ß` in it.
+        let foldsNames = query.utf8.contains { $0 >= 0x80 }
         let matchPath = needle.contains("/")
         var heap = SizeHeap(limit: limit)
         // Checked per directory rather than per file — the flag is behind a
@@ -391,7 +399,11 @@ final class ScanResult {
                     let haystack =
                         matchPath
                         ? (dirPath + "/" + file.name) : file.name
-                    if !haystack.containsCaseInsensitive(needle) { continue }
+                    let matches =
+                        foldsNames
+                        ? haystack.containsFolded(needle)
+                        : haystack.containsCaseInsensitive(needle)
+                    if !matches { continue }
                 }
                 heap.insert(NodeRef(dir: dir, fileIndex: i), size: weight)
             }
@@ -618,6 +630,37 @@ extension String {
         if let result = utf8.withContiguousStorageIfAvailable(body) { return result }
         var copy = self
         return copy.withUTF8(body)
+    }
+
+    /// Case-folded and canonically decomposed, so two spellings of the same
+    /// text come out byte for byte the same: `É` and `é`, and either of them
+    /// whether it is one precomposed scalar or a letter plus a combining mark.
+    ///
+    /// The second half matters as much as the first. Most of macOS writes an
+    /// accented name to disk decomposed, a text field types it precomposed, and
+    /// without this the two never meet.
+    var foldedForSearch: String {
+        var folded = folding(options: .caseInsensitive, locale: nil)
+            .decomposedStringWithCanonicalMapping
+        // Both steps hand back a bridged `NSString`. `withUTF8Bytes` can only
+        // read one of those by copying it, and for the needle that would be
+        // once per name it is compared against.
+        folded.makeContiguousUTF8()
+        return folded
+    }
+
+    /// As `containsCaseInsensitive`, for a filter typed with anything beyond
+    /// ASCII in it; `needle` is expected to be `foldedForSearch` already.
+    ///
+    /// Folding allocates, which is what `containsCaseInsensitive` exists to
+    /// avoid, so it is kept off the common path twice over: only such a filter
+    /// comes here, and a name that is pure ASCII — which is most names — folds
+    /// to itself give or take case, so it is compared as it stands.
+    func containsFolded(_ needle: String) -> Bool {
+        guard utf8.contains(where: { $0 >= 0x80 }) else {
+            return containsCaseInsensitive(needle)
+        }
+        return foldedForSearch.containsCaseInsensitive(needle)
     }
 
     /// ASCII-focused case-insensitive substring test. `localizedCaseInsensitive`
