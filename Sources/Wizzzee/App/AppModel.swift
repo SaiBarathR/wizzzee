@@ -245,6 +245,26 @@ final class AppModel: ObservableObject {
     /// delete or a rescan.
     private var sharedStorageCache: [UInt64: SharedStorage] = [:]
 
+    /// The scanned volume's capacity as read after the last delete batch, or
+    /// nil when none has run since the scan.
+    ///
+    /// A scan records these figures once. A delete then moves every total in
+    /// the tree and, when it really removes something, the free space on the
+    /// volume — and the header went on quoting "Volume Free" from before it
+    /// until the next full scan.
+    @Published private var capacityAfterDelete: (total: UInt64, free: UInt64)?
+
+    /// How the scanned volume's capacity is read back after a delete.
+    ///
+    /// A property so the self-test can supply readings of its own. Asserting on
+    /// the real volume's free space would depend on everything else using the
+    /// disk at that moment, and on when the filesystem gives the space back.
+    var readCapacity: (String) -> (total: UInt64, free: UInt64) =
+        VolumeInfo.capacity(of:)
+
+    /// Keeps `volumes` in step with disks being mounted, ejected and renamed.
+    private var volumeWatch: AnyCancellable?
+
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?
     private var fileFilterWork: DispatchWorkItem?
@@ -283,6 +303,43 @@ final class AppModel: ObservableObject {
         volumes = VolumeInfo.current()
         selectedVolumePath = volumes.first?.path ?? "/"
         hasFullDiskAccess = FullDiskAccess.isGranted()
+
+        // The list above is only what was mounted at launch. `refreshVolumes`
+        // existed to bring it up to date and nothing ever called it, so a disk
+        // plugged in later never reached the picker and an ejected one never
+        // left it.
+        let workspace = NSWorkspace.shared.notificationCenter
+        volumeWatch = workspace.publisher(for: NSWorkspace.didMountNotification)
+            .merge(
+                with: workspace.publisher(for: NSWorkspace.didUnmountNotification),
+                workspace.publisher(for: NSWorkspace.didRenameVolumeNotification)
+            )
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] note in
+                guard let self else { return }
+                self.selectedVolumePath = Self.selection(
+                    self.selectedVolumePath,
+                    following: note
+                )
+                self.refreshVolumes()
+            }
+    }
+
+    /// Where a selection at `path` should point once `note` has happened: the
+    /// volume's new mount point if it is the one that was just renamed, and
+    /// wherever it already was otherwise.
+    ///
+    /// Renaming a volume moves its mount point. Left to `refreshVolumes`, the
+    /// old path is simply missing from the list, the selected disk is taken for
+    /// an ejected one, and the selection falls back to the boot volume — so the
+    /// next Scan reads a different disk from the one that was picked.
+    static func selection(_ path: String, following note: Notification) -> String {
+        guard note.name == NSWorkspace.didRenameVolumeNotification,
+            let old = note.userInfo?[NSWorkspace.oldVolumeURLUserInfoKey] as? URL,
+            let new = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL,
+            old.path == path
+        else { return path }
+        return new.path
     }
 
     /// The one selected item, when exactly one is selected. The treemap
@@ -302,8 +359,21 @@ final class AppModel: ObservableObject {
 
     /// Capacity of the volume the current target lives on.
     var targetCapacity: (total: UInt64, free: UInt64) {
+        if let capacityAfterDelete { return capacityAfterDelete }
         if let result { return (result.volumeTotal, result.volumeFree) }
         return VolumeInfo.capacity(of: scanTargetPath)
+    }
+
+    /// Reads the scanned volume's capacity again once a delete batch has run.
+    ///
+    /// After every batch, not only one that removed something whole: a folder
+    /// that failed part-way has still freed whatever went before the failure.
+    private func rereadCapacity() {
+        guard let result else { return }
+        let now = readCapacity(result.rootPath)
+        // A failed read comes back as zeros, which would look worse on show
+        // than figures that are a little old.
+        if now.total > 0 { capacityAfterDelete = now }
     }
 
     func refreshVolumes() {
@@ -356,6 +426,7 @@ final class AppModel: ObservableObject {
         // thrown away, so it goes with the selection.
         permanentDeleteTargets = []
         sharedStorageCache = [:]
+        capacityAfterDelete = nil
         treemapRoot = nil
         expanded = []
         progress = ScanEngine.Progress()
@@ -888,6 +959,7 @@ final class AppModel: ObservableObject {
             // Successes are applied even when part of the batch failed or was
             // stopped, so the tree never claims space that is already gone.
             self.detach(deleted, unlinked: unlinks)
+            self.rereadCapacity()
             self.report(
                 failures: failures,
                 refusals: refusals,

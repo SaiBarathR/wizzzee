@@ -72,6 +72,8 @@ enum SelfTest {
         testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
         testScanOutcomeReporting()
+        testVolumeFreeSpaceFollowsADelete()
+        testTheVolumeListFollowsMountsAndUnmounts()
         testNativeWindowTabbingIsOff()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
@@ -2774,6 +2776,214 @@ enum SelfTest {
             "stopping mid-walk unwinds promptly",
             Date().timeIntervalSince(midStart) < 2,
             "took \(String(format: "%.1f", Date().timeIntervalSince(midStart)))s"
+        )
+    }
+
+    /// The header's capacity figures came from the scan's own snapshot for as
+    /// long as there was a scan. Permanently deleting something moved every
+    /// total in the tree, and "Volume Free" went on quoting the number from
+    /// before it until the next full scan.
+    ///
+    /// The readings after each delete are supplied here rather than taken from
+    /// the disk. Free space on a real volume moves for reasons that have
+    /// nothing to do with this test, and is given back on the filesystem's own
+    /// schedule, so asserting on it would fail on a busy machine for nothing.
+    @MainActor
+    private static func testVolumeFreeSpaceFollowsADelete() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-capacity-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            for name in ["first.dat", "second.dat", "keep.dat"] {
+                try write(base.appendingPathComponent(name), bytes: 1_000)
+            }
+        } catch {
+            check("the capacity fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        func ref(_ name: String) -> NodeRef? {
+            result.root.files.firstIndex { $0.name == name }
+                .map { NodeRef(dir: result.root, fileIndex: $0) }
+        }
+        let scanned = model.targetCapacity
+        check(
+            "the header starts from the capacity the scan recorded",
+            scanned.total == result.volumeTotal && scanned.free == result.volumeFree
+                && scanned.total > 0,
+            "got \(scanned), the scan recorded "
+                + "\(result.volumeTotal)/\(result.volumeFree)"
+        )
+
+        // What the volume will say once the delete has run.
+        let freed: UInt64 = 80_000_000_000
+        var asked: [String] = []
+        model.readCapacity = { path in
+            asked.append(path)
+            return (scanned.total, scanned.free + freed)
+        }
+        guard let first = ref("first.dat") else {
+            check("the capacity fixture scanned", false, "missing first.dat")
+            return
+        }
+        deletePermanently(model, [first])
+
+        check(
+            "the scanned volume is read again once a delete has run",
+            asked == [result.rootPath],
+            "asked about \(asked), expected one read of \(result.rootPath)"
+        )
+        check(
+            "and that reading is what goes on show",
+            model.targetCapacity.free == scanned.free + freed
+                && model.targetCapacity.total == scanned.total,
+            "showing \(model.targetCapacity), the volume said "
+                + "\(scanned.total)/\(scanned.free + freed)"
+        )
+
+        // A read that fails comes back as zeros. Shown, it would turn the
+        // header into "0 bytes" of a disk that is plainly still there.
+        model.readCapacity = { _ in (0, 0) }
+        if let second = ref("second.dat") { deletePermanently(model, [second]) }
+        check(
+            "a reading that failed is not put on show",
+            model.targetCapacity.free == scanned.free + freed
+                && model.targetCapacity.total == scanned.total,
+            "showing \(model.targetCapacity)"
+        )
+
+        // Not kept past the scan it belonged to: the next one records its own.
+        guard let rescanned = loadSynchronously(into: model) else { return }
+        check(
+            "a rescan goes back to the figures it records itself",
+            model.targetCapacity.free == rescanned.volumeFree
+                && model.targetCapacity.total == rescanned.volumeTotal,
+            "got \(model.targetCapacity), the rescan recorded "
+                + "\(rescanned.volumeTotal)/\(rescanned.volumeFree)"
+        )
+    }
+
+    /// The volume list was read once at launch and never again — the method
+    /// that refreshes it had no caller — so a disk plugged in afterwards never
+    /// appeared in the picker and an ejected one stayed in it.
+    ///
+    /// No disk is mounted here. The workspace notifications are posted by hand,
+    /// which is all a real mount amounts to as far as the model can tell.
+    @MainActor
+    private static func testTheVolumeListFollowsMountsAndUnmounts() {
+        func announce(_ name: Notification.Name) {
+            NSWorkspace.shared.notificationCenter.post(
+                name: name,
+                object: NSWorkspace.shared,
+                userInfo: [NSWorkspace.volumeURLUserInfoKey: URL(fileURLWithPath: "/")]
+            )
+        }
+        func pump(until done: () -> Bool) {
+            let deadline = Date().addingTimeInterval(5)
+            while !done() && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+
+        let model = AppModel()
+        guard let boot = model.volumes.first?.path else {
+            check("there is at least one volume to list", false, "none")
+            return
+        }
+
+        // A disk that has since been ejected: still selected, no longer mounted.
+        model.selectedVolumePath = "/Volumes/wizzzee-selftest-ejected-\(getpid())"
+        announce(NSWorkspace.didUnmountNotification)
+        pump { model.selectedVolumePath == boot }
+        check(
+            "an unmount moves the selection off a disk that is gone",
+            model.selectedVolumePath == boot,
+            "still on \(model.selectedVolumePath)"
+        )
+
+        // As if the list had been read before a disk was plugged in.
+        model.volumes = []
+        announce(NSWorkspace.didMountNotification)
+        pump { !model.volumes.isEmpty }
+        check(
+            "a mount is picked up without relaunching",
+            model.volumes.first?.path == boot,
+            "the list is \(model.volumes.map(\.path))"
+        )
+
+        // A rename moves the mount point, and the selection has to move with
+        // it. Treated as an eject, it fell back to the boot volume and the next
+        // Scan read a different disk from the one that had been picked.
+        let before = URL(fileURLWithPath: "/Volumes/wizzzee-selftest-old-\(getpid())")
+        let renamed = URL(fileURLWithPath: "/Volumes/wizzzee-selftest-new-\(getpid())")
+        func rename(_ name: Notification.Name, to new: URL) -> Notification {
+            Notification(
+                name: name,
+                object: NSWorkspace.shared,
+                userInfo: [
+                    NSWorkspace.oldVolumeURLUserInfoKey: before,
+                    NSWorkspace.volumeURLUserInfoKey: new,
+                ]
+            )
+        }
+        let renameNote = rename(NSWorkspace.didRenameVolumeNotification, to: renamed)
+        check(
+            "a renamed volume keeps the selection, at its new mount point",
+            AppModel.selection(before.path, following: renameNote) == renamed.path,
+            "got \(AppModel.selection(before.path, following: renameNote))"
+        )
+        check(
+            "a selection on some other volume is left where it was",
+            AppModel.selection(boot, following: renameNote) == boot,
+            "got \(AppModel.selection(boot, following: renameNote))"
+        )
+        check(
+            "and only a rename moves it",
+            AppModel.selection(
+                before.path,
+                following: rename(NSWorkspace.didUnmountNotification, to: renamed)
+            ) == before.path,
+            "an unmount carrying the same paths moved the selection"
+        )
+        // Through the model, onto a volume that is really mounted — the last in
+        // the list, so that where there is more than one it can't be mistaken
+        // for the fallback to the first.
+        if let target = model.volumes.last?.path {
+            model.selectedVolumePath = before.path
+            NSWorkspace.shared.notificationCenter.post(
+                rename(
+                    NSWorkspace.didRenameVolumeNotification,
+                    to: URL(fileURLWithPath: target)
+                )
+            )
+            pump { model.selectedVolumePath == target }
+            check(
+                "the model follows a rename of the volume it has selected",
+                model.selectedVolumePath == target,
+                "on \(model.selectedVolumePath), expected \(target)"
+            )
+        }
+
+        // Watching for mounts must not be what keeps a model alive.
+        final class Watch { weak var model: AppModel? }
+        let watch = Watch()
+        do {
+            let discarded = AppModel()
+            watch.model = discarded
+        }
+        announce(NSWorkspace.didMountNotification)
+        pump { watch.model == nil }
+        check(
+            "a discarded model is let go rather than kept listening",
+            watch.model == nil,
+            "still alive"
         )
     }
 
