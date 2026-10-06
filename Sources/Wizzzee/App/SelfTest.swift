@@ -2784,21 +2784,23 @@ enum SelfTest {
     /// total in the tree, and "Volume Free" went on quoting the number from
     /// before it until the next full scan.
     ///
-    /// Checked against the real volume: the file is big enough that the space
-    /// coming back stands well clear of whatever else is writing to the disk.
+    /// The readings after each delete are supplied here rather than taken from
+    /// the disk. Free space on a real volume moves for reasons that have
+    /// nothing to do with this test, and is given back on the filesystem's own
+    /// schedule, so asserting on it would fail on a busy machine for nothing.
     @MainActor
     private static func testVolumeFreeSpaceFollowsADelete() {
         let base = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("wizzzee-selftest-capacity-\(getpid())")
         defer { try? FileManager.default.removeItem(at: base) }
-        let bulk = 32_000_000
         do {
             try FileManager.default.createDirectory(
                 at: base,
                 withIntermediateDirectories: true
             )
-            try write(base.appendingPathComponent("bulk.dat"), bytes: bulk)
-            try write(base.appendingPathComponent("keep.dat"), bytes: 1_000)
+            for name in ["first.dat", "second.dat", "keep.dat"] {
+                try write(base.appendingPathComponent(name), bytes: 1_000)
+            }
         } catch {
             check("the capacity fixture can be built", false, "\(error)")
             return
@@ -2807,10 +2809,9 @@ enum SelfTest {
         let model = AppModel()
         model.customFolder = base.path
         guard let result = loadSynchronously(into: model) else { return }
-        guard let index = result.root.files.firstIndex(where: { $0.name == "bulk.dat" })
-        else {
-            check("the capacity fixture scanned", false, "missing file")
-            return
+        func ref(_ name: String) -> NodeRef? {
+            result.root.files.firstIndex { $0.name == name }
+                .map { NodeRef(dir: result.root, fileIndex: $0) }
         }
         let scanned = model.targetCapacity
         check(
@@ -2821,18 +2822,41 @@ enum SelfTest {
                 + "\(result.volumeTotal)/\(result.volumeFree)"
         )
 
-        deletePermanently(model, [NodeRef(dir: result.root, fileIndex: index)])
+        // What the volume will say once the delete has run.
+        let freed: UInt64 = 80_000_000_000
+        var asked: [String] = []
+        model.readCapacity = { path in
+            asked.append(path)
+            return (scanned.total, scanned.free + freed)
+        }
+        guard let first = ref("first.dat") else {
+            check("the capacity fixture scanned", false, "missing first.dat")
+            return
+        }
+        deletePermanently(model, [first])
 
-        let after = model.targetCapacity
         check(
-            "free space on show rises once the delete has run",
-            after.free >= scanned.free + UInt64(bulk / 2),
-            "was \(scanned.free), now \(after.free) after removing \(bulk) bytes"
+            "the scanned volume is read again once a delete has run",
+            asked == [result.rootPath],
+            "asked about \(asked), expected one read of \(result.rootPath)"
         )
         check(
-            "the volume's size is what it was",
-            after.total == scanned.total,
-            "was \(scanned.total), now \(after.total)"
+            "and that reading is what goes on show",
+            model.targetCapacity.free == scanned.free + freed
+                && model.targetCapacity.total == scanned.total,
+            "showing \(model.targetCapacity), the volume said "
+                + "\(scanned.total)/\(scanned.free + freed)"
+        )
+
+        // A read that fails comes back as zeros. Shown, it would turn the
+        // header into "0 bytes" of a disk that is plainly still there.
+        model.readCapacity = { _ in (0, 0) }
+        if let second = ref("second.dat") { deletePermanently(model, [second]) }
+        check(
+            "a reading that failed is not put on show",
+            model.targetCapacity.free == scanned.free + freed
+                && model.targetCapacity.total == scanned.total,
+            "showing \(model.targetCapacity)"
         )
 
         // Not kept past the scan it belonged to: the next one records its own.

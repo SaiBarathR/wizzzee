@@ -254,6 +254,14 @@ final class AppModel: ObservableObject {
     /// until the next full scan.
     @Published private var capacityAfterDelete: (total: UInt64, free: UInt64)?
 
+    /// How the scanned volume's capacity is read back after a delete.
+    ///
+    /// A property so the self-test can supply readings of its own. Asserting on
+    /// the real volume's free space would depend on everything else using the
+    /// disk at that moment, and on when the filesystem gives the space back.
+    var readCapacity: (String) -> (total: UInt64, free: UInt64) =
+        VolumeInfo.capacity(of:)
+
     /// Keeps `volumes` in step with disks being mounted, ejected and renamed.
     private var volumeWatch: AnyCancellable?
 
@@ -362,7 +370,7 @@ final class AppModel: ObservableObject {
     /// that failed part-way has still freed whatever went before the failure.
     private func rereadCapacity() {
         guard let result else { return }
-        let now = VolumeInfo.capacity(of: result.rootPath)
+        let now = readCapacity(result.rootPath)
         // A failed read comes back as zeros, which would look worse on show
         // than figures that are a little old.
         if now.total > 0 { capacityAfterDelete = now }
