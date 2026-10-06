@@ -303,8 +303,17 @@ final class AppModel: ObservableObject {
 
     // MARK: - Scanning
 
+    /// False while a scan or a delete batch is running.
+    ///
+    /// A scan started mid-delete throws away the tree the batch's references
+    /// point into, and the batch then applies them to whatever replaced it:
+    /// hard-link counts matched by inode in a tree it never touched, and totals
+    /// subtracted along a parent chain the rescan has freed. The scan itself
+    /// would be reading folders in the middle of being removed.
+    var canStartScan: Bool { phase != .scanning && !isDeleting }
+
     func startScan() {
-        guard phase != .scanning else { return }
+        guard canStartScan else { return }
         let path = scanTargetPath
 
         result = nil
@@ -316,6 +325,9 @@ final class AppModel: ObservableObject {
         isFilteringFiles = false
         fileRows = []
         selection = []
+        // A delete still awaiting confirmation names items in the tree being
+        // thrown away, so it goes with the selection.
+        permanentDeleteTargets = []
         treemapRoot = nil
         expanded = []
         progress = ScanEngine.Progress()
@@ -846,8 +858,11 @@ final class AppModel: ObservableObject {
 
         // Removing a file shifts the indices of its siblings, invalidating any
         // NodeRef held elsewhere, so all derived rows are rebuilt and the
-        // selection is dropped.
+        // selection is dropped — along with a delete still awaiting
+        // confirmation, which would otherwise be confirmed against whatever
+        // shifted into its place.
         selection = []
+        permanentDeleteTargets = []
         hoveredRef = nil
         treeRevision += 1
         // Dropped here and now, not when the walk below returns with fresh ones.
