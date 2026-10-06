@@ -72,6 +72,8 @@ enum SelfTest {
         testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
         testScanOutcomeReporting()
+        testVolumeFreeSpaceFollowsADelete()
+        testTheVolumeListFollowsMountsAndUnmounts()
         testNativeWindowTabbingIsOff()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
@@ -2774,6 +2776,137 @@ enum SelfTest {
             "stopping mid-walk unwinds promptly",
             Date().timeIntervalSince(midStart) < 2,
             "took \(String(format: "%.1f", Date().timeIntervalSince(midStart)))s"
+        )
+    }
+
+    /// The header's capacity figures came from the scan's own snapshot for as
+    /// long as there was a scan. Permanently deleting something moved every
+    /// total in the tree, and "Volume Free" went on quoting the number from
+    /// before it until the next full scan.
+    ///
+    /// Checked against the real volume: the file is big enough that the space
+    /// coming back stands well clear of whatever else is writing to the disk.
+    @MainActor
+    private static func testVolumeFreeSpaceFollowsADelete() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-capacity-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let bulk = 32_000_000
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            try write(base.appendingPathComponent("bulk.dat"), bytes: bulk)
+            try write(base.appendingPathComponent("keep.dat"), bytes: 1_000)
+        } catch {
+            check("the capacity fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let index = result.root.files.firstIndex(where: { $0.name == "bulk.dat" })
+        else {
+            check("the capacity fixture scanned", false, "missing file")
+            return
+        }
+        let scanned = model.targetCapacity
+        check(
+            "the header starts from the capacity the scan recorded",
+            scanned.total == result.volumeTotal && scanned.free == result.volumeFree
+                && scanned.total > 0,
+            "got \(scanned), the scan recorded "
+                + "\(result.volumeTotal)/\(result.volumeFree)"
+        )
+
+        deletePermanently(model, [NodeRef(dir: result.root, fileIndex: index)])
+
+        let after = model.targetCapacity
+        check(
+            "free space on show rises once the delete has run",
+            after.free >= scanned.free + UInt64(bulk / 2),
+            "was \(scanned.free), now \(after.free) after removing \(bulk) bytes"
+        )
+        check(
+            "the volume's size is what it was",
+            after.total == scanned.total,
+            "was \(scanned.total), now \(after.total)"
+        )
+
+        // Not kept past the scan it belonged to: the next one records its own.
+        guard let rescanned = loadSynchronously(into: model) else { return }
+        check(
+            "a rescan goes back to the figures it records itself",
+            model.targetCapacity.free == rescanned.volumeFree
+                && model.targetCapacity.total == rescanned.volumeTotal,
+            "got \(model.targetCapacity), the rescan recorded "
+                + "\(rescanned.volumeTotal)/\(rescanned.volumeFree)"
+        )
+    }
+
+    /// The volume list was read once at launch and never again — the method
+    /// that refreshes it had no caller — so a disk plugged in afterwards never
+    /// appeared in the picker and an ejected one stayed in it.
+    ///
+    /// No disk is mounted here. The workspace notifications are posted by hand,
+    /// which is all a real mount amounts to as far as the model can tell.
+    @MainActor
+    private static func testTheVolumeListFollowsMountsAndUnmounts() {
+        func announce(_ name: Notification.Name) {
+            NSWorkspace.shared.notificationCenter.post(
+                name: name,
+                object: NSWorkspace.shared,
+                userInfo: [NSWorkspace.volumeURLUserInfoKey: URL(fileURLWithPath: "/")]
+            )
+        }
+        func pump(until done: () -> Bool) {
+            let deadline = Date().addingTimeInterval(5)
+            while !done() && Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+
+        let model = AppModel()
+        guard let boot = model.volumes.first?.path else {
+            check("there is at least one volume to list", false, "none")
+            return
+        }
+
+        // A disk that has since been ejected: still selected, no longer mounted.
+        model.selectedVolumePath = "/Volumes/wizzzee-selftest-ejected-\(getpid())"
+        announce(NSWorkspace.didUnmountNotification)
+        pump { model.selectedVolumePath == boot }
+        check(
+            "an unmount moves the selection off a disk that is gone",
+            model.selectedVolumePath == boot,
+            "still on \(model.selectedVolumePath)"
+        )
+
+        // As if the list had been read before a disk was plugged in.
+        model.volumes = []
+        announce(NSWorkspace.didMountNotification)
+        pump { !model.volumes.isEmpty }
+        check(
+            "a mount is picked up without relaunching",
+            model.volumes.first?.path == boot,
+            "the list is \(model.volumes.map(\.path))"
+        )
+
+        // Watching for mounts must not be what keeps a model alive.
+        final class Watch { weak var model: AppModel? }
+        let watch = Watch()
+        do {
+            let discarded = AppModel()
+            watch.model = discarded
+        }
+        announce(NSWorkspace.didMountNotification)
+        pump { watch.model == nil }
+        check(
+            "a discarded model is let go rather than kept listening",
+            watch.model == nil,
+            "still alive"
         )
     }
 
