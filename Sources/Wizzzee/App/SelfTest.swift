@@ -61,6 +61,7 @@ enum SelfTest {
         testDeletingTheDuplicateNameFreesTheOther()
         testDeletingALinkWithNoPartnerInTreeSubtracts()
         testTreemapLayoutIsFencedAgainstDeletes()
+        testAQueuedLayoutPinsTheFoldersAboveItsRoot()
         testBatchTrashOfSiblings(batchRoot)
         testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
@@ -1420,6 +1421,7 @@ enum SelfTest {
             model.treemapQueue.async {
                 _ = TreemapLayout.build(
                     root: root,
+                    ancestors: [],
                     size: CGSize(width: 1400, height: 500),
                     metric: .allocated
                 )
@@ -1453,6 +1455,98 @@ enum SelfTest {
             "layouts queued before the delete all finish cleanly",
             true,
             ""
+        )
+    }
+
+    /// A rescan lets go of the tree without waiting for the treemap's queue the
+    /// way a delete does, so a layout still waiting its turn has to hold
+    /// everything it is going to read. It held the folder it was zoomed to and
+    /// nothing above it — then walked that folder's unowned parent chain once it
+    /// ran, through folders the rescan had already freed.
+    ///
+    /// The tree is built by hand so this owns every other reference to it, and
+    /// the layout queue is held shut so the layout is still queued when the
+    /// tree is dropped.
+    @MainActor
+    private static func testAQueuedLayoutPinsTheFoldersAboveItsRoot() {
+        func entry(_ name: String, _ bytes: UInt64) -> FileEntry {
+            FileEntry(
+                name: name,
+                size: bytes,
+                alloc: bytes,
+                mtime: 0,
+                extIndex: -1,
+                isSymlink: false,
+                isDuplicateLink: false
+            )
+        }
+        // scan root → middle → zoomed, the last being what the map is showing.
+        func plant() -> (root: DirNode, zoomed: DirNode) {
+            let root = DirNode(name: "/wizzzee-selftest-pin", parent: nil)
+            let middle = DirNode(name: "middle", parent: root)
+            let zoomed = DirNode(name: "zoomed", parent: middle)
+            zoomed.files = [entry("a.dat", 6_000), entry("b.dat", 3_000)]
+            for dir in [zoomed, middle, root] {
+                dir.totalSize = 9_000
+                dir.totalAlloc = 9_000
+                dir.totalFiles = 2
+            }
+            middle.subdirs = [zoomed]
+            middle.totalDirs = 1
+            root.subdirs = [middle]
+            root.totalDirs = 2
+            return (root, zoomed)
+        }
+
+        // Watches the scan root without holding it.
+        final class Watch { weak var node: DirNode? }
+
+        var tree: (root: DirNode, zoomed: DirNode)? = plant()
+        let scanRoot = Watch()
+        scanRoot.node = tree?.root
+        guard let zoomed = tree?.zoomed else { return }
+
+        let queue = DispatchQueue(label: "com.wizzzee.selftest.layout")
+        let gate = DispatchSemaphore(value: 0)
+        queue.async { gate.wait() }
+
+        let view = TreemapNSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        view.layoutQueue = queue
+        view.apply(root: zoomed, metric: .allocated, revision: 0)
+
+        // What a rescan does: the scan is dropped, and the view is handed
+        // nothing in its place.
+        tree = nil
+        view.apply(root: nil, metric: .allocated, revision: 0)
+
+        let pinned = scanRoot.node != nil
+        check(
+            "a queued layout keeps the folders above its root alive",
+            pinned,
+            "freed while the layout was still waiting to read them"
+        )
+        // Reading them now would be the very fault this is about, so a layout
+        // that didn't pin its chain is cut loose from it before being let run.
+        if !pinned { zoomed.parent = nil }
+
+        gate.signal()
+        queue.sync {}
+        check(
+            "and runs to the end against a scan that has been thrown away",
+            true,
+            ""
+        )
+
+        // The other half of pinning: holding on after the layout is done would
+        // keep every folder of a discarded scan in memory.
+        let deadline = Date().addingTimeInterval(5)
+        while scanRoot.node != nil && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        check(
+            "then lets go of them once it has finished",
+            scanRoot.node == nil,
+            "the discarded scan is still held"
         )
     }
 

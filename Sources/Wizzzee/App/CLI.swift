@@ -67,7 +67,12 @@ enum CLI {
         )
 
         let started = Date()
-        let model = TreemapLayout.build(root: result.root, size: size, metric: metric)
+        let model = TreemapLayout.build(
+            root: result.root,
+            ancestors: [],
+            size: size,
+            metric: metric
+        )
         let layoutTime = Date().timeIntervalSince(started)
         let renderStarted = Date()
         guard let image = TreemapRenderer.render(model: model, scale: 2) else {

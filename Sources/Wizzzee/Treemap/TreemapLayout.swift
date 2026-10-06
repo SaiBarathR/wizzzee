@@ -81,22 +81,36 @@ enum TreemapLayout {
     private static let cushionHeight = 0.30
     private static let inheritedDamping = 0.30
 
-    static func build(
-        root: DirNode,
-        size: CGSize,
-        metric: SizeMetric,
-        maxDepth: Int = 12
-    ) -> TreemapModel {
+    /// `dir`'s parent chain, nearest first.
+    ///
+    /// `parent` is unowned, so this is only safe to call where the tree above
+    /// `dir` is known to be alive — in practice the main thread, while the scan
+    /// that holds it is still the one on show.
+    static func ancestors(of dir: DirNode) -> [DirNode] {
         var chain: [DirNode] = []
-        var above = root.parent
+        var above = dir.parent
         while let step = above {
             chain.append(step)
             above = step.parent
         }
+        return chain
+    }
+
+    /// `ancestors` is handed in rather than walked from `root` here. A layout
+    /// runs on a background queue, and by the time it does a rescan may have
+    /// let go of everything above `root`; the caller collects the chain while
+    /// it is still alive, and holding it is what keeps it that way.
+    static func build(
+        root: DirNode,
+        ancestors: [DirNode],
+        size: CGSize,
+        metric: SizeMetric,
+        maxDepth: Int = 12
+    ) -> TreemapModel {
         var model = TreemapModel(
             size: size,
             root: root,
-            ancestors: chain,
+            ancestors: ancestors,
             metric: metric
         )
         guard size.width > 1, size.height > 1 else { return model }
