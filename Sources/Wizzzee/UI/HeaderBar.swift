@@ -56,7 +56,7 @@ struct HeaderBar: View {
 
                 Button("Folder…") { model.chooseFolder() }
                     .fixedSize()
-                    .disabled(model.phase == .scanning)
+                    .disabled(!model.canStartScan)
                     .help("Scan a specific folder instead of a whole volume")
 
                 if model.phase == .scanning {
@@ -68,6 +68,7 @@ struct HeaderBar: View {
                         .fixedSize()
                         .keyboardShortcut(.return, modifiers: [])
                         .buttonStyle(.borderedProminent)
+                        .disabled(!model.canStartScan)
                 }
             }
 
@@ -249,7 +250,10 @@ struct HeaderBar: View {
             Button("Delete \(count)…") { model.permanentDeleteTargets = refs }
         }
         .controlSize(.small)
-        .disabled(blocked)
+        // Off while a batch runs, as the context menu's are: a confirmation
+        // raised now would be answered after that batch had renumbered the
+        // files it names.
+        .disabled(blocked || model.isDeleting)
         .help(
             blocked
                 ? "Part of the selection is on the sealed system volume and "

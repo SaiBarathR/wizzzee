@@ -77,6 +77,10 @@ enum FileActions {
         "/System/", "/usr/", "/bin/", "/sbin/", "/private/var/db/",
     ]
 
+    /// Mount point of the writable APFS data volume. `/` reaches the same
+    /// folders through firmlinks, so everything under it has a second path.
+    private static let dataVolumeMount = "/System/Volumes/Data"
+
     /// Writable locations that sit underneath a protected prefix.
     ///
     /// `/System/Volumes/Data` is the mount point of the writable APFS data
@@ -85,7 +89,7 @@ enum FileActions {
     /// scanning it directly. Without this, every path in such a scan begins
     /// `/System/` and every delete was refused with a flatly false claim that
     /// the user's own home directory was on the read-only system volume.
-    private static let writableExceptions = ["/usr/local", "/System/Volumes/Data"]
+    private static let writableExceptions = ["/usr/local", dataVolumeMount]
 
     static func isSystemProtected(_ path: String) -> Bool {
         // Matched as whole path components — each prefix ends in "/", so a
@@ -105,6 +109,14 @@ enum FileActions {
     static func isUndeletableRoot(_ path: String) -> Bool {
         var trimmed = path
         while trimmed.count > 1 && trimmed.hasSuffix("/") { trimmed.removeLast() }
+        // A scan of the data volume's mount point spells every path through it,
+        // so `/System/Volumes/Data/Users/<name>` is the same home folder as
+        // `/Users/<name>`, and the mount point is the volume `/` stands for.
+        // Judged as written it has five components and passes every check below.
+        if trimmed == dataVolumeMount { return true }
+        if trimmed.hasPrefix(dataVolumeMount + "/") {
+            trimmed.removeFirst(dataVolumeMount.count)
+        }
         if trimmed.isEmpty || trimmed == "/" { return true }
         if trimmed == NSHomeDirectory() { return true }
 

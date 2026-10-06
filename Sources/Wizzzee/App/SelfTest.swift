@@ -49,6 +49,8 @@ enum SelfTest {
         testVolumeAndHomeRootsAreRefused()
         testDeleteReturnsBeforeItHasFinished()
         testDeleteCanBeStopped()
+        testAScanCannotStartDuringADelete()
+        testAPendingDeleteDoesNotOutliveTheTree()
         testTrashUpdatesTree(root)
         testPermanentDeleteFolder(root)
         testStaleReferencesSurviveADelete(batchRoot)
@@ -569,6 +571,148 @@ enum SelfTest {
         )
     }
 
+    /// A scan started while a delete batch is running throws away the tree the
+    /// batch's references point into. When the batch then finishes it applies
+    /// them to whatever replaced it: hard-link counts matched by inode in a tree
+    /// it never touched, and totals subtracted along a parent chain that the
+    /// rescan has freed. The scan is refused instead, the same way a second
+    /// batch is.
+    @MainActor
+    private static func testAScanCannotStartDuringADelete() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-rescan-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            for folder in ["bulk", "spare"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            for i in 0..<60 {
+                try write(base.appendingPathComponent("bulk/f\(i).dat"), bytes: 900)
+            }
+            try write(base.appendingPathComponent("spare/keep.dat"), bytes: 700)
+        } catch {
+            check("the rescan fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let bulk = result.root.subdir(named: "bulk") else {
+            check("the rescan fixture scanned", false, "missing folder")
+            return
+        }
+
+        model.deletePermanently([NodeRef(bulk)])
+        check(
+            "a scan can't be started while a delete is running",
+            model.isDeleting && !model.canStartScan,
+            "deleting=\(model.isDeleting), canStartScan=\(model.canStartScan)"
+        )
+        model.startScan()
+        check(
+            "asking for one anyway leaves the tree the batch is working on",
+            model.phase == .complete && model.result === result,
+            "phase \(model.phase), same result: \(model.result === result)"
+        )
+
+        pumpUntilDeleteSettles(model)
+        check(
+            "the batch then lands on the tree it was started against",
+            model.result === result
+                && result.root.subdir(named: "bulk") == nil
+                && result.root.totalFiles == 1,
+            "same result: \(model.result === result), "
+                + "\(result.root.totalFiles) files"
+        )
+
+        // Refusing must not outlast the batch, or the app could never rescan.
+        check(
+            "a scan can be started again once it settles",
+            model.canStartScan,
+            "still refused"
+        )
+        guard let rescanned = loadSynchronously(into: model) else { return }
+        check(
+            "and the rescan sees what the delete left",
+            rescanned !== result && rescanned.root.totalFiles == 1,
+            "\(rescanned.root.totalFiles) files"
+        )
+    }
+
+    /// A delete awaiting confirmation names its files by index, and a batch
+    /// that finishes while the dialog is up renumbers them. `isStale` only
+    /// catches an index that has run off the end, so confirming would have
+    /// permanently deleted whatever shifted into those slots. The pending
+    /// confirmation is dropped with the selection instead, and a rescan drops
+    /// it too — its references point into a tree that no longer exists.
+    @MainActor
+    private static func testAPendingDeleteDoesNotOutliveTheTree() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-pending-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("pending"),
+                withIntermediateDirectories: true
+            )
+            for (i, name) in ["a", "b", "c", "d"].enumerated() {
+                try write(
+                    base.appendingPathComponent("pending/\(name).dat"),
+                    bytes: 1_000 + i * 100
+                )
+            }
+        } catch {
+            check("the pending fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let dir = result.root.subdir(named: "pending"), dir.files.count == 4
+        else {
+            check("the pending fixture scanned", false, "missing files")
+            return
+        }
+
+        // The first file is on its way out; the dialog is raised for two of the
+        // files after it while that batch is still running.
+        let pending: Set<NodeRef> = [
+            NodeRef(dir: dir, fileIndex: 1), NodeRef(dir: dir, fileIndex: 2),
+        ]
+        let named = Set(pending.map(\.name))
+        model.deletePermanently([NodeRef(dir: dir, fileIndex: 0)])
+        model.permanentDeleteTargets = pending
+        pumpUntilDeleteSettles(model)
+
+        // What confirming would have acted on: both references are still in
+        // range, so nothing downstream would have refused them.
+        check(
+            "the batch renumbered the files the dialog was raised for",
+            dir.files.count == 3 && pending.allSatisfy { !$0.isStale }
+                && Set(pending.map(\.name)) != named,
+            "names now \(pending.map(\.name).sorted()), were \(named.sorted())"
+        )
+        check(
+            "so the pending confirmation is dropped with the selection",
+            model.permanentDeleteTargets.isEmpty,
+            "still aimed at \(model.permanentDeleteTargets.map(\.name).sorted())"
+        )
+
+        model.permanentDeleteTargets = [NodeRef(dir: dir, fileIndex: 0)]
+        model.startScan()
+        check(
+            "a rescan drops a pending confirmation too",
+            model.permanentDeleteTargets.isEmpty,
+            "still aimed at the scan that was thrown away"
+        )
+        pumpUntilSettled(model)
+    }
+
     @MainActor
     private static func testTrashUpdatesTree(_ root: URL) {
         let model = AppModel()
@@ -975,6 +1119,51 @@ enum SelfTest {
             !FileActions.isUndeletableRoot("/Volumes/Backup/old"),
             "wrongly refused"
         )
+
+        // A scan of the data volume's own mount point spells every path through
+        // it. Counted as written, a home folder there has five components and
+        // isn't `NSHomeDirectory()`, so every check above waved it through.
+        let dataVolume = "/System/Volumes/Data"
+        check(
+            "the data volume's mount point is refused",
+            FileActions.isUndeletableRoot(dataVolume),
+            "accepted"
+        )
+        check(
+            "this user's home folder is refused through the data volume",
+            FileActions.isUndeletableRoot(dataVolume + NSHomeDirectory()),
+            "accepted"
+        )
+        check(
+            "another user's home folder is refused through it too",
+            FileActions.isUndeletableRoot(dataVolume + "/Users/someoneelse/"),
+            "accepted"
+        )
+        check(
+            "something inside a home folder there is still deletable",
+            !FileActions.isUndeletableRoot(
+                dataVolume + NSHomeDirectory() + "/Downloads/x.zip"
+            ),
+            "wrongly refused"
+        )
+        check(
+            "a folder that merely starts with the mount point's name isn't caught",
+            !FileActions.isUndeletableRoot(dataVolume + "base/Users/someone"),
+            "wrongly refused"
+        )
+        // Refused before the filesystem is touched, so this is safe to call.
+        do {
+            try FileActions.deletePermanently(dataVolume + "/Users/someoneelse")
+            check("deleting a home folder through it is refused", false, "it went ahead")
+        } catch FileActions.ActionError.undeletableRoot {
+            check("deleting a home folder through it is refused", true, "")
+        } catch {
+            check(
+                "deleting a home folder through it is refused",
+                false,
+                "it got as far as the filesystem: \(error)"
+            )
+        }
     }
 
     /// Deleting one name of a hard-linked pair frees nothing while the other
