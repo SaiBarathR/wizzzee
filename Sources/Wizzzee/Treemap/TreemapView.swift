@@ -45,6 +45,13 @@ final class TreemapNSView: NSView {
     }
 
     private var root: DirNode?
+    /// `root`'s parent chain, held for as long as `root` is.
+    ///
+    /// Collected in `apply`, on the main thread at the moment SwiftUI hands the
+    /// root over — the one point the chain is known to be alive — and passed to
+    /// every layout queued for it. A layout that walked the chain itself did so
+    /// on the layout queue, after a rescan could already have freed it.
+    private var ancestors: [DirNode] = []
     private var metric: SizeMetric = .logical
     private var revision = -1
 
@@ -77,6 +84,7 @@ final class TreemapNSView: NSView {
             self.root !== root || self.metric != metric || self.revision != revision
         guard changed else { return }
         self.root = root
+        self.ancestors = root.map { TreemapLayout.ancestors(of: $0) } ?? []
         self.metric = metric
         self.revision = revision
         rebuild()
@@ -138,11 +146,21 @@ final class TreemapNSView: NSView {
         // otherwise be freeing underneath it. Rasterizing only touches the
         // value types the layout produced, so it follows on the same queue
         // rather than hopping to another.
+        //
+        // A rescan doesn't fence. It only lets go of the tree, so what a queued
+        // layout reads has to be held by the layout itself: the subtree through
+        // `root`, and the folders above it through `ancestors`.
         let metric = self.metric
+        let ancestors = self.ancestors
         let scale = window?.backingScaleFactor ?? 2
 
         queue.async { [weak self] in
-            let built = TreemapLayout.build(root: root, size: size, metric: metric)
+            let built = TreemapLayout.build(
+                root: root,
+                ancestors: ancestors,
+                size: size,
+                metric: metric
+            )
             let rendered = TreemapRenderer.render(model: built, scale: scale)
             DispatchQueue.main.async {
                 guard let self, token == self.renderToken else { return }
