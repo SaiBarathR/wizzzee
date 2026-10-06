@@ -225,6 +225,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// What a folder holds that deleting it would not free.
+    private struct SharedStorage {
+        var size: UInt64 = 0
+        var alloc: UInt64 = 0
+        /// Names under the folder whose data has another name outside it.
+        var names = 0
+    }
+
+    /// `sharedStorage(under:)` for each folder asked about, keyed on
+    /// `DirNode.id`.
+    ///
+    /// `reclaimableSize` is read from view bodies — the header and the status
+    /// line re-evaluate on every hover — and answering it for a folder means
+    /// looking at every file underneath. The answer can only change when the
+    /// tree does, so it is worked out once per folder and thrown away by a
+    /// delete or a rescan.
+    private var sharedStorageCache: [UInt64: SharedStorage] = [:]
+
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?
     private var fileFilterWork: DispatchWorkItem?
@@ -328,6 +346,7 @@ final class AppModel: ObservableObject {
         // A delete still awaiting confirmation names items in the tree being
         // thrown away, so it goes with the selection.
         permanentDeleteTargets = []
+        sharedStorageCache = [:]
         treemapRoot = nil
         expanded = []
         progress = ScanEngine.Progress()
@@ -608,13 +627,17 @@ final class AppModel: ObservableObject {
     func moveToTrash(_ ref: NodeRef) { moveToTrash([ref]) }
 
     func moveToTrash(_ refs: Set<NodeRef>) {
-        performBatch(on: refs) { try FileActions.moveToTrash($0) }
+        // A name in the Trash is moved, not removed: it is still a name for its
+        // inode, so whatever shared storage with it still does.
+        performBatch(on: refs, unlinks: false) { try FileActions.moveToTrash($0) }
     }
 
     func deletePermanently(_ ref: NodeRef) { deletePermanently([ref]) }
 
     func deletePermanently(_ refs: Set<NodeRef>) {
-        performBatch(on: refs) { try FileActions.deletePermanently($0) }
+        performBatch(on: refs, unlinks: true) {
+            try FileActions.deletePermanently($0)
+        }
     }
 
     /// `refs` with anything already covered by a selected ancestor dropped.
@@ -672,17 +695,74 @@ final class AppModel: ObservableObject {
     /// allocated promised 200 GB back from a sparse image that occupies 8 GB;
     /// counting a hard link's bytes promised space that deleting one of its
     /// names never frees.
+    ///
+    /// That holds inside a folder too. Its total counts every hard-linked file
+    /// in it in full, so the ones with a name left over outside the folder are
+    /// taken back off.
     func reclaimableSize(_ refs: Set<NodeRef>) -> UInt64 {
         distinctTargets(refs).reduce(0) { total, ref in
             if let file = ref.file, file.sharesStorage { return total }
-            return total + (sizeMetric == .logical ? ref.size : ref.alloc)
+            let weight = sizeMetric == .logical ? ref.size : ref.alloc
+            guard ref.isDirectory else { return total + weight }
+            let shared = sharedStorage(under: ref.dir)
+            let staying = sizeMetric == .logical ? shared.size : shared.alloc
+            return total + weight - min(weight, staying)
         }
     }
 
     /// Whether any target's bytes live under more than one name, which makes the
     /// reclaimable figure a ceiling rather than a promise.
     func selectionSharesStorage(_ refs: Set<NodeRef>) -> Bool {
-        distinctTargets(refs).contains { $0.file?.sharesStorage == true }
+        distinctTargets(refs).contains { ref in
+            ref.isDirectory
+                ? sharedStorage(under: ref.dir).names > 0
+                : ref.file?.sharesStorage == true
+        }
+    }
+
+    /// The bytes under `dir` that would still be on disk once it was deleted.
+    ///
+    /// An inode goes with the folder only if every one of its names is in
+    /// there. One with a name left over anywhere else — elsewhere in the scan,
+    /// or outside it altogether, which only the link count can say — stays, and
+    /// so does not count towards what the delete frees.
+    ///
+    /// Judged one folder at a time: a pair split across two folders that are
+    /// both selected is counted as staying for each. That errs low, which is
+    /// the side this figure is meant to err on.
+    private func sharedStorage(under dir: DirNode) -> SharedStorage {
+        if let known = sharedStorageCache[dir.id] { return known }
+
+        // Per inode: the names found under `dir`, the most names it was ever
+        // seen to have, and the bytes its counted name carries.
+        var inodes: [UInt64: (names: Int, links: UInt8, size: UInt64, alloc: UInt64)] =
+            [:]
+        var stack: [DirNode] = [dir]
+        while let step = stack.popLast() {
+            for i in step.files.indices where step.files[i].sharesStorage {
+                var seen = inodes[step.files[i].fileID] ?? (0, 0, 0, 0)
+                seen.names += 1
+                seen.links = max(seen.links, step.files[i].linkCount)
+                if !step.files[i].isDuplicateLink {
+                    seen.size = step.files[i].size
+                    seen.alloc = step.files[i].alloc
+                }
+                inodes[step.files[i].fileID] = seen
+            }
+            stack.append(contentsOf: step.subdirs)
+        }
+
+        var shared = SharedStorage()
+        // A saturated count hides how many names there really are, so it is
+        // taken to mean there is always one more.
+        for seen in inodes.values
+        where seen.links == .max || seen.names < Int(seen.links) {
+            shared.size += seen.size
+            shared.alloc += seen.alloc
+            shared.names += seen.names
+        }
+        sharedStorageCache[dir.id] = shared
+        return shared
     }
 
     /// Runs a delete batch off the main actor, reporting progress as it goes.
@@ -697,8 +777,12 @@ final class AppModel: ObservableObject {
     /// One target at a time rather than concurrently: the batch is already
     /// deduplicated to non-overlapping subtrees, and deleting several huge trees
     /// at once only makes the disk seek more.
+    ///
+    /// `unlinks` says whether `body` removes a name outright or only moves it
+    /// out of the tree, which decides what its hard-linked partners are told.
     private func performBatch(
         on refs: Set<NodeRef>,
+        unlinks: Bool,
         _ body: @escaping @Sendable (String) throws -> Void
     ) {
         // One batch at a time. A second started mid-flight would resolve its
@@ -776,7 +860,7 @@ final class AppModel: ObservableObject {
             self.deleteProgress = nil
             // Successes are applied even when part of the batch failed or was
             // stopped, so the tree never claims space that is already gone.
-            self.detach(deleted)
+            self.detach(deleted, unlinked: unlinks)
             self.report(
                 failures: failures,
                 refusals: refusals,
@@ -827,7 +911,11 @@ final class AppModel: ObservableObject {
 
     /// Drops deleted items from the tree and walks the size change up to the
     /// root, so the whole UI updates without rescanning.
-    private func detach(_ refs: [NodeRef]) {
+    ///
+    /// `unlinked` is false when the items went to the Trash. They leave the
+    /// tree either way, but a trashed name still holds its inode, so the names
+    /// that share storage with it keep their link counts.
+    private func detach(_ refs: [NodeRef], unlinked: Bool) {
         guard !refs.isEmpty else { return }
 
         // The File View walk reads this tree on `treeQueue`. Drop any walk that
@@ -853,8 +941,10 @@ final class AppModel: ObservableObject {
         // folders can't disturb each other's indices.
         let files = refs.lazy.filter { !$0.isDirectory }
             .sorted { $0.fileIndex > $1.fileIndex }
-        for ref in files { detachFile(ref) }
-        for ref in refs where ref.isDirectory { detachDirectory(ref.dir) }
+        for ref in files { detachFile(ref, unlinked: unlinked) }
+        for ref in refs where ref.isDirectory {
+            detachDirectory(ref.dir, unlinked: unlinked)
+        }
 
         // Removing a file shifts the indices of its siblings, invalidating any
         // NodeRef held elsewhere, so all derived rows are rebuilt and the
@@ -864,6 +954,7 @@ final class AppModel: ObservableObject {
         selection = []
         permanentDeleteTargets = []
         hoveredRef = nil
+        sharedStorageCache = [:]
         treeRevision += 1
         // Dropped here and now, not when the walk below returns with fresh ones.
         // A row names its file by index, so the rows already on screen name
@@ -876,7 +967,7 @@ final class AppModel: ObservableObject {
         refreshFileRows(immediately: true)
     }
 
-    private func detachFile(_ ref: NodeRef) {
+    private func detachFile(_ ref: NodeRef, unlinked: Bool) {
         let dir = ref.dir
         let index = Int(ref.fileIndex)
         guard index < dir.files.count else { return }
@@ -884,9 +975,14 @@ final class AppModel: ObservableObject {
 
         if file.isDuplicateLink {
             // Its bytes were never in the totals — they are counted under the
-            // name the scan reached first, which is still there. The survivors
-            // still lose a link, so one left alone can promise its bytes again.
-            result?.releaseHardLink(at: (dir, index), promoting: false)
+            // name the scan reached first, which is still there. If the name
+            // was really removed the survivors still lose a link, so one left
+            // alone can promise its bytes again.
+            result?.releaseHardLink(
+                at: (dir, index),
+                promoting: false,
+                unlinking: unlinked
+            )
             result?.forgetDuplicate(size: file.size)
             subtract(size: 0, alloc: 0, files: 1, dirs: 0, from: dir)
             dir.files.remove(at: index)
@@ -902,7 +998,11 @@ final class AppModel: ObservableObject {
         // names can be in different folders — and if there is no survivor in
         // the tree, the bytes really do leave it and only the subtraction runs.
         if file.isHardLinked,
-            let promoted = result?.releaseHardLink(at: (dir, index), promoting: true)
+            let promoted = result?.releaseHardLink(
+                at: (dir, index),
+                promoting: true,
+                unlinking: unlinked
+            )
         {
             add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
         }
@@ -911,8 +1011,18 @@ final class AppModel: ObservableObject {
         dir.files.remove(at: index)
     }
 
-    private func detachDirectory(_ node: DirNode) {
+    private func detachDirectory(_ node: DirNode, unlinked: Bool) {
         guard let parent = node.parent else { return }
+        // Hard links first, while the folder is still attached. A name under it
+        // that carried an inode's bytes hands them to a name outside it, as a
+        // single file does — otherwise they leave the totals with the folder
+        // while still on disk — and, if the folder was really removed, every
+        // surviving name loses the links that went with it.
+        let promotions =
+            result?.releaseHardLinks(under: node, unlinking: unlinked) ?? []
+        for promoted in promotions {
+            add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
+        }
         subtract(
             size: node.totalSize,
             alloc: node.totalAlloc,
