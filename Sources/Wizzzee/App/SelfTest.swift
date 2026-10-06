@@ -473,7 +473,14 @@ enum SelfTest {
         let decomposed = "RE\u{301}SUME\u{301}.pdf"  // É as E + combining acute
         let umlaut = "\u{DC}BUNG.pdf"  // Ü as one scalar
         let cyrillic = "\u{414}\u{41E}\u{41A}\u{41B}\u{410}\u{414}.txt"  // ДОКЛАД
-        let names = [precomposed, decomposed, umlaut, cyrillic, "plain.txt"]
+        // Both fold to plain ASCII — ß to "ss", the ligature to "ff" — which is
+        // what makes them a trap: the folded filter has nothing non-ASCII left
+        // in it, and the names still do.
+        let eszett = "Stra\u{DF}e.txt"  // Straße
+        let ligature = "o\u{FB00}ice.txt"  // oﬀice
+        let names = [
+            precomposed, decomposed, umlaut, cyrillic, eszett, ligature, "plain.txt",
+        ]
         do {
             try FileManager.default.createDirectory(
                 at: base,
@@ -510,6 +517,19 @@ enum SelfTest {
             found(query).count == 1 && found(query).first == name
         }
 
+        // The floor under everything below: whatever folding does, a file has
+        // to be findable by typing its own name.
+        let lost = names.filter { !found($0).contains($0) }
+        check(
+            "every name is found by typing it exactly",
+            lost.isEmpty,
+            "not found by their own names: \(lost)"
+        )
+        check(
+            "including ones whose letters fold to plain ASCII",
+            finds("stra\u{DF}e", eszett) && finds("O\u{FB00}ICE", ligature),
+            "got \(found("stra\u{DF}e")) and \(found("O\u{FB00}ICE"))"
+        )
         check(
             "an accented capital is found by typing it",
             finds("\u{C9}lan", precomposed),
@@ -544,6 +564,14 @@ enum SelfTest {
             "a path filter folds the same way",
             finds("/\u{E9}lan", precomposed),
             "got \(found("/\u{E9}lan"))"
+        )
+        // A pure-ASCII name is compared as it stands, which has to give the
+        // answer folding it would have: the ß typed here folds to "ss".
+        check(
+            "a folded filter still reaches names with nothing to fold",
+            "CLASSES.txt".containsFolded("cla\u{DF}es".foldedForSearch)
+                && !"plain.txt".containsFolded("\u{E9}".foldedForSearch),
+            "an ASCII name was compared differently from a folded one"
         )
         check(
             "a letter that is in none of the names matches none of them",

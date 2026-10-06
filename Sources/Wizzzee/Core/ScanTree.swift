@@ -365,7 +365,11 @@ final class ScanResult {
         // Nearly every filter is plain ASCII, and is matched byte for byte
         // against names as they are stored. Anything else needs each name
         // folded the same way as the needle before the two can be compared.
-        let needleIsASCII = needle.utf8.allSatisfy { $0 < 0x80 }
+        //
+        // Asked of what was typed, not of the needle. Folding can leave a
+        // needle that is pure ASCII — `ß` becomes "ss" — and the name it was
+        // typed to find still has the `ß` in it.
+        let foldsNames = query.utf8.contains { $0 >= 0x80 }
         let matchPath = needle.contains("/")
         var heap = SizeHeap(limit: limit)
         // Checked per directory rather than per file — the flag is behind a
@@ -396,9 +400,9 @@ final class ScanResult {
                         matchPath
                         ? (dirPath + "/" + file.name) : file.name
                     let matches =
-                        needleIsASCII
-                        ? haystack.containsCaseInsensitive(needle)
-                        : haystack.containsFolded(needle)
+                        foldsNames
+                        ? haystack.containsFolded(needle)
+                        : haystack.containsCaseInsensitive(needle)
                     if !matches { continue }
                 }
                 heap.insert(NodeRef(dir: dir, fileIndex: i), size: weight)
@@ -645,15 +649,17 @@ extension String {
         return folded
     }
 
-    /// As `containsCaseInsensitive`, for a needle with anything beyond ASCII in
-    /// it; `needle` is expected to be `foldedForSearch` already.
+    /// As `containsCaseInsensitive`, for a filter typed with anything beyond
+    /// ASCII in it; `needle` is expected to be `foldedForSearch` already.
     ///
     /// Folding allocates, which is what `containsCaseInsensitive` exists to
-    /// avoid, so it is kept off the common path twice over: only a non-ASCII
-    /// needle comes here, and such a needle cannot occur in a name that is
-    /// pure ASCII — which is most names.
+    /// avoid, so it is kept off the common path twice over: only such a filter
+    /// comes here, and a name that is pure ASCII — which is most names — folds
+    /// to itself give or take case, so it is compared as it stands.
     func containsFolded(_ needle: String) -> Bool {
-        guard utf8.contains(where: { $0 >= 0x80 }) else { return false }
+        guard utf8.contains(where: { $0 >= 0x80 }) else {
+            return containsCaseInsensitive(needle)
+        }
         return foldedForSearch.containsCaseInsensitive(needle)
     }
 
