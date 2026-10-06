@@ -479,7 +479,7 @@ final class ScanResult {
         return promoted
     }
 
-    /// As `releaseHardLink`, for every name under a folder that is being
+    /// As `releaseHardLink`, for every name under folders that are being
     /// removed whole.
     ///
     /// A folder's totals come off in one step, so nothing looked at the files
@@ -488,23 +488,26 @@ final class ScanResult {
     /// went without its partner ever losing a link.
     ///
     /// The names leaving are gathered first and the rest of the tree is walked
-    /// once for all of them. `releaseHardLink` per file would be a full walk
-    /// each, and one folder can hold hundreds of thousands of links. Call it
-    /// while `removed` is still attached, so it can be told apart from what
-    /// survives it. Returns each promoted name's folder and the bytes it now
-    /// accounts for.
+    /// once for all of them — every folder in the batch together, not one walk
+    /// each. `releaseHardLink` per file would be a full walk per link, and a
+    /// folder can hold hundreds of thousands; a walk per folder froze the
+    /// window for seconds once a few hundred were deleted at a time.
+    ///
+    /// `removed` must not nest, which a delete batch never does, and has to
+    /// still be attached, so it can be told apart from what survives it.
+    /// Returns each promoted name's folder and the bytes it now accounts for.
     ///
     /// `unlinking` is as for `releaseHardLink`: a trashed folder's names still
     /// exist, so the survivors keep their link counts and only the promotion
     /// happens.
     func releaseHardLinks(
-        under removed: DirNode,
+        under removed: [DirNode],
         unlinking: Bool
     ) -> [(dir: DirNode, size: UInt64, alloc: UInt64)] {
         // Per inode: how many of its names are leaving, and whether one of
         // them is the name its bytes are counted under.
         var leaving: [UInt64: (names: Int, counted: Bool)] = [:]
-        var stack: [DirNode] = [removed]
+        var stack: [DirNode] = removed
         while let dir = stack.popLast() {
             for i in dir.files.indices where dir.files[i].sharesStorage {
                 var going = leaving[dir.files[i].fileID] ?? (0, false)
@@ -519,7 +522,7 @@ final class ScanResult {
             stack.append(contentsOf: dir.subdirs)
         }
         // Most folders hold no hard links at all, and the walk below is a pass
-        // over everything else in the scan — once per folder in a batch.
+        // over everything else in the scan.
         guard !leaving.isEmpty else { return [] }
         // Nor is it needed with no count to lower and no bytes to hand on:
         // nothing outside the folder changes.
@@ -527,10 +530,11 @@ final class ScanResult {
             return []
         }
 
+        let gone = Set(removed.map { ObjectIdentifier($0) })
         var promoted: [(dir: DirNode, size: UInt64, alloc: UInt64)] = []
         stack = [root]
         while let dir = stack.popLast() {
-            if dir === removed { continue }
+            if gone.contains(ObjectIdentifier(dir)) { continue }
             for i in dir.files.indices where dir.files[i].sharesStorage {
                 guard let going = leaving[dir.files[i].fileID] else { continue }
 

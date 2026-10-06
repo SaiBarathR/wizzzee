@@ -1041,9 +1041,20 @@ final class AppModel: ObservableObject {
         let files = refs.lazy.filter { !$0.isDirectory }
             .sorted { $0.fileIndex > $1.fileIndex }
         for ref in files { detachFile(ref, unlinked: unlinked) }
-        for ref in refs where ref.isDirectory {
-            detachDirectory(ref.dir, unlinked: unlinked)
+
+        // Hard links before the folders themselves, while they are still
+        // attached, and for the whole batch in one go. A name under a folder
+        // that carried an inode's bytes hands them to a name outside every
+        // folder that is going, as a single file does — otherwise they leave
+        // the totals with the folder while still on disk — and, if the folders
+        // were really removed, every surviving name loses the links that went.
+        let folders = refs.filter { $0.isDirectory && !$0.dir.isRoot }.map(\.dir)
+        let promotions =
+            result?.releaseHardLinks(under: folders, unlinking: unlinked) ?? []
+        for promoted in promotions {
+            add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
         }
+        for folder in folders { detachDirectory(folder) }
 
         // Removing a file shifts the indices of its siblings, invalidating any
         // NodeRef held elsewhere, so all derived rows are rebuilt and the
@@ -1110,18 +1121,8 @@ final class AppModel: ObservableObject {
         dir.files.remove(at: index)
     }
 
-    private func detachDirectory(_ node: DirNode, unlinked: Bool) {
+    private func detachDirectory(_ node: DirNode) {
         guard let parent = node.parent else { return }
-        // Hard links first, while the folder is still attached. A name under it
-        // that carried an inode's bytes hands them to a name outside it, as a
-        // single file does — otherwise they leave the totals with the folder
-        // while still on disk — and, if the folder was really removed, every
-        // surviving name loses the links that went with it.
-        let promotions =
-            result?.releaseHardLinks(under: node, unlinking: unlinked) ?? []
-        for promoted in promotions {
-            add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
-        }
         subtract(
             size: node.totalSize,
             alloc: node.totalAlloc,

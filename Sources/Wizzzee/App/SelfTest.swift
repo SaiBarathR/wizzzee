@@ -68,6 +68,7 @@ enum SelfTest {
         testDeletingALinkWithNoPartnerInTreeSubtracts()
         testTreemapLayoutIsFencedAgainstDeletes()
         testAQueuedLayoutPinsTheFoldersAboveItsRoot()
+        testAStaleMapAnswersNoClicks()
         testBatchTrashOfSiblings(batchRoot)
         testBatchDeleteOfNestedSelection(batchRoot)
         testSystemProtectionRefusal()
@@ -1952,6 +1953,137 @@ enum SelfTest {
         )
     }
 
+    /// Laying the treemap out is asynchronous, so for a moment after a delete
+    /// the tiles on show are the old ones — tiles for folders that have just
+    /// been unlinked among them. A click on one handed the model a node that
+    /// only the outgoing layout was keeping alive. The model kept it as its
+    /// selection or zoom root, the new layout replaced the old, the folders
+    /// above the node were freed, and the next thing to ask for its path read
+    /// them.
+    ///
+    /// The map answers nothing until it shows the tree as it now is. Events are
+    /// sent straight to the view here, and the layout queue is held shut to
+    /// keep the stale layout on show for as long as the checks need it.
+    @MainActor
+    private static func testAStaleMapAnswersNoClicks() {
+        func entry(_ name: String, _ bytes: UInt64) -> FileEntry {
+            FileEntry(
+                name: name,
+                size: bytes,
+                alloc: bytes,
+                mtime: 0,
+                extIndex: -1,
+                isSymlink: false,
+                isDuplicateLink: false
+            )
+        }
+        func total(_ dir: DirNode, _ bytes: UInt64, files: Int, dirs: Int) {
+            dir.totalSize = bytes
+            dir.totalAlloc = bytes
+            dir.totalFiles = files
+            dir.totalDirs = dirs
+        }
+        // One folder taking nearly the whole map and one taking a sliver, so
+        // the middle of the view is the first before the delete and the second
+        // after it.
+        let root = DirNode(name: "/wizzzee-selftest-stale", parent: nil)
+        let doomed = DirNode(name: "doomed", parent: root)
+        doomed.files = [entry("a.dat", 6_000), entry("b.dat", 3_000)]
+        total(doomed, 9_000, files: 2, dirs: 0)
+        let kept = DirNode(name: "kept", parent: root)
+        kept.files = [entry("k.dat", 100)]
+        total(kept, 100, files: 1, dirs: 0)
+        root.subdirs = [doomed, kept]
+        total(root, 9_100, files: 3, dirs: 2)
+
+        let queue = DispatchQueue(label: "com.wizzzee.selftest.stale")
+        var revision = 0
+        var picked: [NodeRef] = []
+        var hovered: [NodeRef] = []
+        let view = TreemapNSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        view.layoutQueue = queue
+        view.liveRevision = { revision }
+        view.onSelect = { picked.append($0) }
+        view.onHover = { if let ref = $0 { hovered.append(ref) } }
+
+        // The middle of the view, which reads the same flipped or not.
+        func send(_ type: NSEvent.EventType) {
+            guard
+                let event = NSEvent.mouseEvent(
+                    with: type,
+                    location: NSPoint(x: 200, y: 150),
+                    modifierFlags: [],
+                    timestamp: 0,
+                    windowNumber: 0,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: 1
+                )
+            else { return }
+            if type == .mouseMoved {
+                view.mouseMoved(with: event)
+            } else {
+                view.mouseDown(with: event)
+            }
+        }
+        // Lets a queued layout run and its result land on the main queue.
+        func settle() {
+            queue.sync {}
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
+
+        view.apply(root: root, metric: .allocated, revision: revision)
+        settle()
+        send(.leftMouseDown)
+        send(.mouseMoved)
+        // Without this the rest would pass for a view that ignored every click.
+        check(
+            "a click on the map picks the tile under it",
+            picked.last?.dir === doomed && hovered.last?.dir === doomed,
+            "picked \(picked.map(\.name)), hovered \(hovered.map(\.name))"
+        )
+
+        // What a delete does to the tree: the folder is unlinked, its bytes come
+        // off the totals, and the revision moves on.
+        root.subdirs.removeAll { $0 === doomed }
+        total(root, 100, files: 1, dirs: 1)
+        revision = 1
+        picked = []
+        hovered = []
+
+        // SwiftUI has not told the view yet. A click can arrive first.
+        send(.leftMouseDown)
+        send(.mouseMoved)
+        check(
+            "a click that beats the view's own update picks nothing",
+            picked.isEmpty && hovered.isEmpty,
+            "picked \(picked.map(\.name)), hovered \(hovered.map(\.name)) "
+                + "from a layout of the tree before the delete"
+        )
+
+        let gate = DispatchSemaphore(value: 0)
+        queue.async { gate.wait() }
+        view.apply(root: root, metric: .allocated, revision: revision)
+        send(.leftMouseDown)
+        send(.mouseMoved)
+        check(
+            "nor does one while the new layout is still on its way",
+            picked.isEmpty && hovered.isEmpty,
+            "picked \(picked.map(\.name)), hovered \(hovered.map(\.name)) "
+                + "from a layout of the tree before the delete"
+        )
+
+        gate.signal()
+        settle()
+        send(.leftMouseDown)
+        check(
+            "once the map shows the tree as it is, a click picks what is there",
+            picked.count == 1 && picked.last?.dir === kept,
+            "picked \(picked.map(\.name))"
+        )
+    }
+
     /// The mirror of the above: deleting the *duplicate* name first.
     ///
     /// Nothing moves in the totals — the duplicate was never counted — but the
@@ -2251,6 +2383,32 @@ enum SelfTest {
                     && result.hardLinkSavings == 9_000,
                 "trio is \(trio.totalSize), expected \(trioBefore); "
                     + "savings \(result.hardLinkSavings), expected 9000"
+            )
+        }
+
+        // Two of three names in one batch, whichever of them the scan counted:
+        // the one left ends up alone holding the bytes.
+        withLinkFarm("batch-trio") { model, result in
+            guard let trio = result.root.subdir(named: "trio"),
+                let a = trio.subdir(named: "a"),
+                let b = trio.subdir(named: "b"),
+                let c = trio.subdir(named: "c")
+            else {
+                check("the trio farm scanned", false, "missing folders")
+                return
+            }
+            let trioBefore = trio.totalSize
+            deletePermanently(model, [NodeRef(a), NodeRef(b)])
+            check(
+                "two names of three gone in one batch leave the third alone with the bytes",
+                trio.subdirs.count == 1 && trio.totalSize == trioBefore
+                    && c.totalSize == 2_000
+                    && c.files.first?.isDuplicateLink == false
+                    && c.files.first?.linkCount == 1
+                    && result.hardLinkSavings == 16_000,
+                "trio \(trio.totalSize) of \(trioBefore), c \(c.totalSize), "
+                    + "linkCount \(String(describing: c.files.first?.linkCount)), "
+                    + "savings \(result.hardLinkSavings), expected 16000"
             )
         }
 
