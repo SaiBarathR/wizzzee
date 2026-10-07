@@ -126,6 +126,7 @@ enum SelfTest {
         testPuttingBackMovesOnlyWhatWasPutThere()
         testUndoingATrashPutsHardLinksRight()
         testChoicesOutlastALaunch()
+        testAVolumeScanSaysHowFarItHasGot()
         testQuickLookShowsWhatIsSelected()
         testASearchIsReadFromWhatWasTyped()
         testASearchFindsFoldersAndCountsWhatItFinds()
@@ -6886,6 +6887,52 @@ enum SelfTest {
             "a scan that was stopped does not hand its place on to the next",
             model.marks.isEmpty && model.marksLostToRescan == 0,
             "marked \(model.marks.count), \(model.marksLostToRescan) lost"
+        )
+    }
+
+    /// The bar under Scan only ever said that something was happening. For a
+    /// whole volume there is something to measure against, and it does.
+    @MainActor
+    private static func testAVolumeScanSaysHowFarItHasGot() {
+        check(
+            "what has been read is a share of what the volume has in use",
+            AppModel.fraction(read: 25, of: 100) == 0.25
+                && AppModel.fraction(read: 0, of: 100) == 0,
+            "\(String(describing: AppModel.fraction(read: 25, of: 100)))"
+        )
+        check(
+            "and never more than all of it, however the two were measured",
+            AppModel.fraction(read: 150, of: 100) == 1,
+            "\(String(describing: AppModel.fraction(read: 150, of: 100)))"
+        )
+        check(
+            "with nothing to be a share of, there is no saying how far",
+            AppModel.fraction(read: 150, of: 0) == nil,
+            "\(String(describing: AppModel.fraction(read: 150, of: 0)))"
+        )
+
+        let model = AppModel()
+        check(
+            "nothing is said of a scan that is not running",
+            model.scanFraction == nil && model.scanningIn.isEmpty,
+            "\(String(describing: model.scanFraction))"
+        )
+        let base = scratch("progress")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try? write(base.appendingPathComponent("one.dat"), bytes: 1_000)
+        model.customFolder = base.path
+        model.startScan()
+        check(
+            "a folder has no size known ahead, so its scan does not say how far",
+            model.phase == .scanning && model.scanFraction == nil,
+            "\(String(describing: model.scanFraction))"
+        )
+        pumpUntilSettled(model)
+        check(
+            "and nothing is said once it is over",
+            model.scanFraction == nil && model.scanningIn.isEmpty,
+            "\(String(describing: model.scanFraction))"
         )
     }
 

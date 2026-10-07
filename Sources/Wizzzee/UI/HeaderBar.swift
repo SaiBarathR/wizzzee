@@ -95,7 +95,24 @@ struct HeaderBar: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                ProgressView().progressViewStyle(.linear).frame(width: 380)
+                // How far, where that can be known: a whole volume has a
+                // size to be a share of, and a folder has not.
+                Group {
+                    if let fraction = model.scanFraction {
+                        ProgressView(value: fraction)
+                    } else {
+                        ProgressView()
+                    }
+                }
+                .progressViewStyle(.linear)
+                .frame(width: 380)
+                // Where it has got to, which was collected and never shown.
+                Text(model.scanningIn)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: 380, alignment: .leading)
             }
         case .complete:
             HStack(spacing: 4) {

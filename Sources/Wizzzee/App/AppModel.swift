@@ -548,6 +548,11 @@ final class AppModel: ObservableObject {
     /// so a shorter list of marks is not taken for the whole of it.
     @Published private(set) var marksLostToRescan = 0
 
+    /// The space in use on the volume being scanned, as read when the scan
+    /// began, or zero when a folder is: how much is in a folder is what the
+    /// scan is there to find out.
+    private var scanGoal: UInt64 = 0
+
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?
     /// Asks the removal in hand to stop at its next entry.
@@ -693,6 +698,29 @@ final class AppModel: ObservableObject {
             onDisk: result.root.totalAlloc
         ) + "  (\(ByteFormat.counted(result.root.totalFiles, "file")))"
     }
+
+    /// How far a scan of a whole volume has got, from 0 to 1. Nil when there
+    /// is nothing to measure it against, and the bar can only say that
+    /// something is happening.
+    ///
+    /// The bar said only that for every scan, though what has been read so
+    /// far and what the volume holds were both known. It will not always
+    /// reach the end: what a volume has in use includes snapshots, folders
+    /// that can't be read and other volumes sharing its space, none of
+    /// which a scan counts. That it stops short of full is still more to go
+    /// on than a bar that never moves.
+    var scanFraction: Double? {
+        guard phase == .scanning else { return nil }
+        return Self.fraction(read: progress.allocated, of: scanGoal)
+    }
+
+    /// `read` as a share of `goal`, or nil with no goal to be a share of.
+    static func fraction(read: UInt64, of goal: UInt64) -> Double? {
+        goal > 0 ? min(1, Double(read) / Double(goal)) : nil
+    }
+
+    /// The folder a running scan is in, for the line under the bar.
+    var scanningIn: String { phase == .scanning ? progress.currentPath : "" }
 
     /// The line under the Scan button while a scan runs.
     var progressSummary: String {
@@ -1083,6 +1111,14 @@ final class AppModel: ObservableObject {
         revealIsWaiting = false
         expanded.removeAll()
         progress = ScanEngine.Progress()
+        // A volume's own root is the one target whose size is known ahead.
+        scanGoal = 0
+        if customFolder == nil {
+            let capacity = VolumeInfo.capacity(of: path)
+            if capacity.total > capacity.free {
+                scanGoal = capacity.total - capacity.free
+            }
+        }
         phase = .scanning
         hasFullDiskAccess = FullDiskAccess.isGranted()
 
