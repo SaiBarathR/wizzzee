@@ -619,9 +619,17 @@ final class AppModel: ObservableObject {
 
     /// Whether Quick Look would have to download `ref` to show it. A folder
     /// is shown as its icon and is not read.
+    ///
+    /// The scan's own note of it, for a file. Only a link has the disk
+    /// asked as well, since the note is of the link and what reads a link
+    /// reads what it is to. Asking for every file would be a look at the
+    /// disk, on the main thread, for each row the selection passes over
+    /// with the panel up — and a disk that is slow to answer, one spinning
+    /// up or a share that has dropped, would hold the window until it did.
     private func isOnlineOnly(_ ref: NodeRef) -> Bool {
         guard let file = ref.file else { return false }
-        return file.storage == .dataless || FileActions.isOnlineOnly(ref.path)
+        if file.storage == .dataless { return true }
+        return file.isSymlink && FileActions.isOnlineOnly(ref.path)
     }
 
     /// Points the panel at `ref`, or shuts it if `ref` is not something it

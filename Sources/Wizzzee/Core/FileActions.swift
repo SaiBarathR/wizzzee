@@ -75,9 +75,9 @@ enum FileActions {
     /// or the file a link there leads to, is one a cloud provider is
     /// holding.
     ///
-    /// Asked of the disk as it is now, and through any link. The scan's own
-    /// note of it is as old as the scan, and is of the link and not of what
-    /// the link is to — and what reads a link reads what it is to.
+    /// Asked of the disk, through any link: for a link the scan's own note
+    /// is of the link and not of what it is to, and what reads a link reads
+    /// what it is to.
     static func isOnlineOnly(_ path: String) -> Bool {
         var info = stat()
         // `SF_DATALESS`. Looking at the flags brings nothing down.
