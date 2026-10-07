@@ -187,6 +187,16 @@ the list of them can be totalled without counting anything twice. Both are sets
 of `NodeRef`, which is only workable because a delete no longer renumbers what
 it leaves behind.
 
+A move to the Trash can be undone, and that is `detach` run backwards: the
+file goes back into the slot it left, the folder back under its parent, and
+the totals back up the chain. What makes it more than that is hard links.
+Taking a name out can have handed its bytes to another name of the same file,
+and the name coming back is then the second one, not the one that carries
+them. So nothing is remembered about which it was: each hard-linked name is
+told which it is from the tree as it stands when it returns. Only the last
+move can be undone, and only until something else changes the tree — a delete
+or a rescan — because that is the tree it would be put back into.
+
 ### `Removal` — deleting with something to show for it
 
 Deleting for good goes through `removefile(3)`, the routine underneath

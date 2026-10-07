@@ -149,16 +149,74 @@ enum FileActions {
         refs.contains { isSystemProtected($0.path) }
     }
 
-    static func moveToTrash(_ path: String) throws {
+    /// Moves the item at `path` to the Trash, and says where in the Trash it
+    /// went — which is not always under the name it had: the Trash renames
+    /// what it already has one of.
+    ///
+    /// That was thrown away, and with it any way of bringing the item back:
+    /// ⌘⌫ asks nothing, on the understanding that the Trash is not the end,
+    /// and from here it was.
+    @discardableResult
+    static func moveToTrash(_ path: String) throws -> URL {
         if isUndeletableRoot(path) { throw ActionError.undeletableRoot(path) }
         if isSystemProtected(path) { throw ActionError.systemProtected(path) }
         do {
+            var inTrash: NSURL?
             try FileManager.default.trashItem(
                 at: URL(fileURLWithPath: path),
-                resultingItemURL: nil
+                resultingItemURL: &inTrash
             )
+            // No answer means it was removed outright, as some volumes with
+            // no Trash of their own do it. It is gone either way; there is
+            // just nowhere to bring it back from.
+            return (inTrash as URL?) ?? URL(fileURLWithPath: "")
         } catch {
             throw ActionError.failed(path, error.localizedDescription)
+        }
+    }
+
+    /// Why something could not be brought back out of the Trash.
+    enum PutBackError: LocalizedError {
+        case notInTrash
+        case nameTaken(String)
+        case folderGone(String)
+        case failed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notInTrash:
+                return "It is no longer in the Trash."
+            case .nameTaken(let path):
+                return "Something else is at “\(path)” now."
+            case .folderGone(let path):
+                return "The folder it was in, “\(path)”, is no longer there."
+            case .failed(let reason):
+                return reason
+            }
+        }
+    }
+
+    /// Moves what `moveToTrash` put at `inTrash` back to `path`.
+    ///
+    /// Never over something that has since been put there: a move that
+    /// replaces would lose that for good, to bring back something that is
+    /// safe where it is.
+    static func putBack(_ inTrash: URL, to path: String) throws {
+        let manager = FileManager.default
+        var info = stat()
+        guard !inTrash.path.isEmpty, lstat(inTrash.path, &info) == 0 else {
+            throw PutBackError.notInTrash
+        }
+        guard lstat(path, &info) != 0 else { throw PutBackError.nameTaken(path) }
+        let folder = (path as NSString).deletingLastPathComponent
+        var isFolder: ObjCBool = false
+        guard manager.fileExists(atPath: folder, isDirectory: &isFolder),
+            isFolder.boolValue
+        else { throw PutBackError.folderGone(folder) }
+        do {
+            try manager.moveItem(at: inTrash, to: URL(fileURLWithPath: path))
+        } catch {
+            throw PutBackError.failed(error.localizedDescription)
         }
     }
 

@@ -127,6 +127,14 @@ rebuilding.
   same marks, wherever those things are still there. A mark whose item has
   gone is counted beside "Scan complete", so a shorter list is not taken for
   the whole of it. A scan of somewhere else starts afresh.
+- **`⌘Z` undoes the last move to the Trash**, as does **Edit ▸ Undo** and the
+  **Undo** button the status bar shows after one: what went comes back, on
+  disk and in the tree, selected and with the marks it left with. It is the last
+  move only, and only until something else is removed or the folder is scanned
+  again. Something whose place has been taken in the meantime stays in the
+  Trash and is named; nothing is put back over anything. The status bar says
+  what Wizzzee has moved to the Trash that is still there — it has left the
+  totals and not the disk, so that figure is what emptying the Trash frees.
 - **`⌘⌫` and `⌥⌘⌫`** do what they do in Finder, to whatever is selected: the
   first moves it to the Trash straight away, the second asks and then deletes it
   for good. They act only on a selection you can see — a row in the tab in
@@ -144,6 +152,7 @@ rebuilding.
 | `Space` or `⇧⌘M` | Mark the selected rows for removal, or unmark them |
 | `⌘⌫` | Move the selection to the Trash |
 | `⌥⌘⌫` | Delete the selection permanently, after confirming |
+| `⌘Z` | Undo the last move to the Trash |
 | `⌘1` `⌘2` `⌘3` | Tree View, File View, About |
 | `→` `←` | Open or shut the selected folder; again, step into it or out of it |
 | `⌘T` | Show or hide the treemap |
