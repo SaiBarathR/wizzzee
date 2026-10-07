@@ -79,6 +79,16 @@ rebuilding.
   takes a while shows how many items and how much space have gone in the status
   bar, and **Stop** there ends it part-way — what is left stays in the tree,
   measured as it now is.
+- **Mark things to remove them together.** The box at the start of each row
+  marks it, and so do `Space` on a selected row, `⌘`-click on a treemap tile,
+  and **Mark for Removal** in the right-click menu. A mark is not the
+  selection: it stays put while you open other folders, sort, filter or switch
+  tabs, so you can gather items from anywhere in the scan. Marking a folder
+  marks everything in it, and a folder with something marked inside shows a
+  dash. The status bar counts what is marked and what removing it would free;
+  click that to open the list, which gives each item's size, lets you take a
+  mark back off, and has **Move to Trash** and **Delete…** for the lot. Marked
+  tiles are hatched on the treemap.
 - **`⌘⌫` and `⌥⌘⌫`** do what they do in Finder, to whatever is selected: the
   first moves it to the Trash straight away, the second asks and then deletes it
   for good. They act only on a selection you can see — a row in the tab in
@@ -90,6 +100,7 @@ rebuilding.
 | `Return` | Scan |
 | `⌘.` | Stop a running scan |
 | `⌘R` | Rescan |
+| `Space` or `⇧⌘M` | Mark the selected rows for removal, or unmark them |
 | `⌘⌫` | Move the selection to the Trash |
 | `⌥⌘⌫` | Delete the selection permanently, after confirming |
 | `⌘T` | Show or hide the treemap |
@@ -204,7 +215,7 @@ dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest
 ```
 
 `--selftest` builds a throwaway tree with known contents and checks the scanner
-and both delete paths against ground truth — 370 checks, no permissions needed.
+and both delete paths against ground truth — 402 checks, no permissions needed.
 CI runs it on every push, along with a universal-binary and signature check.
 
 ## Releasing

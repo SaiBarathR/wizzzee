@@ -39,6 +39,13 @@ struct TreeTable: View {
             selection: $model.selection,
             sortOrder: $model.treeSort
         ) {
+            // The mark, ahead of the name it belongs to. No title: a word
+            // here would be wider than the box under it.
+            TableColumn("") { row in
+                MarkBox(model: model, ref: row.ref)
+            }
+            .width(16)
+
             TableColumn("Folder / File", sortUsing: TreeSort(.name)) { row in
                 NameCell(model: model, row: row)
                     .leaving(row.ref, in: model)
@@ -107,6 +114,7 @@ struct TreeTable: View {
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
         .onChange(of: model.treeSort) { model.rebuildTreeRows() }
+        .onKeyPress(.space) { model.markSelection() ? .handled : .ignored }
         .contextMenu(forSelectionType: NodeRef.self) { refs in
             ItemContextMenu(model: model, refs: refs)
         } primaryAction: { refs in

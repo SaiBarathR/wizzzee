@@ -22,6 +22,7 @@ enum CLI {
                                              [--tab tree|files|about] [--zoom N]
                                              [--metric size|disk]
                                              [--select-largest] [--no-access-banner]
+                                             [--no-treemap] [--mark N]
               Wizzzee --version              print the version
             """
         )

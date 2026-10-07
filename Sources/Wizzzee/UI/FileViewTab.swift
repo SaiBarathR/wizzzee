@@ -76,6 +76,11 @@ struct FileViewTab: View {
             selection: $model.selection,
             sortOrder: $model.fileSort
         ) {
+            TableColumn("") { row in
+                MarkBox(model: model, ref: row.ref)
+            }
+            .width(16)
+
             TableColumn("File Name", value: \.name) { row in
                 HStack(spacing: 5) {
                     Image(nsImage: FileActions.icon(for: row.ref))
@@ -148,6 +153,7 @@ struct FileViewTab: View {
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
         .onChange(of: model.fileSort) { model.resortFileRows() }
+        .onKeyPress(.space) { model.markSelection() ? .handled : .ignored }
         .contextMenu(forSelectionType: NodeRef.self) { refs in
             ItemContextMenu(model: model, refs: refs)
         } primaryAction: { refs in

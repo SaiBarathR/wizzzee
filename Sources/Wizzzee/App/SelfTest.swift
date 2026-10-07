@@ -70,6 +70,9 @@ enum SelfTest {
         testEqualFilesKeepTheirOrderAcrossADelete()
         testTheFileListKeepsItsPlaceAcrossADelete()
         testTheDeleteLineStaysWithinWhatWasCounted()
+        testMarksGatherAcrossFolders()
+        testAMarkStaysOnWhatCouldNotBeRemoved()
+        testTheTreemapShowsAndTakesMarks()
         testAScanCannotStartDuringADelete()
         testAPendingDeleteDoesNotOutliveTheTree()
         testTheDeleteKeysActOnWhatIsOnShow()
@@ -3057,6 +3060,458 @@ enum SelfTest {
             model.deleteSummary(empties)
                 == "\(ByteFormat.count(300)) of \(ByteFormat.counted(900, "item"))",
             model.deleteSummary(empties)
+        )
+    }
+
+    // MARK: - Marks
+
+    /// Marks are what gets removed when the list of them is acted on, so what
+    /// they stand for is pinned down here: one mark for a folder and all it
+    /// holds, never two that overlap, nothing marked that can't be removed,
+    /// and a total that counts each byte once.
+    //
+    // docs/a.txt       30,000 bytes
+    // docs/b.txt       20,000
+    // docs/old/c.txt   10,000
+    // media/m.bin      40,000
+    // loose.dat         5,000
+    @MainActor
+    private static func testMarksGatherAcrossFolders() {
+        let base = scratch("marks")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            for folder in ["docs/old", "media"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            try write(base.appendingPathComponent("docs/a.txt"), bytes: 30_000)
+            try write(base.appendingPathComponent("docs/b.txt"), bytes: 20_000)
+            try write(base.appendingPathComponent("docs/old/c.txt"), bytes: 10_000)
+            try write(base.appendingPathComponent("media/m.bin"), bytes: 40_000)
+            try write(base.appendingPathComponent("loose.dat"), bytes: 5_000)
+        } catch {
+            check("the marks fixture can be built", false, "\(error)")
+            return
+        }
+        func onDisk(_ path: String) -> Bool {
+            FileManager.default.fileExists(
+                atPath: base.appendingPathComponent(path).path
+            )
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let docs = result.root.subdir(named: "docs"),
+            let old = docs.subdir(named: "old"),
+            let media = result.root.subdir(named: "media"),
+            let a = docs.files.firstIndex(where: { $0.name == "a.txt" }),
+            let b = docs.files.firstIndex(where: { $0.name == "b.txt" }),
+            let loose = result.root.files.firstIndex(where: { $0.name == "loose.dat" })
+        else {
+            check("the marks fixture scanned", false, "missing entries")
+            return
+        }
+        let aRef = NodeRef(dir: docs, fileIndex: a)
+        let bRef = NodeRef(dir: docs, fileIndex: b)
+        let cRef = NodeRef(dir: old, fileIndex: 0)
+        let mRef = NodeRef(dir: media, fileIndex: 0)
+        let looseRef = NodeRef(dir: result.root, fileIndex: loose)
+        let rootRef = NodeRef(result.root)
+
+        model.toggleMarks([rootRef])
+        check(
+            "what can't be removed can't be marked",
+            !model.canMark(rootRef) && model.marks.isEmpty,
+            "marked \(model.marks.map(\.name))"
+        )
+
+        // From three different folders, which a selection could only hold
+        // for as long as all three stayed open and nothing else was clicked.
+        model.toggleMarks([aRef])
+        model.toggleMarks([cRef])
+        model.toggleMarks([mRef])
+        model.selection = [looseRef]
+        model.setExpanded(docs, false)
+        model.tab = .files
+        model.tab = .tree
+        check(
+            "marks from different folders outlast the selection moving on",
+            model.marks == [aRef, cRef, mRef],
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        check(
+            "a folder with something marked inside it says so",
+            model.markState(NodeRef(docs)) == .partial
+                && model.markState(NodeRef(old)) == .partial
+                && model.markState(NodeRef(media)) == .partial
+                && model.markState(bRef) == .none
+                && model.markState(aRef) == .marked,
+            "docs \(model.markState(NodeRef(docs))), b \(model.markState(bRef))"
+        )
+        check(
+            "the total is the sum of what each would free",
+            model.markedBytes == aRef.alloc + cRef.alloc + mRef.alloc
+                && model.marksSummary
+                    == "3 marked  •  "
+                    + ByteFormat.decimal(aRef.alloc + cRef.alloc + mRef.alloc),
+            model.marksSummary
+        )
+        check(
+            "the list runs largest first",
+            model.markedItems == [mRef, aRef, cRef],
+            "listed \(model.markedItems.map(\.name))"
+        )
+        // The total sits beside a button that removes without asking again,
+        // so it is what removing gives back whatever the tables are showing.
+        // None of these files fills its last block, so the two differ.
+        model.sizeMetric = .logical
+        check(
+            "with Size showing, the total is still space on disk",
+            model.markedBytes == aRef.alloc + cRef.alloc + mRef.alloc
+                && model.markedBytes != aRef.size + cRef.size + mRef.size,
+            "\(model.markedBytes), lengths come to "
+                + "\(aRef.size + cRef.size + mRef.size)"
+        )
+        model.sizeMetric = .allocated
+
+        // A folder's mark stands for all of it.
+        model.toggleMarks([NodeRef(docs)])
+        check(
+            "marking a folder takes over the marks inside it",
+            model.marks == [NodeRef(docs), mRef]
+                && model.markState(aRef) == .covered
+                && model.markState(cRef) == .covered
+                && model.markState(NodeRef(old)) == .covered,
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        check(
+            "so the folder is counted once, not once more for each",
+            model.markedBytes == docs.totalAlloc + mRef.alloc,
+            "\(model.markedBytes), expected \(docs.totalAlloc + mRef.alloc)"
+        )
+        model.toggleMarks([bRef])
+        model.setMarked([cRef], true)
+        check(
+            "what a marked folder already covers takes no mark of its own",
+            model.marks == [NodeRef(docs), mRef],
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        model.toggleMarks([NodeRef(docs)])
+        check(
+            "taking the folder's mark off leaves its contents unmarked",
+            model.marks == [mRef] && model.markState(aRef) == .none
+                && model.markState(NodeRef(docs)) == .none,
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        model.setMarked([NodeRef(docs), aRef, cRef], true)
+        check(
+            "a folder marked together with its own contents is marked once",
+            model.marks == [NodeRef(docs), mRef],
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        model.clearMarks()
+
+        // Space and the menu work on what is selected and on show, like the
+        // delete keys, and mark or unmark the lot together.
+        model.showsTreemap = false
+        model.setExpanded(docs, true)
+        model.selection = [aRef, bRef]
+        model.toggleMarks([aRef])
+        let offeredToMark = !model.selectionIsMarked
+        check(
+            "marking a selection that is partly marked marks the rest",
+            offeredToMark && model.markSelection() && model.marks == [aRef, bRef],
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        let offeredToUnmark = model.selectionIsMarked
+        check(
+            "and doing it again takes them all off, as the menu then says",
+            offeredToUnmark && model.markSelection() && model.marks.isEmpty
+                && !model.selectionIsMarked,
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        model.setExpanded(docs, false)
+        check(
+            "a selection that is not on show is not marked from the keyboard",
+            !model.canMarkSelection && !model.markSelection()
+                && model.marks.isEmpty,
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        model.setExpanded(docs, true)
+        model.isEditingFilter = true
+        check(
+            "nor is anything while the filter is being typed in",
+            !model.markSelection() && model.marks.isEmpty,
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+        model.isEditingFilter = false
+
+        // Acting on them.
+        model.setMarked([aRef, cRef, mRef], true)
+        model.showsMarks = true
+        model.selection = [looseRef]
+        model.confirmDeletingMarked()
+        check(
+            "deleting the marks for good asks first, about exactly them",
+            model.permanentDeleteTargets == [aRef, cRef, mRef]
+                && onDisk("docs/a.txt"),
+            "pending \(model.permanentDeleteTargets.map(\.name).sorted())"
+        )
+        model.permanentDeleteTargets = []
+
+        // One of the three is removed behind the marks' back, as a delete
+        // from the context menu would.
+        trash(model, [cRef])
+        check(
+            "a mark on something that has since gone is dropped",
+            model.marks == [aRef, mRef] && model.showsMarks,
+            "marked \(model.marks.map(\.name).sorted())"
+        )
+
+        model.trashMarked()
+        // The batch took the marks as they stood. Taken off now, the list
+        // would stop showing something that is still on its way out.
+        model.setMarked([aRef], false)
+        model.toggleMarks([bRef])
+        model.clearMarks()
+        check(
+            "the marks stand still while a batch is running",
+            model.isDeleting && model.marks == [aRef, mRef]
+                && !model.canMarkSelection,
+            "marked \(model.marks.map(\.name).sorted()), "
+                + "deleting \(model.isDeleting)"
+        )
+        pumpUntilDeleteSettles(model)
+        check(
+            "moving the marks to the Trash removes them and nothing else",
+            !onDisk("docs/a.txt") && !onDisk("media/m.bin")
+                && onDisk("docs/b.txt") && onDisk("loose.dat")
+                && model.actionError == nil,
+            "error \(model.actionError ?? "none")"
+        )
+        check(
+            "with nothing left marked, the list is put away",
+            model.marks.isEmpty && !model.showsMarks,
+            "marked \(model.marks.map(\.name)), open \(model.showsMarks)"
+        )
+        check(
+            "the selection, which was none of them, is where it was",
+            model.selection == [looseRef],
+            "selection is \(model.selection.map(\.name))"
+        )
+
+        model.toggleMarks([bRef])
+        model.startScan()
+        check(
+            "a rescan takes the marks with the tree they pointed into",
+            model.marks.isEmpty,
+            "marked \(model.marks.map(\.name))"
+        )
+        pumpUntilSettled(model)
+    }
+
+    /// A mark on something that could not be removed has to stay, or the
+    /// list empties as though the job were done.
+    @MainActor
+    private static func testAMarkStaysOnWhatCouldNotBeRemoved() {
+        let base = scratch("marks-locked")
+        let locked = base.appendingPathComponent("locked.dat")
+        defer {
+            chflags(locked.path, 0)
+            try? FileManager.default.removeItem(at: base)
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            try write(locked, bytes: 3_000)
+            try write(base.appendingPathComponent("free.dat"), bytes: 2_000)
+        } catch {
+            check("the locked-mark fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard
+            let lockedIndex = result.root.files.firstIndex(where: {
+                $0.name == "locked.dat"
+            }),
+            let freeIndex = result.root.files.firstIndex(where: {
+                $0.name == "free.dat"
+            }),
+            chflags(locked.path, UInt32(UF_IMMUTABLE)) == 0
+        else {
+            check("the locked-mark fixture scanned", false, "missing entries")
+            return
+        }
+        let lockedRef = NodeRef(dir: result.root, fileIndex: lockedIndex)
+        let freeRef = NodeRef(dir: result.root, fileIndex: freeIndex)
+
+        model.setMarked([lockedRef, freeRef], true)
+        model.showsMarks = true
+        deletePermanently(model, model.marks)
+
+        check(
+            "what was removed loses its mark and what was not keeps it",
+            model.marks == [lockedRef] && model.showsMarks
+                && FileManager.default.fileExists(atPath: locked.path)
+                && model.actionError != nil,
+            "marked \(model.marks.map(\.name)), error \(model.actionError ?? "none")"
+        )
+    }
+
+    /// The map's side of the marks: which parts of it are hatched, and a
+    /// ⌘-click that marks without disturbing what is selected.
+    @MainActor
+    private static func testTheTreemapShowsAndTakesMarks() {
+        func entry(_ name: String, _ bytes: UInt64) -> FileEntry {
+            FileEntry(
+                name: name,
+                size: bytes,
+                alloc: bytes,
+                mtime: 0,
+                extIndex: -1,
+                isSymlink: false,
+                isDuplicateLink: false
+            )
+        }
+        func total(_ dir: DirNode, _ bytes: UInt64, files: Int, dirs: Int) {
+            dir.totalSize = bytes
+            dir.totalAlloc = bytes
+            dir.totalFiles = files
+            dir.totalDirs = dirs
+        }
+        // big/x.dat fills most of the map; small/ holds y.dat, z.dat and a
+        // folder of its own, nested/w.dat, and takes the rest.
+        let root = DirNode(name: "/wizzzee-selftest-marked", parent: nil)
+        let big = DirNode(name: "big", parent: root)
+        big.files = [entry("x.dat", 8_000)]
+        total(big, 8_000, files: 1, dirs: 0)
+        let small = DirNode(name: "small", parent: root)
+        small.files = [entry("y.dat", 1_200), entry("z.dat", 800)]
+        let nested = DirNode(name: "nested", parent: small)
+        nested.files = [entry("w.dat", 500)]
+        total(nested, 500, files: 1, dirs: 0)
+        small.subdirs = [nested]
+        total(small, 2_500, files: 3, dirs: 1)
+        root.subdirs = [big, small]
+        total(root, 10_500, files: 4, dirs: 3)
+
+        let queue = DispatchQueue(label: "com.wizzzee.selftest.marked")
+        var picked: [NodeRef] = []
+        var marked: [NodeRef] = []
+        var zoomed: [DirNode] = []
+        let view = TreemapNSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        view.layoutQueue = queue
+        view.liveRevision = { 0 }
+        view.onSelect = { picked.append($0) }
+        view.onMark = { marked.append($0) }
+        view.onZoom = { zoomed.append($0) }
+        // The layout lands on the main queue, behind whatever the checks
+        // before this one left there, so one turn of the loop may not reach it.
+        func settle() {
+            queue.sync {}
+            for _ in 0..<4 {
+                RunLoop.main.run(
+                    mode: .default,
+                    before: Date().addingTimeInterval(0.05)
+                )
+            }
+        }
+        func area(_ rects: [CGRect]) -> CGFloat {
+            rects.reduce(0) { $0 + $1.width * $1.height }
+        }
+        view.apply(root: root, metric: .allocated, revision: 0)
+        settle()
+        let whole: CGFloat = 400 * 300
+        let x = NodeRef(dir: big, fileIndex: 0)
+        let y = NodeRef(dir: small, fileIndex: 0)
+
+        check("with nothing marked, nothing is hatched", view.markedRects.isEmpty, "")
+        view.marks = [y]
+        let one = area(view.markedRects)
+        check(
+            "a marked file is hatched over its own tile",
+            view.markedRects.count == 1 && one > 0 && one < whole * 0.2,
+            "\(view.markedRects.count) rects covering \(one) of \(whole)"
+        )
+        view.marks = [NodeRef(small)]
+        let folder = area(view.markedRects)
+        check(
+            "a marked folder is hatched over everything in it",
+            view.markedRects.count == 1 && folder > one && folder < whole * 0.3,
+            "\(view.markedRects.count) rects covering \(folder), one file was \(one)"
+        )
+        view.marks = [x, y]
+        check(
+            "marks in different folders are each hatched",
+            view.markedRects.count == 2 && area(view.markedRects) > whole * 0.7,
+            "\(view.markedRects.count) rects covering \(area(view.markedRects))"
+        )
+
+        // Zoomed to a folder inside a marked one, all that is on show is
+        // going and none of it is the thing that was marked: the marked
+        // folder is above the map's root, and has no tile or group here.
+        view.marks = [NodeRef(small)]
+        view.apply(root: nested, metric: .allocated, revision: 0)
+        settle()
+        check(
+            "zoomed to somewhere inside a marked folder, the whole map is hatched",
+            view.markedRects.count == 1
+                && abs(area(view.markedRects) - whole) < 1,
+            "\(view.markedRects.count) rects covering \(area(view.markedRects))"
+        )
+
+        view.marks = []
+        view.apply(root: root, metric: .allocated, revision: 0)
+        settle()
+        func click(command: Bool, count: Int = 1) {
+            guard
+                let event = NSEvent.mouseEvent(
+                    with: .leftMouseDown,
+                    location: NSPoint(x: 100, y: 150),
+                    modifierFlags: command ? [.command] : [],
+                    timestamp: 0,
+                    windowNumber: 0,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: count,
+                    pressure: 1
+                )
+            else { return }
+            view.mouseDown(with: event)
+        }
+        click(command: true)
+        check(
+            "a ⌘-click marks the tile under it and selects nothing",
+            marked == [x] && picked.isEmpty,
+            "marked \(marked.map(\.name)), picked \(picked.map(\.name))"
+        )
+        // The second of two quick ⌘-clicks arrives as a double-click. Taken
+        // for one, it zoomed and left the mark the first had put on.
+        click(command: true, count: 2)
+        check(
+            "a second ⌘-click straight after is another one, not a zoom",
+            marked == [x, x] && zoomed.isEmpty && picked.isEmpty,
+            "asked to mark \(marked.count) times, zoomed \(zoomed.count)"
+        )
+        click(command: false)
+        check(
+            "a plain click still selects, and marks nothing",
+            marked == [x, x] && picked == [x],
+            "marked \(marked.map(\.name)), picked \(picked.map(\.name))"
+        )
+        click(command: false, count: 2)
+        check(
+            "and a plain double-click still zooms",
+            zoomed.count == 1 && marked == [x, x],
+            "zoomed \(zoomed.count) times"
         )
     }
 
