@@ -933,8 +933,13 @@ final class AppModel: ObservableObject {
     /// counted under one of its names and removing any of them reports the
     /// lot, so the running figure can pass a total it was never part of.
     func deleteSummary(_ progress: DeleteProgress) -> String {
-        "\(ByteFormat.count(min(progress.items, progress.itemsTotal))) of "
-            + "\(ByteFormat.counted(progress.itemsTotal, "item"))  •  "
+        let items =
+            "\(ByteFormat.count(min(progress.items, progress.itemsTotal))) of "
+            + ByteFormat.counted(progress.itemsTotal, "item")
+        // Nothing to say about space when what is going takes none: a folder
+        // of empty files read "0 bytes of 0 bytes" the whole way through.
+        guard progress.bytesTotal > 0 else { return items }
+        return items + "  •  "
             + "\(ByteFormat.decimal(min(progress.bytes, progress.bytesTotal))) of "
             + ByteFormat.decimal(progress.bytesTotal)
     }

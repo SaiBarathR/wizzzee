@@ -2932,6 +2932,17 @@ enum SelfTest {
             model.treeRows.map(\.ref) == treeBefore.filter { $0 != gone },
             "the rows changed places"
         )
+        // That file had no row in the tree. One of the equals does, in the
+        // middle of the run of them.
+        let middle = treeBefore[treeBefore.count / 2]
+        trash(model, [middle])
+        check(
+            "taking one out of a run of equal rows leaves the rest in order",
+            !middle.isDirectory && middle.dir === result.root
+                && model.treeRows.map(\.ref)
+                    == treeBefore.filter { $0 != gone && $0 != middle },
+            "the rows changed places"
+        )
     }
 
     /// The same in File View, which is a flat list with no folder to fall
@@ -3031,6 +3042,21 @@ enum SelfTest {
             "with nothing counted, it falls back to targets finished",
             trash.fraction == 0.25,
             "got \(trash.fraction)"
+        )
+        // A folder of empty files, as seen clicking through: eight hundred
+        // thousand of them, and "0 bytes of 0 bytes" beside the count.
+        let empties = AppModel.DeleteProgress(
+            done: 0,
+            total: 1,
+            currentName: "bulk",
+            items: 300,
+            itemsTotal: 900
+        )
+        check(
+            "with no space to count, the line gives the items alone",
+            model.deleteSummary(empties)
+                == "\(ByteFormat.count(300)) of \(ByteFormat.counted(900, "item"))",
+            model.deleteSummary(empties)
         )
     }
 
