@@ -41,6 +41,7 @@ struct TreeTable: View {
         ) {
             TableColumn("Folder / File", sortUsing: TreeSort(.name)) { row in
                 NameCell(model: model, row: row)
+                    .leaving(row.ref, in: model)
             }
             .width(min: 150, ideal: 270)
 
@@ -48,6 +49,7 @@ struct TreeTable: View {
                 PercentCell(
                     fraction: row.ref.fractionOfParent(using: model.sizeMetric)
                 )
+                .leaving(row.ref, in: model)
             }
             .width(min: 68, ideal: 88, max: 140)
 
@@ -64,27 +66,32 @@ struct TreeTable: View {
             TableColumn("On Disk", sortUsing: TreeSort(.allocated)) { row in
                 numeric(ByteFormat.decimal(row.ref.alloc))
                     .foregroundStyle(model.sizeMetric.emphasis(of: .allocated))
+                    .leaving(row.ref, in: model)
             }
             .width(min: 62, ideal: 78, max: 120)
 
             TableColumn("Size", sortUsing: TreeSort(.size)) { row in
                 numeric(ByteFormat.decimal(row.ref.size))
                     .foregroundStyle(model.sizeMetric.emphasis(of: .logical))
+                    .leaving(row.ref, in: model)
             }
             .width(min: 62, ideal: 78, max: 120)
 
             TableColumn("Items", sortUsing: TreeSort(.items)) { row in
                 numeric(row.ref.isDirectory ? ByteFormat.count(row.ref.dir.totalItems) : "")
+                    .leaving(row.ref, in: model)
             }
             .width(min: 48, ideal: 60, max: 110)
 
             TableColumn("Files", sortUsing: TreeSort(.files)) { row in
                 numeric(row.ref.isDirectory ? ByteFormat.count(row.ref.dir.totalFiles) : "")
+                    .leaving(row.ref, in: model)
             }
             .width(min: 48, ideal: 60, max: 110)
 
             TableColumn("Folders", sortUsing: TreeSort(.folders)) { row in
                 numeric(row.ref.isDirectory ? ByteFormat.count(row.ref.dir.totalDirs) : "")
+                    .leaving(row.ref, in: model)
             }
             .width(min: 48, ideal: 60, max: 110)
 
@@ -94,6 +101,7 @@ struct TreeTable: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .leaving(row.ref, in: model)
             }
             .width(min: 96, ideal: 116, max: 200)
         }
@@ -159,6 +167,13 @@ private struct NameCell: View {
             if let file = row.ref.file {
                 StorageNote(file: file)
             }
+            // On the row that was asked for, not on everything inside it: a
+            // folder's contents going grey with it says the rest.
+            if model.removing.contains(row.ref) {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.7)
+            }
             Spacer(minLength: 0)
         }
     }
@@ -191,6 +206,14 @@ private struct NameCell: View {
         case .alreadyCounted: return "counted elsewhere"
         case .partiallyRead: return "partly read"
         }
+    }
+}
+
+extension View {
+    /// Sets a cell back while the batch in hand is removing what its row
+    /// names, so it reads as on its way out for as long as that takes.
+    func leaving(_ ref: NodeRef, in model: AppModel) -> some View {
+        opacity(model.isBeingRemoved(ref) ? 0.4 : 1)
     }
 }
 

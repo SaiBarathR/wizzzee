@@ -71,7 +71,9 @@ struct FileEntry {
     var mtime: Double
     /// Index into `ScanResult.extensionStats`, or -1 before aggregation.
     var extIndex: Int32
-    var isSymlink: Bool
+    /// `isSymlink` and `isRemoved`, in the one byte the first used to have to
+    /// itself. A second `Bool` would be the 57th byte of a 56-byte struct.
+    private var flags: UInt8
     /// A hard link whose size was already counted under another path.
     var isDuplicateLink: Bool
     /// How many names this file's inode has on the volume, saturating at 255.
@@ -99,6 +101,61 @@ struct FileEntry {
     /// Unique per volume, and a scan never leaves the volume it started on, so
     /// within one `ScanResult` this identifies the storage a name points at.
     var fileID: UInt64 = 0
+
+    private static let symlinkFlag: UInt8 = 1 << 0
+    private static let removedFlag: UInt8 = 1 << 1
+
+    init(
+        name: String,
+        size: UInt64,
+        alloc: UInt64,
+        mtime: Double,
+        extIndex: Int32,
+        isSymlink: Bool,
+        isDuplicateLink: Bool,
+        linkCount: UInt8 = 1,
+        storage: FileStorage = .whole,
+        fileID: UInt64 = 0
+    ) {
+        self.name = name
+        self.size = size
+        self.alloc = alloc
+        self.mtime = mtime
+        self.extIndex = extIndex
+        self.flags = isSymlink ? Self.symlinkFlag : 0
+        self.isDuplicateLink = isDuplicateLink
+        self.linkCount = linkCount
+        self.storage = storage
+        self.fileID = fileID
+    }
+
+    var isSymlink: Bool { flags & Self.symlinkFlag != 0 }
+
+    /// True for the slot a deleted file leaves behind.
+    ///
+    /// A `NodeRef` names a file by its place in the folder's array, so taking
+    /// an entry out renumbered every sibling after it: the table saw a list of
+    /// new rows and redrew the lot, and whatever was selected, hovered or
+    /// waiting on a confirmation named a different file from then on. The
+    /// slot is kept instead and everything that walks files steps over it.
+    var isRemoved: Bool { flags & Self.removedFlag != 0 }
+
+    /// What a slot holds once its file has gone: nothing that can be added
+    /// up, matched to an inode or filed under a type, so a walk that forgets
+    /// to step over one still gets nothing from it.
+    static let removed: FileEntry = {
+        var entry = FileEntry(
+            name: "",
+            size: 0,
+            alloc: 0,
+            mtime: 0,
+            extIndex: -1,
+            isSymlink: false,
+            isDuplicateLink: false
+        )
+        entry.flags = removedFlag
+        return entry
+    }()
 
     /// True when the bytes survive this name being removed, either because
     /// another name was already counted for them or because one still exists.
@@ -224,6 +281,13 @@ final class DirNode {
 
     var isRoot: Bool { parent == nil }
 
+    /// True when there is nothing in here to show: no folders, and no file
+    /// that hasn't been deleted. `files.isEmpty` stops being that once a
+    /// delete has left a slot behind.
+    var isEmpty: Bool {
+        subdirs.isEmpty && !files.contains { !$0.isRemoved }
+    }
+
     /// Absolute filesystem path, rebuilt by walking up to the root (whose
     /// `name` holds the full path the scan started from).
     ///
@@ -294,25 +358,35 @@ struct NodeRef: Hashable, Identifiable {
 
     var isDirectory: Bool { fileIndex < 0 }
 
-    /// True when this points at a file index its folder no longer has, or into
-    /// a scan that has been replaced.
+    /// True when this points at a file that has been deleted, or into a
+    /// folder or a scan that is no longer part of the tree on show.
     ///
-    /// Deleting a file renumbers every sibling after it, which invalidates any
-    /// reference captured beforehand. Derived rows are rebuilt after a delete,
-    /// but SwiftUI keeps a context menu's content alive and re-evaluates it once
-    /// the sheet closes — by then the tree has already changed under it. Every
-    /// accessor below therefore degrades to an empty value instead of trapping,
-    /// and anything that acts on a reference checks this first.
+    /// A deleted file keeps its slot, so a reference to one of its siblings
+    /// goes on naming the same file — but one to the file itself, or to
+    /// anything under a folder that went, names nothing. Derived rows are
+    /// rebuilt after a delete, but SwiftUI keeps a context menu's content alive
+    /// and re-evaluates it once the sheet closes — by then the tree has already
+    /// changed under it. Every accessor below therefore degrades to an empty
+    /// value instead of trapping, and anything that acts on a reference checks
+    /// this first.
     ///
     /// The same menu outlives a rescan too, holding references whose folder is
     /// still alive and whose scan is not. Those name nothing that is on show.
     var isStale: Bool {
-        if fileIndex >= 0 && Int(fileIndex) >= dir.files.count { return true }
+        if fileIndex >= 0 {
+            // Asked of the slot where it sits, without copying the entry out:
+            // this is run over whole selections.
+            let index = Int(fileIndex)
+            if index >= dir.files.count || dir.files[index].isRemoved { return true }
+        }
         return dir.isCutOff
     }
 
+    /// Nil for a directory, and for a file that has been deleted.
     var file: FileEntry? {
-        guard fileIndex >= 0, Int(fileIndex) < dir.files.count else { return nil }
+        guard fileIndex >= 0, Int(fileIndex) < dir.files.count,
+            !dir.files[Int(fileIndex)].isRemoved
+        else { return nil }
         return dir.files[Int(fileIndex)]
     }
 
@@ -588,7 +662,7 @@ final class ScanResult {
             }
             for i in dir.files.indices {
                 let file = dir.files[i]
-                if file.isDuplicateLink { continue }
+                if file.isDuplicateLink || file.isRemoved { continue }
                 let weight = metric == .logical ? file.size : file.alloc
                 if !heap.wouldAccept(weight) { continue }
                 if !needle.isEmpty {

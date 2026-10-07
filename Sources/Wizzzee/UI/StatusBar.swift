@@ -55,23 +55,30 @@ struct StatusBar: View {
                 .progressViewStyle(.linear)
                 .frame(width: 130)
 
-            Text(
-                "Removing \(ByteFormat.count(progress.done + 1)) of "
-                    + "\(ByteFormat.count(progress.total))"
-            )
+            // Which of several, when there are several; one target is the
+            // usual case and needs no counting.
+            if progress.total > 1 {
+                Text(
+                    "Removing "
+                        + ByteFormat.count(min(progress.done + 1, progress.total))
+                        + " of \(ByteFormat.count(progress.total))"
+                )
+            } else {
+                Text("Removing")
+            }
             if !progress.currentName.isEmpty {
                 Text(progress.currentName)
                     .truncationMode(.middle)
             }
+            Text(model.deleteSummary(progress))
 
             Spacer()
 
-            // Stops after the item in hand: removing a directory is a single
-            // uninterruptible call, so there is nothing honest to promise
-            // beyond "no further items will be started".
+            // What has gone stays gone: the tree is brought into line with
+            // whatever is left on disk once the batch has wound up.
             Button("Stop") { model.cancelDelete() }
                 .controlSize(.small)
-                .help("Stop after the item currently being removed")
+                .help("Stop removing. What has already gone is not brought back.")
         }
     }
 

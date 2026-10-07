@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 /// Exercises the scan engine and the destructive file actions against a
@@ -58,6 +59,15 @@ enum SelfTest {
         testVolumeAndHomeRootsAreRefused()
         testDeleteReturnsBeforeItHasFinished()
         testDeleteCanBeStopped()
+        testARemovalCountsWhatItRemoves()
+        testARemovalStopsWhereItIsAsked()
+        testARemovalCarriesOnPastWhatItCannotRemove()
+        testARemovalReachesPastPathMax()
+        testADeleteThatLeavesSomethingShowsWhatIsLeft()
+        testADeleteCanBeStoppedPartWay()
+        testRowsKeepTheirPlacesAcrossADelete()
+        testTheFileListKeepsItsPlaceAcrossADelete()
+        testTheDeleteLineStaysWithinWhatWasCounted()
         testAScanCannotStartDuringADelete()
         testAPendingDeleteDoesNotOutliveTheTree()
         testTheDeleteKeysActOnWhatIsOnShow()
@@ -1759,12 +1769,13 @@ enum SelfTest {
         )
     }
 
-    /// A delete awaiting confirmation names its files by index, and a batch
-    /// that finishes while the dialog is up renumbers them. `isStale` only
-    /// catches an index that has run off the end, so confirming would have
-    /// permanently deleted whatever shifted into those slots. The pending
-    /// confirmation is dropped with the selection instead, and a rescan drops
-    /// it too — its references point into a tree that no longer exists.
+    /// A delete awaiting confirmation was raised against the tree as it was.
+    /// A batch that finishes while the dialog is up used to renumber the files
+    /// it named, so confirming would have permanently deleted whatever shifted
+    /// into those slots. A deleted file now keeps its slot and they go on
+    /// naming what they named — but what the dialog said would be freed is
+    /// from before that batch, so it is dropped and asked for again. A rescan
+    /// drops it too: its references point into a tree that no longer exists.
     @MainActor
     private static func testAPendingDeleteDoesNotOutliveTheTree() {
         let base = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -1805,16 +1816,14 @@ enum SelfTest {
         model.permanentDeleteTargets = pending
         pumpUntilDeleteSettles(model)
 
-        // What confirming would have acted on: both references are still in
-        // range, so nothing downstream would have refused them.
         check(
-            "the batch renumbered the files the dialog was raised for",
-            dir.files.count == 3 && pending.allSatisfy { !$0.isStale }
-                && Set(pending.map(\.name)) != named,
+            "the batch left the files the dialog was raised for as they were",
+            live(dir).count == 3 && pending.allSatisfy { !$0.isStale }
+                && Set(pending.map(\.name)) == named,
             "names now \(pending.map(\.name).sorted()), were \(named.sorted())"
         )
         check(
-            "so the pending confirmation is dropped with the selection",
+            "the pending confirmation is dropped all the same",
             model.permanentDeleteTargets.isEmpty,
             "still aimed at \(model.permanentDeleteTargets.map(\.name).sorted())"
         )
@@ -2101,9 +2110,741 @@ enum SelfTest {
         check(
             "⌘⌫ moves the selected row to the Trash, and only that",
             !onDisk("shown/b.dat") && onDisk("shown/a.dat")
-                && shown.files.map(\.name) == ["a.dat"]
+                && live(shown).map(\.name) == ["a.dat"]
                 && model.actionError == nil,
-            "left \(shown.files.map(\.name)), error \(model.actionError ?? "none")"
+            "left \(live(shown).map(\.name)), error \(model.actionError ?? "none")"
+        )
+    }
+
+    // MARK: - Removal
+    //
+    // `Removal` deletes for good, a folder at a time, where a mistake is not
+    // one that can be taken back. Each of these builds its own tree in the
+    // temporary directory and checks the disk afterwards, not what the
+    // removal said about itself.
+
+    /// Every entry at and under `url`, itself included, and the space the
+    /// ones that are not folders occupy — what a removal of it should count.
+    private static func census(_ url: URL) -> (items: Int, bytes: UInt64) {
+        var items = 0
+        var bytes: UInt64 = 0
+        var pending = [url.path]
+        while let path = pending.popLast() {
+            var info = stat()
+            guard lstat(path, &info) == 0 else { continue }
+            items += 1
+            if info.st_mode & S_IFMT == S_IFDIR {
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+                pending.append(contentsOf: names.map { path + "/" + $0 })
+            } else {
+                bytes += UInt64(max(0, info.st_blocks)) * 512
+            }
+        }
+        return (items, bytes)
+    }
+
+    private static func scratch(_ name: String) -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-\(name)-\(getpid())")
+    }
+
+    /// The count is what the status line shows and what the bar is drawn
+    /// from, so it is held to a census of the tree taken beforehand.
+    private static func testARemovalCountsWhatItRemoves() {
+        let base = scratch("removal")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let tree = base.appendingPathComponent("tree")
+        let outside = base.appendingPathComponent("outside")
+        do {
+            for folder in ["tree/one/two", "tree/hollow", "outside"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            for i in 0..<12 {
+                try write(tree.appendingPathComponent("f\(i).dat"), bytes: 700 * i)
+                try write(
+                    tree.appendingPathComponent("one/two/g\(i).dat"),
+                    bytes: 9_000 + i
+                )
+            }
+            try write(outside.appendingPathComponent("spared.dat"), bytes: 5_000)
+            // A removal that followed these would empty a folder it was never
+            // pointed at.
+            try FileManager.default.createSymbolicLink(
+                at: tree.appendingPathComponent("one/way-out"),
+                withDestinationURL: outside
+            )
+            try FileManager.default.createSymbolicLink(
+                at: tree.appendingPathComponent("to-a-file"),
+                withDestinationURL: outside.appendingPathComponent("spared.dat")
+            )
+        } catch {
+            check("the removal fixture can be built", false, "\(error)")
+            return
+        }
+
+        let expected = census(tree)
+        var reports: [Removal.Tally] = []
+        let outcome = Removal.remove(tree.path) { reports.append($0) }
+
+        check(
+            "a removal takes the whole tree",
+            outcome.isGone && !FileManager.default.fileExists(atPath: tree.path)
+                && outcome.failures == 0 && !outcome.wasStopped,
+            "gone \(outcome.isGone), failures \(outcome.failures)"
+        )
+        check(
+            "it counts every file and folder it removed",
+            outcome.tally.items == expected.items,
+            "counted \(outcome.tally.items), there were \(expected.items)"
+        )
+        check(
+            "and the space the files occupied",
+            outcome.tally.bytes == expected.bytes && expected.bytes > 0,
+            "counted \(outcome.tally.bytes), they held \(expected.bytes)"
+        )
+        check(
+            "the last thing it reports is where it ended up",
+            reports.last == outcome.tally
+                && zip(reports, reports.dropFirst()).allSatisfy {
+                    $0.items <= $1.items && $0.bytes <= $1.bytes
+                },
+            "reported \(reports.map(\.items)), ended at \(outcome.tally.items)"
+        )
+        check(
+            "a link is removed and what it points at is left alone",
+            FileManager.default.fileExists(
+                atPath: outside.appendingPathComponent("spared.dat").path
+            ),
+            "the removal followed a link out of the tree"
+        )
+
+        let again = Removal.remove(tree.path)
+        check(
+            "removing what is already gone is no failure",
+            again.isGone && again.failures == 0 && again.tally.items == 0,
+            "failures \(again.failures), counted \(again.tally.items)"
+        )
+
+        // The scan lists a link to a folder as a file, so this is what
+        // deleting one from the table asks for. With a slash on the end of
+        // the path the link is resolved first, and `removefile` empties the
+        // folder it points at.
+        let link = base.appendingPathComponent("link")
+        var spared = true
+        for suffix in ["", "/"] {
+            try? FileManager.default.createSymbolicLink(
+                at: link,
+                withDestinationURL: outside
+            )
+            let outcome = Removal.remove(link.path + suffix)
+            spared =
+                spared && outcome.isGone && outcome.tally.items == 1
+                && (try? FileManager.default.destinationOfSymbolicLink(
+                    atPath: link.path
+                )) == nil
+                && FileManager.default.fileExists(
+                    atPath: outside.appendingPathComponent("spared.dat").path
+                )
+        }
+        check(
+            "a link to a folder goes alone, however its path is written",
+            spared,
+            "the folder the link pointed at was emptied, or the link stayed"
+        )
+    }
+
+    /// Stop has to mean stop: at the next entry, with the rest untouched. It
+    /// used to take effect only between top-level items, so stopping the
+    /// removal of one large folder did nothing until the folder was gone.
+    private static func testARemovalStopsWhereItIsAsked() {
+        let base = scratch("removal-stop")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let tree = base.appendingPathComponent("tree")
+        do {
+            try FileManager.default.createDirectory(
+                at: tree,
+                withIntermediateDirectories: true
+            )
+            for i in 0..<40 {
+                try write(tree.appendingPathComponent("f\(i).dat"), bytes: 100)
+            }
+        } catch {
+            check("the stop fixture can be built", false, "\(error)")
+            return
+        }
+
+        let stop = Removal.Stop()
+        stop.request()
+        let outcome = Removal.remove(tree.path, stop: stop)
+        let left = census(tree).items - 1
+
+        check(
+            "a removal asked to stop does so at the entry in hand",
+            outcome.wasStopped && outcome.tally.items == 1 && left == 39,
+            "removed \(outcome.tally.items), \(left) of 40 left"
+        )
+        check(
+            "and says the tree is still there, with nothing having failed",
+            !outcome.isGone && outcome.failures == 0,
+            "gone \(outcome.isGone), failures \(outcome.failures)"
+        )
+        let finished = Removal.remove(tree.path)
+        check(
+            "it can be taken up again and finished",
+            finished.isGone && finished.tally.items == 40,
+            "gone \(finished.isGone), removed \(finished.tally.items)"
+        )
+    }
+
+    /// One file that won't go should cost that file, not the rest of the
+    /// folder — and the caller has to hear which it was.
+    private static func testARemovalCarriesOnPastWhatItCannotRemove() {
+        let base = scratch("removal-locked")
+        let locked = base.appendingPathComponent("tree/keep/locked.dat")
+        defer {
+            chflags(locked.path, 0)
+            try? FileManager.default.removeItem(at: base)
+        }
+        do {
+            for folder in ["tree/keep", "tree/other"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            try write(locked, bytes: 1_000)
+            try write(base.appendingPathComponent("tree/keep/free.dat"), bytes: 2_000)
+            for i in 0..<3 {
+                try write(base.appendingPathComponent("tree/other/x\(i).dat"), bytes: 500)
+            }
+        } catch {
+            check("the locked fixture can be built", false, "\(error)")
+            return
+        }
+        guard chflags(locked.path, UInt32(UF_IMMUTABLE)) == 0 else {
+            check("a file can be made immutable here", false, "errno \(errno)")
+            return
+        }
+
+        let tree = base.appendingPathComponent("tree")
+        let outcome = Removal.remove(tree.path)
+        let left = (try? FileManager.default.subpathsOfDirectory(atPath: tree.path))?
+            .sorted()
+
+        check(
+            "everything else in the folder goes",
+            left == ["keep", "keep/locked.dat"],
+            "left \(left ?? [])"
+        )
+        check(
+            "the one that stayed is the one failure counted",
+            !outcome.isGone && !outcome.wasStopped && outcome.failures == 1,
+            "gone \(outcome.isGone), failures \(outcome.failures)"
+        )
+        check(
+            "and it is named, with why",
+            outcome.firstFailure?.path.hasSuffix("/keep/locked.dat") == true
+                && outcome.firstFailure?.code == EPERM,
+            "reported \(String(describing: outcome.firstFailure))"
+        )
+    }
+
+    /// `FileManager.removeItem` refuses a tree deeper than `PATH_MAX` outright,
+    /// and `removefile` stops where the path runs out unless told to change
+    /// directory as it goes — which it does for the whole process, so the
+    /// working directory is checked afterwards.
+    private static func testARemovalReachesPastPathMax() {
+        let base = scratch("removal-deep")
+        // Built relative to an open folder, one level at a time: nothing that
+        // takes a whole path could name the bottom of this.
+        let levels = Int(PATH_MAX) / 16 + 40
+        mkdir(base.path, 0o755)
+        var folder = open(base.path, O_RDONLY | O_DIRECTORY)
+        for _ in 0..<levels {
+            mkdirat(folder, "level-of-fifteen", 0o755)
+            let next = openat(folder, "level-of-fifteen", O_RDONLY | O_DIRECTORY)
+            let file = openat(next, "f.dat", O_CREAT | O_WRONLY, 0o644)
+            close(file)
+            close(folder)
+            folder = next
+        }
+        close(folder)
+
+        let before = FileManager.default.currentDirectoryPath
+        let outcome = Removal.remove(base.path)
+        var info = stat()
+        let gone = lstat(base.path, &info) != 0
+
+        check(
+            "a tree \(levels) levels deep, past PATH_MAX, is removed whole",
+            gone && outcome.isGone && outcome.failures == 0,
+            "gone \(gone), failures \(outcome.failures), "
+                + "first \(String(describing: outcome.firstFailure?.code))"
+        )
+        check(
+            "with every level counted once",
+            outcome.tally.items == levels * 2 + 1,
+            "counted \(outcome.tally.items), expected \(levels * 2 + 1)"
+        )
+        check(
+            "and the working directory back where it was",
+            FileManager.default.currentDirectoryPath == before,
+            "left in \(FileManager.default.currentDirectoryPath)"
+        )
+    }
+
+    /// The model's side of the same thing. Part of a folder gone and part
+    /// not is a state `FileManager.removeItem` could leave and the tree could
+    /// not show: the folder stayed whole in every total. What is left is now
+    /// read back from the disk, so it is held to a fresh scan of it.
+    @MainActor
+    private static func testADeleteThatLeavesSomethingShowsWhatIsLeft() {
+        let base = scratch("partial")
+        let locked = base.appendingPathComponent("part/keep/locked.dat")
+        defer {
+            chflags(locked.path, 0)
+            try? FileManager.default.removeItem(at: base)
+        }
+        do {
+            for folder in ["part/keep", "part/other"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            try write(locked, bytes: 1_000)
+            try write(base.appendingPathComponent("part/keep/free.dat"), bytes: 2_000)
+            for i in 0..<3 {
+                try write(base.appendingPathComponent("part/other/x\(i).dat"), bytes: 500)
+            }
+            try write(base.appendingPathComponent("spare.dat"), bytes: 4_000)
+        } catch {
+            check("the partial fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let part = result.root.subdir(named: "part"),
+            let keep = part.subdir(named: "keep"),
+            chflags(locked.path, UInt32(UF_IMMUTABLE)) == 0
+        else {
+            check("the partial fixture scanned", false, "missing folders")
+            return
+        }
+        let partRef = NodeRef(part)
+        model.selection = [partRef]
+
+        deletePermanently(model, [partRef])
+
+        check(
+            "a delete that left something behind says what and why",
+            model.actionError?.contains("part") == true
+                && model.actionErrorDetail?.contains("locked.dat") == true,
+            "said \(model.actionError ?? "nothing"): "
+                + (model.actionErrorDetail ?? "nothing")
+        )
+        check(
+            "the folder is still in the tree, holding only what stayed",
+            result.root.subdir(named: "part") === part
+                && part.subdirs.map(\.name) == ["keep"]
+                && live(keep).map(\.name) == ["locked.dat"],
+            "folders \(part.subdirs.map(\.name)), files \(live(keep).map(\.name))"
+        )
+        let fresh = scan(base)
+        check(
+            "every total is what a fresh scan of the disk finds",
+            result.root.totalSize == fresh.root.totalSize
+                && result.root.totalAlloc == fresh.root.totalAlloc
+                && result.root.totalFiles == fresh.root.totalFiles
+                && result.root.totalDirs == fresh.root.totalDirs,
+            "tree \(result.root.totalSize) bytes in \(result.root.totalFiles) "
+                + "files and \(result.root.totalDirs) folders, disk "
+                + "\(fresh.root.totalSize) in \(fresh.root.totalFiles) and "
+                + "\(fresh.root.totalDirs)"
+        )
+        check(
+            "and the folder stays selected, since it is still there",
+            model.selection == [partRef] && !partRef.isStale,
+            "selection is \(model.selection.map(\.name))"
+        )
+    }
+
+    /// Stop, part-way through one folder, through the model: the count the
+    /// bar is drawn from, the Stop itself, and the tree left agreeing with a
+    /// disk that has lost an arbitrary part of the folder.
+    ///
+    /// Eight thousand files, so the removal is still running when the first
+    /// progress report — a twentieth of a second in — has made its way here.
+    @MainActor
+    private static func testADeleteCanBeStoppedPartWay() {
+        let base = scratch("partway")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folders = 8
+        let each = 1_000
+        do {
+            for d in 0..<folders {
+                let dir = base.appendingPathComponent("big/d\(d)")
+                try FileManager.default.createDirectory(
+                    at: dir,
+                    withIntermediateDirectories: true
+                )
+                for f in 0..<each {
+                    FileManager.default.createFile(
+                        atPath: dir.appendingPathComponent("f\(f).dat").path,
+                        contents: nil
+                    )
+                }
+            }
+            try write(base.appendingPathComponent("spare.dat"), bytes: 4_000)
+        } catch {
+            check("the part-way fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.removingGrace = 0
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let big = result.root.subdir(named: "big"),
+            let spare = result.root.files.firstIndex(where: { $0.name == "spare.dat" }),
+            let inside = big.subdirs.first
+        else {
+            check("the part-way fixture scanned", false, "missing entries")
+            return
+        }
+        let bigPath = big.path
+        let expected = folders * each + folders + 1
+
+        model.deletePermanently([NodeRef(big)])
+        check(
+            "the bar starts out knowing how much there is to remove",
+            model.deleteProgress?.itemsTotal == expected
+                && model.deleteProgress?.items == 0
+                && model.deleteProgress?.bytesTotal == big.totalAlloc,
+            "got \(String(describing: model.deleteProgress)), expected \(expected)"
+        )
+
+        var fractions: [Double] = []
+        var dimmed = false
+        let deadline = Date().addingTimeInterval(20)
+        while model.isDeleting, (model.deleteProgress?.items ?? 0) == 0,
+            Date() < deadline
+        {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        if let progress = model.deleteProgress { fractions.append(progress.fraction) }
+        dimmed =
+            model.isBeingRemoved(NodeRef(big))
+            && model.isBeingRemoved(NodeRef(dir: inside, fileIndex: 0))
+            && !model.isBeingRemoved(NodeRef(dir: result.root, fileIndex: spare))
+        let reported = model.deleteProgress?.items ?? 0
+        model.cancelDelete()
+        pumpUntilDeleteSettles(model)
+
+        let left = census(URL(fileURLWithPath: bigPath)).items
+        check(
+            "progress is reported while one folder is still being removed",
+            reported > 0 && reported < expected
+                && fractions.allSatisfy { $0 > 0 && $0 < 1 },
+            "saw \(reported) of \(expected) before stopping"
+        )
+        check(
+            "the rows on their way out are set back, and no others",
+            dimmed && model.removing.isEmpty,
+            "dimmed \(dimmed), still marked \(model.removing.count)"
+        )
+        check(
+            "Stop takes effect part-way through the folder",
+            left > 0 && left < expected,
+            "\(left) of \(expected) entries left on disk"
+        )
+        check(
+            "being stopped is not reported as a failure",
+            model.actionError == nil && !model.isDeleting,
+            model.actionError ?? "still deleting"
+        )
+        let fresh = scan(base)
+        check(
+            "the tree is left showing exactly what is still on disk",
+            result.root.subdir(named: "big") === big
+                && result.root.totalFiles == fresh.root.totalFiles
+                && result.root.totalDirs == fresh.root.totalDirs
+                && result.root.totalAlloc == fresh.root.totalAlloc,
+            "tree \(result.root.totalFiles) files and \(result.root.totalDirs) "
+                + "folders, disk \(fresh.root.totalFiles) and \(fresh.root.totalDirs)"
+        )
+
+        deletePermanently(model, [NodeRef(big)])
+        check(
+            "what was left can be removed afterwards",
+            !FileManager.default.fileExists(atPath: bigPath)
+                && result.root.subdir(named: "big") == nil
+                && result.root.totalFiles == 1,
+            "\(result.root.totalFiles) files left in the tree"
+        )
+    }
+
+    /// The flicker. A file was named by its place in the folder's array, so
+    /// deleting one renumbered every sibling after it: the table was handed a
+    /// list of rows it had never seen and redrew the lot, the File View was
+    /// emptied until a walk refilled it, and the selection was thrown away.
+    ///
+    /// Every row left has to be the row it was, naming what it named — and
+    /// the lists are watched on the way, not just compared afterwards, since
+    /// an empty list for one frame is the thing being ruled out.
+    //
+    // list/a.dat … e.dat   50,000 bytes down to 10,000
+    // other/z.dat          7,000
+    @MainActor
+    private static func testRowsKeepTheirPlacesAcrossADelete() {
+        let base = scratch("rows")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let names = ["a", "b", "c", "d", "e"].map { $0 + ".dat" }
+        do {
+            for folder in ["list", "other"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            for (i, name) in names.enumerated() {
+                try write(
+                    base.appendingPathComponent("list/\(name)"),
+                    bytes: 50_000 - i * 10_000
+                )
+            }
+            try write(base.appendingPathComponent("other/z.dat"), bytes: 7_000)
+        } catch {
+            check("the rows fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let list = result.root.subdir(named: "list"),
+            let other = result.root.subdir(named: "other"),
+            list.files.count == 5
+        else {
+            check("the rows fixture scanned", false, "missing entries")
+            return
+        }
+        func ref(_ name: String) -> NodeRef {
+            NodeRef(dir: list, fileIndex: list.files.firstIndex { $0.name == name }!)
+        }
+        model.setExpanded(list, true)
+        model.setExpanded(other, true)
+        model.tab = .files
+        pumpUntilFileRowsSettle(model, expecting: 6)
+        model.tab = .tree
+
+        let treeBefore = Dictionary(
+            uniqueKeysWithValues: model.treeRows.map { ($0.ref, $0.ref.name) }
+        )
+        let filesBefore = Dictionary(
+            uniqueKeysWithValues: model.fileRows.map { ($0.ref, $0.name) }
+        )
+        var emptied = false
+        let watch = model.$fileRows.dropFirst().sink { if $0.isEmpty { emptied = true } }
+        defer { watch.cancel() }
+
+        let b = ref("b.dat")
+        model.selection = [ref("c.dat")]
+        trash(model, [b])
+        pumpUntilFileRowsSettle(model, expecting: 5)
+
+        check(
+            "deleting a file takes exactly its row out of the tree table",
+            Set(treeBefore.keys).subtracting(model.treeRows.map(\.ref)) == [b]
+                && model.treeRows.count == treeBefore.count - 1,
+            "\(model.treeRows.count) rows, were \(treeBefore.count)"
+        )
+        check(
+            "every row left is the row it was, naming what it named",
+            model.treeRows.allSatisfy { treeBefore[$0.ref] == $0.ref.name }
+                && model.fileRows.allSatisfy {
+                    filesBefore[$0.ref] == $0.name && $0.ref.name == $0.name
+                },
+            "tree \(model.treeRows.map(\.ref.name)), files \(model.fileRows.map(\.name))"
+        )
+        check(
+            "the file list is never emptied on the way",
+            !emptied && model.fileRows.count == 5,
+            "it was blank for a time, or ended at \(model.fileRows.count) rows"
+        )
+        check(
+            "a selection that was not deleted is left alone",
+            model.selection == [ref("c.dat")],
+            "selection is \(model.selection.map(\.name))"
+        )
+        check(
+            "the deleted file is in none of the places files are listed",
+            !result.largestFiles().contains { $0.isStale }
+                && result.largestFiles().count == 5
+                && !TreemapLayout.build(
+                    root: result.root,
+                    ancestors: [],
+                    size: CGSize(width: 400, height: 300),
+                    metric: .allocated
+                ).cells.contains { $0.ref.isStale || $0.ref.name.isEmpty },
+            "a slot left by a deleted file was listed or drawn"
+        )
+
+        // Where the selection goes when it is what was deleted: to whatever
+        // moves up into its place, so the next arrow key carries on from
+        // there and not from the top of the table.
+        trash(model, [ref("c.dat")])
+        check(
+            "deleting the selected row selects the one that takes its place",
+            model.selection == [ref("d.dat")],
+            "selection is \(model.selection.map(\.name))"
+        )
+        model.selection = [ref("e.dat")]
+        trash(model, [ref("e.dat")])
+        check(
+            "deleting the last row selects the one before it",
+            model.selection == [ref("d.dat")],
+            "selection is \(model.selection.map(\.name))"
+        )
+        let rest: Set<NodeRef> = [ref("a.dat"), ref("d.dat")]
+        model.selection = rest
+        trash(model, rest)
+        check(
+            "deleting all that is left selects the folder, now empty",
+            model.selection == [NodeRef(list)] && list.isEmpty
+                && model.treeRows.first { $0.ref == NodeRef(list) }?.isExpandable
+                    == false,
+            "selection is \(model.selection.map(\.name)), "
+                + "\(live(list).count) files left"
+        )
+
+        // A tile picked on the treemap has no row, so no neighbour: moving to
+        // the folder it was in would put a second ⌘⌫ on everything else there.
+        let z = NodeRef(dir: other, fileIndex: 0)
+        model.setExpanded(other, false)
+        model.selection = [z]
+        trash(model, [z])
+        check(
+            "deleting a selection that had no row selects nothing",
+            model.selection.isEmpty,
+            "selection is \(model.selection.map(\.name))"
+        )
+
+        // A folder that has gone is cut off, so what was held of it or of
+        // anything inside reads as gone too.
+        let otherRef = NodeRef(other)
+        model.selection = [otherRef]
+        trash(model, [otherRef])
+        check(
+            "a deleted folder, and anything that was in it, reads as stale",
+            otherRef.isStale && z.isStale && otherRef.path.isEmpty
+                && model.distinctTargets([otherRef, z]).isEmpty,
+            "path \(otherRef.path)"
+        )
+    }
+
+    /// The same in File View, which is a flat list with no folder to fall
+    /// back on.
+    @MainActor
+    private static func testTheFileListKeepsItsPlaceAcrossADelete() {
+        let base = scratch("filerows")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            for i in 0..<4 {
+                try write(
+                    base.appendingPathComponent("f\(i).dat"),
+                    bytes: 40_000 - i * 10_000
+                )
+            }
+        } catch {
+            check("the file-list fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard loadSynchronously(into: model) != nil else { return }
+        model.tab = .files
+        pumpUntilFileRowsSettle(model, expecting: 4)
+        guard model.fileRows.map(\.name) == ["f0.dat", "f1.dat", "f2.dat", "f3.dat"]
+        else {
+            check("the file list is ranked largest first", false,
+                "\(model.fileRows.map(\.name))")
+            return
+        }
+
+        model.selection = [model.fileRows[1].ref]
+        trash(model, model.selection)
+        check(
+            "deleting a listed file selects the one that moves up",
+            model.selection.map(\.name) == ["f2.dat"],
+            "selection is \(model.selection.map(\.name))"
+        )
+        model.selection = [model.fileRows[2].ref]
+        trash(model, model.selection)
+        check(
+            "deleting the last one selects the one before it",
+            model.selection.map(\.name) == ["f2.dat"],
+            "selection is \(model.selection.map(\.name))"
+        )
+    }
+
+    /// The status line's figures, which are put together in the model so they
+    /// can be held to here.
+    @MainActor
+    private static func testTheDeleteLineStaysWithinWhatWasCounted() {
+        let model = AppModel()
+        var progress = AppModel.DeleteProgress(
+            done: 0,
+            total: 1,
+            currentName: "cache",
+            items: 1_200,
+            itemsTotal: 5_000,
+            bytes: 2_000_000,
+            bytesTotal: 6_400_000
+        )
+        check(
+            "the bar is drawn from items removed, not targets finished",
+            abs(progress.fraction - 0.24) < 0.0001,
+            "got \(progress.fraction)"
+        )
+        check(
+            "the line gives both, each against what the scan counted",
+            model.deleteSummary(progress)
+                == "\(ByteFormat.count(1_200)) of "
+                + "\(ByteFormat.counted(5_000, "item"))  •  "
+                + "\(ByteFormat.decimal(2_000_000)) of "
+                + ByteFormat.decimal(6_400_000),
+            model.deleteSummary(progress)
+        )
+        // The disk can hold more than the scan found, and a hard link's
+        // bytes are reported by whichever name goes first.
+        progress.items = 5_400
+        progress.bytes = 9_000_000
+        check(
+            "neither runs past its total",
+            progress.fraction == 1
+                && model.deleteSummary(progress)
+                    == "\(ByteFormat.count(5_000)) of "
+                    + "\(ByteFormat.counted(5_000, "item"))  •  "
+                    + "\(ByteFormat.decimal(6_400_000)) of "
+                    + ByteFormat.decimal(6_400_000),
+            model.deleteSummary(progress)
+        )
+        let trash = AppModel.DeleteProgress(done: 1, total: 4, currentName: "")
+        check(
+            "with nothing counted, it falls back to targets finished",
+            trash.fraction == 0.25,
+            "got \(trash.fraction)"
         )
     }
 
@@ -2159,17 +2900,22 @@ enum SelfTest {
             "got \(result.root.totalFiles), expected \(beforeFiles - 1)"
         )
         check(
-            "the selection is cleared, since file indices shifted",
-            model.selection.isEmpty,
-            "selection survived"
+            "the selection stays where it was, on something still there",
+            model.selection == [NodeRef(result.root)],
+            "selection is \(model.selection.map(\.name))"
         )
     }
 
-    /// A `NodeRef` names a file by its index in the folder's array, so deleting
-    /// anything ahead of it leaves the reference pointing past the end. SwiftUI
-    /// keeps a context menu's content alive and re-runs its body once the sheet
-    /// closes — after the delete — so reading a stale reference has to degrade
-    /// quietly. Reading one used to trap and take the whole app down.
+    /// A `NodeRef` names a file by its index in the folder's array. Deleting a
+    /// file used to take its entry out, which left a reference to anything
+    /// after it pointing at a different file or past the end; SwiftUI keeps a
+    /// context menu's content alive and re-runs its body once the sheet closes
+    /// — after the delete — and reading one of those trapped and took the
+    /// whole app down.
+    ///
+    /// A deleted file now keeps its slot. A reference to it reads as stale and
+    /// degrades quietly, and a reference to a sibling goes on naming the
+    /// sibling, which is what lets the selection and the rows survive.
     @MainActor
     private static func testStaleReferencesSurviveADelete(_ root: URL) {
         let model = AppModel()
@@ -2183,54 +2929,64 @@ enum SelfTest {
 
         // Captured while all three exist, then read once only one remains —
         // exactly what the menu holds across a delete.
+        let gone = NodeRef(dir: dir, fileIndex: 0)
         let last = NodeRef(dir: dir, fileIndex: 2)
-        trash(model, [
-            NodeRef(dir: dir, fileIndex: 0), NodeRef(dir: dir, fileIndex: 1),
-        ])
+        let lastName = last.name
+        let lastPath = last.path
+        trash(model, [gone, NodeRef(dir: dir, fileIndex: 1)])
         check(
             "the fixture is down to one file",
-            dir.files.count == 1,
-            "got \(dir.files.count)"
+            live(dir).count == 1 && dir.totalFiles == 1,
+            "got \(live(dir).count), counted as \(dir.totalFiles)"
         )
-        check("a reference past the end reports itself stale", last.isStale, "")
-        check("its path reads empty rather than trapping", last.path.isEmpty, last.path)
-        check("its name reads empty", last.name.isEmpty, last.name)
-        check("its size reads zero", last.size == 0, "\(last.size)")
-        check("its file entry is nil", last.file == nil, "got one")
+        check(
+            "a reference to the file that stayed still names it",
+            !last.isStale && last.name == lastName && last.path == lastPath
+                && FileManager.default.fileExists(atPath: last.path),
+            "now \(last.name) at \(last.path), was \(lastName)"
+        )
+        check("a reference to a deleted file reports itself stale", gone.isStale, "")
+        check("its path reads empty rather than trapping", gone.path.isEmpty, gone.path)
+        check("its name reads empty", gone.name.isEmpty, gone.name)
+        check("its size reads zero", gone.size == 0, "\(gone.size)")
+        check("its file entry is nil", gone.file == nil, "got one")
         check(
             "its percentage reads zero",
-            last.fractionOfParent == 0 && last.fractionOfParent(using: .allocated) == 0,
-            "\(last.fractionOfParent)"
+            gone.fractionOfParent == 0 && gone.fractionOfParent(using: .allocated) == 0,
+            "\(gone.fractionOfParent)"
         )
         // The protection check is what the crash came through: the menu asks it
         // for every captured reference each time its body re-runs.
         check(
             "the menu's protection check tolerates a stale reference",
-            !FileActions.containsSystemProtected([last]),
+            !FileActions.containsSystemProtected([gone]),
             "reported protected"
         )
         check(
             "a stale reference is never a delete target",
-            model.distinctTargets([last]).isEmpty,
+            model.distinctTargets([gone]).isEmpty,
             "it survived the filter"
         )
         // Aiming a stale reference at its parent folder would delete the wrong
         // thing entirely, so the surviving file must still be here afterwards.
-        deletePermanently(model, [last])
+        deletePermanently(model, [gone])
         check(
             "acting on a stale reference is a no-op, not a parent delete",
             FileManager.default.fileExists(atPath: dir.path)
-                && dir.files.count == 1,
+                && live(dir).count == 1,
             "the folder or its contents were removed"
         )
     }
 
     /// The File View's rows are built off the main thread from a walk of the whole
-    /// tree, and each row names its file by index. A delete renumbers every
-    /// sibling after the one removed, so any row published from before it now
-    /// names a *different* file — and acting on one would trash the wrong thing
-    /// with nothing to reveal it. Two ways in: the rows already on screen, and a
-    /// walk that was in flight when the delete landed.
+    /// tree, and each row names its file by index. A delete used to renumber
+    /// every sibling after the one removed, so any row published from before it
+    /// named a *different* file — and acting on one would trash the wrong thing
+    /// with nothing to reveal it. A deleted file now keeps its slot, so the
+    /// rows for the others are still right and stay; what has to hold is that
+    /// none of them ever names anything but its own file, and that a row for
+    /// the file that went never reaches the table. Two ways in: the rows
+    /// already on screen, and a walk that was in flight when the delete landed.
     @MainActor
     private static func testFileRowsNeverOutliveADelete(_ root: URL) {
         let model = AppModel()
@@ -2286,7 +3042,7 @@ enum SelfTest {
             mismatch ?? ""
         )
         check(
-            "no published row points past the end of its folder",
+            "no published row is for a file that has gone",
             !sawStale,
             "a stale row reached the table"
         )
@@ -3699,7 +4455,7 @@ enum SelfTest {
 
             let trioBefore = trio.totalSize
             trash(model, [NodeRef(dir: counted, fileIndex: 0)])
-            let left = trio.subdirs.compactMap(\.files.first)
+            let left = trio.subdirs.compactMap { live($0).first }
             check(
                 "trashing the counted name of three promotes one and unlinks none",
                 left.count == 2
@@ -3831,10 +4587,12 @@ enum SelfTest {
         )
     }
 
-    /// Two files in one folder, trashed together. Removing an entry renumbers
-    /// every sibling after it, so the batch has to unlink from the back — done
-    /// front-to-back this drops the wrong rows from the model while deleting the
-    /// right files from disk, which no error would ever reveal.
+    /// Two files in one folder, trashed together. Taking an entry out used to
+    /// renumber every sibling after it, so the batch had to unlink from the back
+    /// — done front-to-back it dropped the wrong rows from the model while
+    /// deleting the right files from disk, which no error would ever reveal.
+    /// The entries now keep their slots and the order no longer matters; that
+    /// the model drops exactly the two that went is still what is checked.
     @MainActor
     private static func testBatchTrashOfSiblings(_ root: URL) {
         let model = AppModel()
@@ -3847,17 +4605,20 @@ enum SelfTest {
             return
         }
         // Indices, not names: which name lands at which index depends on the
-        // order the filesystem enumerated them, and it's the indices that the
-        // removal order has to get right.
+        // order the filesystem enumerated them.
         let names = dir.files.map(\.name)
         let paths = (0..<3).map { dir.path(ofFileAt: $0) }
         let removedBytes = dir.files[0].size + dir.files[2].size
         let before = result.root.totalSize
         let beforeFiles = result.root.totalFiles
 
-        trash(model, [
+        // Selected and in the table, as they are when this is done by hand.
+        let doomed: Set<NodeRef> = [
             NodeRef(dir: dir, fileIndex: 0), NodeRef(dir: dir, fileIndex: 2),
-        ])
+        ]
+        model.setExpanded(dir, true)
+        model.selection = doomed
+        trash(model, doomed)
 
         check(
             "trashing two at once reports no error",
@@ -3877,8 +4638,8 @@ enum SelfTest {
         )
         check(
             "the model keeps exactly the sibling that survived",
-            dir.files.map(\.name) == [names[1]],
-            "got \(dir.files.map(\.name)), expected [\(names[1])]"
+            live(dir).map(\.name) == [names[1]],
+            "got \(live(dir).map(\.name)), expected [\(names[1])]"
         )
         check(
             "the root's total drops by both files' sizes",
@@ -3891,9 +4652,9 @@ enum SelfTest {
             "got \(result.root.totalFiles), expected \(beforeFiles - 2)"
         )
         check(
-            "a batch clears the selection",
-            model.selection.isEmpty,
-            "selection survived"
+            "the selection moves to the sibling that is left",
+            model.selection == [NodeRef(dir: dir, fileIndex: 1)],
+            "selection is \(model.selection.map(\.name))"
         )
     }
 
@@ -3950,10 +4711,15 @@ enum SelfTest {
             result.root.totalDirs == beforeDirs - 2,
             "got \(result.root.totalDirs), expected \(beforeDirs - 2)"
         )
+        // The folder was a row under the root with others beside it, so the
+        // selection has a neighbour to move to and none of what went to keep.
         check(
-            "the selection is cleared after a nested batch",
-            model.selection.isEmpty,
-            "selection survived"
+            "the selection moves off what went, to a folder beside it",
+            model.selection.count == 1
+                && model.selection.allSatisfy {
+                    !$0.isStale && $0.isDirectory && $0.dir.parent === result.root
+                },
+            "selection is \(model.selection.map(\.name))"
         )
     }
 
@@ -4532,6 +5298,12 @@ enum SelfTest {
             return nil
         }
         return result
+    }
+
+    /// A folder's files that are still there, without the slots that deleted
+    /// ones leave behind.
+    private static func live(_ dir: DirNode) -> [FileEntry] {
+        dir.files.filter { !$0.isRemoved }
     }
 
     private static func check(_ what: String, _ passed: Bool, _ detail: String) {

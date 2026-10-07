@@ -149,14 +149,18 @@ enum FileActions {
         }
     }
 
-    static func deletePermanently(_ path: String) throws {
+    /// Throws only for a path that may not be removed at all. One that could
+    /// not be removed, or not all of it, comes back in the outcome: part of a
+    /// folder may have gone by then, and the caller has to know which.
+    @discardableResult
+    static func deletePermanently(
+        _ path: String,
+        stop: Removal.Stop = Removal.Stop(),
+        onProgress: (Removal.Tally) -> Void = { _ in }
+    ) throws -> Removal.Outcome {
         if isUndeletableRoot(path) { throw ActionError.undeletableRoot(path) }
         if isSystemProtected(path) { throw ActionError.systemProtected(path) }
-        do {
-            try FileManager.default.removeItem(atPath: path)
-        } catch {
-            throw ActionError.failed(path, error.localizedDescription)
-        }
+        return Removal.remove(path, stop: stop, onProgress: onProgress)
     }
 
     /// Icon for a scanned item. Uses the generic type icon rather than asking
