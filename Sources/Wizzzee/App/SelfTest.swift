@@ -109,6 +109,7 @@ enum SelfTest {
         testArrowKeysOpenAndShutFolders()
         testThePathAboveTheMapZoomsOut()
         testTabsAnswerTheirKeys()
+        testQuickLookShowsWhatIsSelected()
         testARevealedRowIsScrolledIntoView()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
@@ -6687,6 +6688,172 @@ enum SelfTest {
         check("nor during a scan", !model.canChooseFolder, "")
         pumpUntilSettled(model)
         check("and can again once it is over", model.canChooseFolder, "")
+    }
+
+    /// ⌘Y opens Quick Look on the one item selected and on show, and shuts
+    /// it again. What it shows follows the selection, goes when what it was
+    /// showing is deleted, and is never a file whose contents would have to
+    /// be downloaded to be shown.
+    @MainActor
+    private static func testQuickLookShowsWhatIsSelected() {
+        let model = AppModel()
+        guard let (base, result) = loadWalkabout("preview", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = result.root.subdir(named: "a"),
+            let b = a.subdir(named: "b"),
+            let c = result.root.subdir(named: "c"),
+            let y = a.files.firstIndex(where: { $0.name == "y.dat" }),
+            let z = c.files.firstIndex(where: { $0.name == "z.dat" })
+        else {
+            check("the preview fixture scanned", false, "missing folders")
+            return
+        }
+        let yRef = NodeRef(dir: a, fileIndex: y)
+        let zRef = NodeRef(dir: c, fileIndex: z)
+        func showing() -> String { model.previewURL?.lastPathComponent ?? "nothing" }
+
+        // y.dat is inside a, which starts shut: selected, and not on show.
+        model.selection = [yRef]
+        check(
+            "a selection a shut folder hides is not something to look at",
+            !model.canTogglePreview,
+            "can toggle \(model.canTogglePreview)"
+        )
+        model.togglePreview()
+        check("so ⌘Y opens nothing for it", model.previewURL == nil, showing())
+
+        model.setExpanded(a, true)
+        check("on show, it is", model.canTogglePreview, "")
+        model.togglePreview()
+        check(
+            "⌘Y opens Quick Look on the selected file",
+            model.previewURL?.path == yRef.path && model.previewed == yRef,
+            "showing \(showing())"
+        )
+
+        model.selection = [NodeRef(b)]
+        check(
+            "with the panel open, selecting something else shows that instead",
+            model.previewURL?.path == NodeRef(b).path,
+            "showing \(showing())"
+        )
+        model.selection = [NodeRef(b), yRef]
+        check(
+            "selecting several leaves it on the last one looked at",
+            model.previewURL?.path == NodeRef(b).path,
+            "showing \(showing())"
+        )
+        check(
+            "and ⌘Y can still shut it",
+            model.canTogglePreview,
+            "can toggle \(model.canTogglePreview)"
+        )
+        model.togglePreview()
+        check(
+            "⌘Y with the panel open shuts it",
+            model.previewURL == nil && model.previewed == nil,
+            "showing \(showing())"
+        )
+        check(
+            "with several selected and nothing open, there is no one to look at",
+            !model.canTogglePreview,
+            "can toggle \(model.canTogglePreview)"
+        )
+        model.selection = [NodeRef(a)]
+        check(
+            "a change of selection does not open a panel that was shut",
+            model.previewURL == nil,
+            "showing \(showing())"
+        )
+
+        // What is being looked at is deleted from under the panel, which was
+        // opened from the menu on a row that is not the selected one.
+        model.setExpanded(c, true)
+        model.preview(zRef)
+        check(
+            "Quick Look can be opened on a row that is not the selection",
+            model.previewed == zRef && model.selection == [NodeRef(a)],
+            "showing \(showing())"
+        )
+        deletePermanently(model, [zRef])
+        check(
+            "deleting what Quick Look is showing shuts it",
+            model.previewURL == nil && model.previewed == nil,
+            "showing \(showing())"
+        )
+        model.preview(zRef)
+        check(
+            "and it will not open on something that has gone",
+            model.previewURL == nil,
+            "showing \(showing())"
+        )
+
+        model.preview(yRef)
+        deletePermanently(model, [NodeRef(c)])
+        check(
+            "deleting something else leaves it where it was",
+            model.previewURL?.path == yRef.path,
+            "showing \(showing())"
+        )
+
+        // Working down a list with the panel open: what is selected and on
+        // show is removed, the selection moves to what took its place, and
+        // the panel goes with it.
+        model.selection = [NodeRef(b)]
+        check("the panel is on b", model.previewURL?.path == NodeRef(b).path, showing())
+        deletePermanently(model, [NodeRef(b)])
+        check(
+            "deleting the selected row moves the panel on with the selection",
+            model.selection == [yRef] && model.previewURL?.path == yRef.path,
+            "selected \(model.selection.map(\.name)), showing \(showing())"
+        )
+        _ = loadSynchronously(into: model)
+        check("a rescan shuts it", model.previewURL == nil, showing())
+
+        // A file a cloud provider is holding. Nothing here can make a real
+        // one, so the entry is made by hand, under a root of its own.
+        let cloud = DirNode(name: "/wizzzee-selftest-cloud", parent: nil)
+        cloud.files = [
+            FileEntry(
+                name: "film.mov",
+                size: 4_000_000_000,
+                alloc: 0,
+                mtime: 0,
+                extIndex: -1,
+                isSymlink: false,
+                isDuplicateLink: false,
+                storage: .dataless
+            ),
+            FileEntry(
+                name: "note.txt",
+                size: 100,
+                alloc: 4_096,
+                mtime: 0,
+                extIndex: -1,
+                isSymlink: false,
+                isDuplicateLink: false
+            ),
+        ]
+        let film = NodeRef(dir: cloud, fileIndex: 0)
+        model.actionError = nil
+        model.preview(film)
+        check(
+            "an online-only file is not opened, which would download it",
+            model.previewURL == nil && model.actionError?.contains("online only") == true
+                && model.actionErrorDetail?.contains("4.0 GB") == true,
+            "showing \(showing()), said \(model.actionError ?? "nothing"): "
+                + "\(model.actionErrorDetail ?? "")"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+        model.preview(NodeRef(dir: cloud, fileIndex: 1))
+        model.selection = [film]
+        check(
+            "and moving the selection onto one shuts the panel without a word",
+            model.previewURL == nil && model.actionError == nil,
+            "showing \(showing()), said \(model.actionError ?? "nothing")"
+        )
+        model.selection = []
     }
 
     /// A row picked from somewhere other than the table — a tile on the map,

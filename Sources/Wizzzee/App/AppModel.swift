@@ -185,7 +185,12 @@ final class AppModel: ObservableObject {
     @Published var tab: MainTab = .tree
     /// A set rather than one item, so the tables get macOS's native ⌘-click and
     /// ⇧-arrow multi-select and the destructive actions can work on a batch.
-    @Published var selection: Set<NodeRef> = []
+    @Published var selection: Set<NodeRef> = [] {
+        // Only when it has changed. It is assigned as it stands after every
+        // delete, and a panel opened from the menu on some other row would be
+        // pulled back to the selected one by an assignment that moved nothing.
+        didSet { if selection != oldValue { previewFollowsSelection() } }
+    }
     /// Defaults to space actually occupied. Logical size is badly misleading on
     /// macOS, where sparse container and VM images routinely report hundreds of
     /// gigabytes they don't occupy — and reclaimable space is the whole point.
@@ -234,6 +239,16 @@ final class AppModel: ObservableObject {
         KeyPathComparator(\FileRow.alloc, order: .reverse)
     ]
     @Published var isFilteringFiles = false
+
+    // Quick Look
+    /// What the Quick Look panel is showing, or nil while it is shut. The
+    /// panel sets it back to nil itself when it is closed.
+    @Published var previewURL: URL? {
+        didSet { if previewURL == nil { previewed = nil } }
+    }
+    /// The item that URL was made from, so a delete can tell that what is
+    /// being looked at has gone.
+    private(set) var previewed: NodeRef?
 
     // File type in focus
     /// The file type picked out in File Types, by its extension — empty for
@@ -543,6 +558,74 @@ final class AppModel: ObservableObject {
         rebuildTreeRows()
     }
 
+    // MARK: - Quick Look
+    //
+    // The tables say how big a thing is and nothing about what it is. Finding
+    // out meant Reveal in Finder, a look there, and the way back — for every
+    // file someone was not sure about, which before deleting is most of them.
+
+    /// The one item selected and on show, which is what ⌘Y looks at. With
+    /// several selected there is no one of them to show.
+    private var previewCandidate: NodeRef? {
+        let shown = selectionOnShow
+        return shown.count == 1 ? shown.first : nil
+    }
+
+    /// Whether ⌘Y has anything to do: something to look at, or a panel to
+    /// shut.
+    var canTogglePreview: Bool { previewURL != nil || previewCandidate != nil }
+
+    /// ⌘Y, as in Finder: opens Quick Look on the selected item, and shuts it
+    /// if it is open.
+    func togglePreview() {
+        if previewURL != nil {
+            previewURL = nil
+        } else if let ref = previewCandidate {
+            preview(ref)
+        }
+    }
+
+    /// Opens Quick Look on `ref`.
+    ///
+    /// Not on a file a cloud provider is holding. Reading one is what brings
+    /// its contents down, and Quick Look reads it: a look at a 4 GB file
+    /// that was taking no space would put 4 GB on a disk someone is in the
+    /// middle of emptying.
+    func preview(_ ref: NodeRef) {
+        guard !ref.isStale else { return }
+        if let file = ref.file, file.storage == .dataless {
+            actionError = "“\(ref.name)” is online only"
+            actionErrorDetail =
+                "Its contents are with a cloud provider and not on this disk. "
+                + "Looking at it would download all "
+                + "\(ByteFormat.decimal(file.size)) of it."
+            return
+        }
+        show(inPreview: ref)
+    }
+
+    /// Points the panel at `ref`, or shuts it if `ref` is not something it
+    /// may show. For the times nothing was asked for by name — the selection
+    /// moved, or what was on show was deleted — when an alert about a file
+    /// someone only passed over would be an interruption.
+    private func show(inPreview ref: NodeRef) {
+        guard !ref.isStale, ref.file?.storage != .dataless else {
+            previewURL = nil
+            return
+        }
+        previewed = ref
+        previewURL = URL(fileURLWithPath: ref.path)
+    }
+
+    /// With the panel open, a change of selection is a change of what is
+    /// being looked at, as it is in Finder.
+    private func previewFollowsSelection() {
+        guard previewURL != nil, selection.count == 1, let ref = selection.first,
+            ref != previewed
+        else { return }
+        show(inPreview: ref)
+    }
+
     // MARK: - Tabs
 
     /// Brings `tab` to the front, from the tab strip or from its key.
@@ -711,6 +794,7 @@ final class AppModel: ObservableObject {
         // A type is a row of the scan being thrown away; the next scan may
         // not have it at all.
         focusedType = nil
+        previewURL = nil
         sharedStorageCache = [:]
         capacityAfterDelete = nil
         treemapRoot = nil
@@ -2008,6 +2092,12 @@ final class AppModel: ObservableObject {
         // before this one changed that, so it is asked for again.
         permanentDeleteTargets = []
         if hoveredRef?.isStale == true { hoveredRef = nil }
+        // What Quick Look was showing has gone from under it. The panel is
+        // put back up below, on whatever the selection moves to: working
+        // down a list with it open, looking and then removing, is what it is
+        // for.
+        let wasShowingWhatWent = previewed?.isStale == true
+        if wasShowingWhatWent { previewURL = nil }
         sharedStorageCache = [:]
         treeRevision += 1
         // Now, not when the walk below returns: a row for a file that has
@@ -2016,6 +2106,7 @@ final class AppModel: ObservableObject {
         rebuildTreeRows()
         if selection.isEmpty, let anchor, let next = row(at: anchor) {
             selection = [next]
+            if wasShowingWhatWent { show(inPreview: next) }
         }
         refreshFileRows(immediately: true)
     }

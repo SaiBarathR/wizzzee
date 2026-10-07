@@ -36,6 +36,14 @@ struct WizzzeeApp: App {
                     .keyboardShortcut("o", modifiers: .command)
                     .disabled(!model.canChooseFolder)
                 Divider()
+                // On Finder's other key for it. Space, its first, marks a
+                // row here.
+                Button(model.previewURL == nil ? "Quick Look" : "Close Quick Look") {
+                    model.togglePreview()
+                }
+                .keyboardShortcut("y", modifiers: .command)
+                .disabled(!model.canTogglePreview)
+                Divider()
                 // Space does the same on a row. That one is the table's own,
                 // so it can't be shown here; this is the one that can.
                 Button(model.selectionIsMarked ? "Unmark" : "Mark for Removal") {

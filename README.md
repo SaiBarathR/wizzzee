@@ -81,8 +81,13 @@ rebuilding.
   list; click it to take the focus off, or press `Esc` in the list. The list
   starts at the 40 largest types — click **top 40 of …** in its heading for all
   of them.
-- **Right-click anything** for Reveal in Finder, Open, Open in Terminal, Copy
-  Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the
+- **`⌘Y` opens Quick Look** on the selected item, and shuts it again — so what
+  a file is can be seen before deciding what to do with it. While it is open it
+  follows the selection, and when the item on show is removed it moves on to
+  whatever took its place, so a list can be worked down with it up. A file that
+  is *online only* is not previewed: that would download it.
+- **Right-click anything** for Reveal in Finder, Open, Quick Look, Open in
+  Terminal, Copy Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the
   way up the tree without rescanning: the row goes, its neighbours stay where
   they were, and the selection moves to whatever took its place. A delete that
   takes a while shows how many items and how much space have gone in the status
@@ -110,6 +115,7 @@ rebuilding.
 | `⌘O` | Choose a folder to scan |
 | `⌘.` | Stop a running scan |
 | `⌘R` | Rescan |
+| `⌘Y` | Quick Look at the selected item, or shut it |
 | `Space` or `⇧⌘M` | Mark the selected rows for removal, or unmark them |
 | `⌘⌫` | Move the selection to the Trash |
 | `⌥⌘⌫` | Delete the selection permanently, after confirming |
