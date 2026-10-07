@@ -3431,12 +3431,7 @@ enum SelfTest {
         // before this one left there, so one turn of the loop may not reach it.
         func settle() {
             queue.sync {}
-            for _ in 0..<4 {
-                RunLoop.main.run(
-                    mode: .default,
-                    before: Date().addingTimeInterval(0.05)
-                )
-            }
+            drainMainQueue()
         }
         func area(_ rects: [CGRect]) -> CGFloat {
             rects.reduce(0) { $0 + $1.width * $1.height }
@@ -4546,7 +4541,7 @@ enum SelfTest {
         // Lets a queued layout run and its result land on the main queue.
         func settle() {
             queue.sync {}
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.1))
+            drainMainQueue()
         }
 
         view.apply(root: root, metric: .allocated, revision: revision)
@@ -5558,6 +5553,23 @@ enum SelfTest {
             pending.append(contentsOf: next.subviews)
         }
         return found
+    }
+
+    /// Runs the main run loop until it has nothing left to do.
+    ///
+    /// For a check that has put one thing on the main queue and needs it to
+    /// have run. One turn of the loop does one thing, and it need not be
+    /// that one: whatever the checks before left there is ahead of it, a
+    /// window being taken down or a walk coming back. A turn that waits its
+    /// whole time out with nothing to do is how the queue is known to be
+    /// empty.
+    @MainActor
+    private static func drainMainQueue() {
+        for _ in 0..<200 {
+            let started = Date()
+            RunLoop.main.run(mode: .default, before: started.addingTimeInterval(0.05))
+            if Date().timeIntervalSince(started) >= 0.04 { return }
+        }
     }
 
     /// Runs the main run loop until `condition` holds, and says whether it
