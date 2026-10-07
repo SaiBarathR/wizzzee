@@ -187,6 +187,13 @@ final class AppModel: ObservableObject {
     }
     @Published var hasFullDiskAccess = true
     @Published var dismissedAccessPrompt = false
+    /// True while the File View's filter has the keyboard.
+    ///
+    /// ⌘⌫ in a text field deletes back to the start of the line, and a menu
+    /// item's key is matched before the field is offered it. So the delete
+    /// keys stand down for as long as this is set, or clearing a filter would
+    /// send whatever was selected behind it to the Trash.
+    @Published var isEditingFilter = false
 
     // Tree View
     @Published private(set) var treeRows: [TreeRow] = []
@@ -216,6 +223,9 @@ final class AppModel: ObservableObject {
     @Published var showsTreemap = Preferences.showsTreemap
     @Published var treemapRoot: DirNode?
     @Published var hoveredRef: NodeRef?
+    /// The item the treemap is drawing its selection outline round, as the
+    /// map last reported it. See `TreemapNSView.onOutline`.
+    @Published var treemapOutline: NodeRef?
     /// Incremented whenever the tree is structurally changed, so the treemap
     /// knows to lay out again even though its root object is unchanged.
     @Published var treeRevision = 0
@@ -282,6 +292,13 @@ final class AppModel: ObservableObject {
 
     /// Keeps `volumes` in step with disks being mounted, ejected and renamed.
     private var volumeWatch: AnyCancellable?
+
+    /// True while the folder picker is up.
+    ///
+    /// Published, so the delete commands are greyed for as long as it is and
+    /// not merely refused when they arrive: a key that matches a greyed item
+    /// goes on to the panel, which is where ⌘⌫ was aimed.
+    @Published private(set) var isChoosingFolder = false
 
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?
@@ -478,6 +495,9 @@ final class AppModel: ObservableObject {
     }
 
     func chooseFolder() {
+        // The panel has a ⌘⌫ of its own, for the file selected in it.
+        isChoosingFolder = true
+        defer { isChoosingFolder = false }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -522,6 +542,7 @@ final class AppModel: ObservableObject {
         sharedStorageCache = [:]
         capacityAfterDelete = nil
         treemapRoot = nil
+        treemapOutline = nil
         expanded = []
         progress = ScanEngine.Progress()
         phase = .scanning
@@ -828,6 +849,98 @@ final class AppModel: ObservableObject {
         performBatch(on: refs, unlinks: true) {
             try FileActions.deletePermanently($0)
         }
+    }
+
+    // MARK: - Delete keys
+    //
+    // ⌘⌫ and ⌥⌘⌫, on the keys Finder has them on. The first moves to the Trash
+    // without asking, so both are held to what can be seen: the selection is
+    // one set shared by every tab, and it keeps a row that a collapsed folder
+    // or a change of tab has taken off the screen.
+
+    /// The part of the selection the current tab has on show.
+    var selectionOnShow: Set<NodeRef> { selection.filter(isOnShow) }
+
+    /// Whether the current tab has `ref` on show, as a test to run over the
+    /// selection.
+    private var isOnShow: (NodeRef) -> Bool {
+        switch tab {
+        case .tree:
+            // Staleness last: it walks to the root, and for a selection a
+            // collapsed folder has hidden the first test fails one step up.
+            return { ref in
+                (self.isTreeRow(ref) || self.isOutlinedInTreemap(ref))
+                    && !ref.isStale
+            }
+        case .files:
+            let rows = Set(fileRows.lazy.map(\.ref))
+            return { ref in !ref.isStale && rows.contains(ref) }
+        case .about:
+            return { _ in false }
+        }
+    }
+
+    /// Whether `rebuildTreeRows` gives `ref` a row: every folder above it has
+    /// to be open, and the root always has one.
+    ///
+    /// Asked of the folders rather than of `treeRows`, which is an array as
+    /// long as everything expanded: the menu asks this on every publish.
+    private func isTreeRow(_ ref: NodeRef) -> Bool {
+        var above: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
+        while let step = above {
+            guard expanded.contains(step.id) else { return false }
+            above = step.parent
+        }
+        return true
+    }
+
+    /// Whether the treemap is showing and `ref` is the one item it outlines.
+    /// A tile clicked on the map is selected without being given a row.
+    ///
+    /// Asked of the map, not worked out from where `ref` sits under the map's
+    /// root: plenty under there is never drawn, and stays selected all the
+    /// same.
+    private func isOutlinedInTreemap(_ ref: NodeRef) -> Bool {
+        showsTreemap && treemapOutline == ref && primarySelection == ref
+    }
+
+    /// False when the delete keys have nothing to act on or something is in
+    /// the way: a batch already running, a sheet waiting for an answer, the
+    /// filter or the folder picker holding the keyboard.
+    var canUseDeleteKeys: Bool {
+        !isDeleting && !isEditingFilter && !isChoosingFolder
+            && permanentDeleteTargets.isEmpty && actionError == nil
+            && selection.contains(where: isOnShow)
+    }
+
+    /// ⌘⌫: moves what is selected and on show to the Trash.
+    func trashSelection() {
+        guard let targets = deleteKeyTargets() else { return }
+        moveToTrash(targets)
+    }
+
+    /// ⌥⌘⌫: asks before deleting what is selected and on show for good.
+    func confirmDeletingSelection() {
+        guard let targets = deleteKeyTargets() else { return }
+        permanentDeleteTargets = targets
+    }
+
+    /// What a delete key acts on, or nil when it should do nothing.
+    ///
+    /// One item that can't be removed stops the lot, as it does in the context
+    /// menu — but with the reason on show, since a key that did nothing at all
+    /// is what a scan's root, selected the moment the scan lands, would give.
+    private func deleteKeyTargets() -> Set<NodeRef>? {
+        guard canUseDeleteKeys else { return nil }
+        let targets = selectionOnShow
+        if let refusal = targets.lazy
+            .compactMap({ self.deletionRefusal(for: $0) }).first
+        {
+            actionError = refusal.errorDescription
+            actionErrorDetail = refusal.recoverySuggestion
+            return nil
+        }
+        return targets
     }
 
     /// `refs` with anything already covered by a selected ancestor dropped.

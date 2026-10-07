@@ -15,6 +15,7 @@ struct StatusBar: View {
             } else {
                 contents
             }
+            treemapToggle
         }
         .font(.system(size: 10).monospacedDigit())
         .foregroundStyle(.secondary)
@@ -22,6 +23,30 @@ struct StatusBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    /// The View menu's Show / Hide Treemap, where the pointer already is.
+    ///
+    /// Greyed on the other tabs instead of removed, so the totals beside it
+    /// don't shift sideways with every change of tab.
+    private var treemapToggle: some View {
+        let title = model.showsTreemap ? "Hide Treemap" : "Show Treemap"
+        return Button {
+            model.toggleTreemap()
+        } label: {
+            Image(
+                systemName: model.showsTreemap
+                    ? "rectangle.3.group.fill" : "rectangle.3.group"
+            )
+            .font(.system(size: 11))
+        }
+        .buttonStyle(.borderless)
+        .disabled(model.tab != .tree)
+        .help(
+            model.tab == .tree
+                ? "\(title) (⌘T)" : "The treemap is part of Tree View"
+        )
+        .accessibilityLabel(title)
     }
 
     private func deleting(_ progress: AppModel.DeleteProgress) -> some View {

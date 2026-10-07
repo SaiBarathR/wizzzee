@@ -20,7 +20,8 @@ struct TreemapPane: View {
                 layoutQueue: model.treemapQueue,
                 onSelect: { ref in model.selection = [ref] },
                 onZoom: { dir in model.zoom(into: dir) },
-                onHover: { ref in model.hoveredRef = ref }
+                onHover: { ref in model.hoveredRef = ref },
+                onOutline: { ref in model.treemapOutline = ref }
             )
             .contextMenu {
                 if !model.selection.isEmpty {
@@ -28,6 +29,9 @@ struct TreemapPane: View {
                 }
             }
         }
+        // A map that has been put away outlines nothing, and is not there to
+        // say so.
+        .onDisappear { model.treemapOutline = nil }
     }
 
     private var breadcrumb: some View {

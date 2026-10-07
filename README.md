@@ -68,18 +68,26 @@ rebuilding.
   filter to search by name; include a `/` to match against the full path.
 - **Treemap** — every file as a rectangle, area proportional to size, colored by
   extension. Click to select, double-click a folder to zoom in, and use the
-  arrows in the strip above it to zoom back out. **View ▸ Hide Treemap** gives
-  the whole tab to the table; showing it again keeps the zoom you left it at, and
-  whichever way you leave it is how it opens next launch.
+  arrows in the strip above it to zoom back out. **View ▸ Hide Treemap**, or the
+  button at the right-hand end of the status bar, gives the whole tab to the
+  table; showing it again keeps the zoom you left it at, and whichever way you
+  leave it is how it opens next launch.
 - **Right-click anything** for Reveal in Finder, Open, Open in Terminal, Copy
   Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the
   way up the tree without rescanning.
+- **`⌘⌫` and `⌥⌘⌫`** do what they do in Finder, to whatever is selected: the
+  first moves it to the Trash straight away, the second asks and then deletes it
+  for good. They act only on a selection you can see — a row in the tab in
+  front, or the tile outlined on the treemap — and leave `⌘⌫` to the File View
+  filter while you are typing in it.
 
 | Shortcut | Action |
 | --- | --- |
 | `Return` | Scan |
 | `⌘.` | Stop a running scan |
 | `⌘R` | Rescan |
+| `⌘⌫` | Move the selection to the Trash |
+| `⌥⌘⌫` | Delete the selection permanently, after confirming |
 | `⌘T` | Show or hide the treemap |
 | `⌘[` | Zoom the treemap out |
 | `⌘0` | Reset the treemap zoom |
@@ -192,7 +200,7 @@ dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest
 ```
 
 `--selftest` builds a throwaway tree with known contents and checks the scanner
-and both delete paths against ground truth — 297 checks, no permissions needed.
+and both delete paths against ground truth — 317 checks, no permissions needed.
 CI runs it on every push, along with a universal-binary and signature check.
 
 ## Releasing
