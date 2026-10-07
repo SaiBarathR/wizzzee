@@ -151,7 +151,14 @@ show even when its files are longer than the volume, hard-link deduplication,
 extension statistics, filtering and ranking, that trashing and permanent deletion adjust
 every ancestor's totals correctly, that System Integrity Protection paths are
 refused, and that a stopped scan is reported as cancelled while an unreadable
-root is reported as an error.
+root is reported as an error. It also covers what a search finds and counts,
+that a move to the Trash can be undone and leaves the tree as a fresh scan
+finds it, what bringing something back refuses to do, and what a rescan puts
+back.
+
+It runs on preferences of its own, so what was last chosen in the app has no
+bearing on it. A few checks put the real window together off screen and ask
+its tables what they are showing.
 
 The delete path gets the most attention because it is the one place a bug does
 real damage: it removes user files and then adjusts totals in place rather than
