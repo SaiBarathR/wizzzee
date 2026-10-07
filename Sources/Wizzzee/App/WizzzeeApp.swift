@@ -30,6 +30,14 @@ struct WizzzeeApp: App {
             // out is enough — a key that matches a disabled item goes on to
             // whatever has the keyboard.
             CommandGroup(replacing: .newItem) {
+                // Space does the same on a row. That one is the table's own,
+                // so it can't be shown here; this is the one that can.
+                Button(model.selectionIsMarked ? "Unmark" : "Mark for Removal") {
+                    model.markSelection()
+                }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                    .disabled(!model.canMarkSelection)
+                Divider()
                 Button("Move to Trash") {
                     if TextEntry.isUnderWay {
                         TextEntry.deleteToBeginningOfLine()

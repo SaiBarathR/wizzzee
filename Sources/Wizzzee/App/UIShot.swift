@@ -22,6 +22,7 @@ enum UIShot {
         var hideAccessBanner = false
         var showTreemap = true
         var metric = SizeMetric.allocated
+        var markCount = 0
 
         var index = 0
         while index < arguments.count {
@@ -71,6 +72,11 @@ enum UIShot {
                 // rendered without a screen capture.
                 showTreemap = false
                 index += 1
+            case "--mark":
+                // Marks are put on by clicking, so a picture of the list of
+                // them needs some put on for it.
+                markCount = Int(next ?? "1") ?? 1
+                index += 2
             case "--zoom":
                 zoomDepth = Int(next ?? "1") ?? 1
                 index += 2
@@ -150,6 +156,27 @@ enum UIShot {
         }
         if zoomDepth > 0 {
             print("zoomed to \(model.treemapRoot?.path ?? "—")")
+        }
+        if markCount > 0, var folder = model.result?.root {
+            // The first folder down from the root with enough in it to leave
+            // something unmarked, so the picture shows both.
+            while folder.subdirs.count + folder.files.count <= markCount,
+                let only = folder.subdirs.max(by: {
+                    $0.bytes(using: metric) < $1.bytes(using: metric)
+                })
+            {
+                folder = only
+            }
+            var children = folder.subdirs.map { NodeRef($0) }
+            children += folder.files.indices.map {
+                NodeRef(dir: folder, fileIndex: $0)
+            }
+            children.sort { $0.bytes(using: metric) > $1.bytes(using: metric) }
+            model.revealInTree(NodeRef(folder))
+            model.setExpanded(folder, true)
+            // Not the largest, so the marked tiles are not most of the map.
+            model.setMarked(Set(children.dropFirst().prefix(markCount)), true)
+            model.showsMarks = true
         }
         if tab == .files { model.refreshFileRows(immediately: true) }
 

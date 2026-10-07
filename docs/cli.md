@@ -88,6 +88,7 @@ Wizzzee --uishot --tab files --path /System/Library \
 | `--zoom N` | `0` | Zoom the treemap N levels into the largest folder |
 | `--metric size\|disk` | `disk` | Which measure is on show, as the Size / On Disk control sets it |
 | `--select-largest` | off | Select the biggest item before rendering |
+| `--mark N` | `0` | Mark N items for removal and open the list of them |
 | `--no-access-banner` | off | Hide the Full Disk Access warning |
 | `--no-treemap` | off | Hide the treemap, as the View menu's Hide Treemap does |
 

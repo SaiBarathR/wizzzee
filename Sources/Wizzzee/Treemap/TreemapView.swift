@@ -19,9 +19,14 @@ struct TreemapCanvas: NSViewRepresentable {
     let onZoom: (DirNode) -> Void
     let onHover: (NodeRef?) -> Void
     let onOutline: (NodeRef?) -> Void
+    /// What is marked for removal, which the map draws hatched.
+    let marks: Set<NodeRef>
+    let onMark: (NodeRef) -> Void
 
     func makeNSView(context: Context) -> TreemapNSView {
         let view = TreemapNSView()
+        view.onMark = onMark
+        view.marks = marks
         view.layoutQueue = layoutQueue
         view.liveRevision = liveRevision
         view.onSelect = onSelect
@@ -38,6 +43,8 @@ struct TreemapCanvas: NSViewRepresentable {
         view.onZoom = onZoom
         view.onHover = onHover
         view.onOutline = onOutline
+        view.onMark = onMark
+        view.marks = marks
         view.selection = selection
         view.apply(root: root, metric: metric, revision: revision)
     }
@@ -58,6 +65,21 @@ final class TreemapNSView: NSView {
     var onOutline: ((NodeRef?) -> Void)?
     /// Asks the model for the tree's revision as it is this instant.
     var liveRevision: (() -> Int)?
+    /// Told which tile was ⌘-clicked, to have its mark put on or taken off.
+    var onMark: ((NodeRef) -> Void)?
+
+    /// What is marked for removal. Their tiles are hatched, so what is about
+    /// to go can be seen for the share of the disk it is.
+    var marks: Set<NodeRef> = [] {
+        didSet {
+            guard marks != oldValue else { return }
+            hatched = nil
+            needsDisplay = true
+        }
+    }
+    /// Where the hatching goes, worked out once per change of marks or
+    /// layout: drawing happens on every move of the pointer.
+    private var hatched: [CGRect]?
 
     var selection: NodeRef? {
         didSet {
@@ -234,6 +256,7 @@ final class TreemapNSView: NSView {
                 self.model = built
                 self.modelRevision = revision
                 self.image = rendered.map { NSImage(cgImage: $0, size: size) }
+                self.hatched = nil
                 self.needsDisplay = true
                 self.reportOutline()
             }
@@ -255,6 +278,7 @@ final class TreemapNSView: NSView {
         image.draw(in: bounds)
 
         drawGroupBorders(in: context)
+        drawMarks(in: context)
         drawFolderLabels()
 
         if let selection, let rect = rect(for: selection) {
@@ -305,6 +329,60 @@ final class TreemapNSView: NSView {
             context.stroke(frame.rect.insetBy(dx: 0.25, dy: 0.25))
         }
         context.restoreGState()
+    }
+
+    /// The parts of the map that are marked for removal.
+    ///
+    /// A marked file is its tile, and a marked folder is its whole group — or
+    /// its one tile, where it is too small to have been broken down. One pass
+    /// over what was laid out, asking each whether it is marked, not a search
+    /// of the layout per mark: there can be a great many of either.
+    ///
+    /// Zoomed to somewhere inside a marked folder, everything on show is
+    /// going with it, and nothing on show is the thing that was marked.
+    var markedRects: [CGRect] {
+        guard !marks.isEmpty, let root = model.root else { return [] }
+        if ([root] + model.ancestors).contains(where: { marks.contains(NodeRef($0)) }) {
+            return [CGRect(origin: .zero, size: model.size)]
+        }
+        var rects: [CGRect] = []
+        for frame in model.frames where marks.contains(NodeRef(frame.dir)) {
+            rects.append(frame.rect)
+        }
+        for cell in model.cells where marks.contains(cell.ref) {
+            rects.append(cell.rect)
+        }
+        return rects
+    }
+
+    /// Diagonal lines over a darkened tile: still the tile it was, plainly
+    /// struck through.
+    private func drawMarks(in context: CGContext) {
+        guard showsCurrentTree, !marks.isEmpty else { return }
+        let rects = hatched ?? markedRects
+        hatched = rects
+        let spacing: CGFloat = 6
+
+        for rect in rects where rect.width > 2 && rect.height > 2 {
+            context.saveGState()
+            context.clip(to: rect)
+            context.setFillColor(NSColor(white: 0, alpha: 0.38).cgColor)
+            context.fill(rect)
+            context.setStrokeColor(NSColor(white: 1, alpha: 0.5).cgColor)
+            context.setLineWidth(1)
+            var x = rect.minX - rect.height
+            while x < rect.maxX {
+                context.move(to: CGPoint(x: x, y: rect.maxY))
+                context.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
+                x += spacing
+            }
+            context.strokePath()
+            context.restoreGState()
+
+            context.setStrokeColor(NSColor(white: 1, alpha: 0.75).cgColor)
+            context.setLineWidth(1)
+            context.stroke(rect.insetBy(dx: 0.5, dy: 0.5))
+        }
     }
 
     /// Labels folder groups at their top-left, WizTree style.
@@ -538,6 +616,13 @@ final class TreemapNSView: NSView {
                 return
             }
             if let cell = model.cell(at: point) { onZoom?(cell.ref.dir) }
+            return
+        }
+
+        // ⌘-click marks, as it adds to a selection in a table: the tile is
+        // put among the marks, or taken out, and what is selected is left be.
+        if event.modifierFlags.contains(.command) {
+            if let cell = model.cell(at: point) { onMark?(cell.ref) }
             return
         }
 

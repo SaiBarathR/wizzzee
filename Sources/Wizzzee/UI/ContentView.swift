@@ -25,6 +25,14 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+            if model.showsMarks && !model.marks.isEmpty {
+                Divider()
+                // Tall enough for a handful and no taller than a third of a
+                // small window: past that the list scrolls.
+                MarksDrawer(model: model)
+                    .frame(height: min(220, CGFloat(model.marks.count) * 22 + 34))
+            }
+
             Divider()
             StatusBar(model: model)
         }

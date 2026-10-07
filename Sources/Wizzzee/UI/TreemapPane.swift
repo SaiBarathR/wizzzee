@@ -21,7 +21,9 @@ struct TreemapPane: View {
                 onSelect: { ref in model.selection = [ref] },
                 onZoom: { dir in model.zoom(into: dir) },
                 onHover: { ref in model.hoveredRef = ref },
-                onOutline: { ref in model.treemapOutline = ref }
+                onOutline: { ref in model.treemapOutline = ref },
+                marks: model.marks,
+                onMark: { ref in model.toggleMarks([ref]) }
             )
             .contextMenu {
                 if !model.selection.isEmpty {
@@ -70,7 +72,7 @@ struct TreemapPane: View {
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(.secondary)
             } else {
-                Text("Double-click a folder to zoom in")
+                Text("Double-click a folder to zoom in  •  ⌘-click to mark")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }

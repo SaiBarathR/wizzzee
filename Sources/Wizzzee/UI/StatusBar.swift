@@ -10,6 +10,9 @@ struct StatusBar: View {
             // A delete takes over the strip while it runs. It is the only thing
             // happening, it can take minutes on a large tree, and the Stop has
             // to be somewhere the user is already looking.
+            // Ahead of everything else, and there whatever the rest of the
+            // strip is showing: it is the way back to what has been marked.
+            if !model.marks.isEmpty { MarksChip(model: model) }
             if let progress = model.deleteProgress {
                 deleting(progress)
             } else {

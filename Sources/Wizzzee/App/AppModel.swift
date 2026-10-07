@@ -230,6 +230,16 @@ final class AppModel: ObservableObject {
     /// knows to lay out again even though its root object is unchanged.
     @Published var treeRevision = 0
 
+    // Marks
+    /// What has been picked out for removal. See the Marks section below.
+    @Published private(set) var marks: Set<NodeRef> = []
+    /// How many marks lie beneath each folder, keyed on `DirNode.id`, so a
+    /// folder's row can say there is something marked inside it without
+    /// looking through everything it holds.
+    private var marksBeneath: [UInt64: Int] = [:]
+    /// Whether the list of marks is open above the status bar.
+    @Published var showsMarks = false
+
     // Errors surfaced as a sheet
     @Published var actionError: String?
     @Published var actionErrorDetail: String?
@@ -573,8 +583,9 @@ final class AppModel: ObservableObject {
         fileRows = []
         selection = []
         // A delete still awaiting confirmation names items in the tree being
-        // thrown away, so it goes with the selection.
+        // thrown away, so it goes with the selection. So do the marks.
         permanentDeleteTargets = []
+        clearMarks()
         sharedStorageCache = [:]
         capacityAfterDelete = nil
         treemapRoot = nil
@@ -942,6 +953,179 @@ final class AppModel: ObservableObject {
         return items + "  •  "
             + "\(ByteFormat.decimal(min(progress.bytes, progress.bytesTotal))) of "
             + ByteFormat.decimal(progress.bytesTotal)
+    }
+
+    // MARK: - Marks
+    //
+    // What has been picked out for removal, kept apart from the selection.
+    // The selection is what is being looked at: one plain click replaces it,
+    // and a collapsed folder or a change of tab takes it off the screen. A
+    // mark stays where it was put until it is taken off or acted on, so items
+    // from different folders can be gathered up, looked over, and removed
+    // together.
+
+    /// How an item stands with the marks.
+    enum MarkState {
+        /// Not marked, and holding nothing that is.
+        case none
+        /// Marked itself.
+        case marked
+        /// Inside a folder that is marked, and so going with it.
+        case covered
+        /// A folder with something marked inside it.
+        case partial
+    }
+
+    func markState(_ ref: NodeRef) -> MarkState {
+        guard !marks.isEmpty else { return .none }
+        if marks.contains(ref) { return .marked }
+        var above: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
+        while let step = above {
+            if marks.contains(NodeRef(step)) { return .covered }
+            above = step.parent
+        }
+        if ref.isDirectory, marksBeneath[ref.dir.id, default: 0] > 0 {
+            return .partial
+        }
+        return .none
+    }
+
+    /// False for what may not be removed at all — a scan's root, a volume or
+    /// home folder, the sealed system volume. A mark there would be a promise
+    /// the delete then broke.
+    func canMark(_ ref: NodeRef) -> Bool {
+        !ref.isStale && deletionRefusal(for: ref) == nil
+    }
+
+    /// Marks `refs`, or takes their marks off when every one of them that can
+    /// carry a mark already does — what a checkbox over several rows does.
+    func toggleMarks(_ refs: Set<NodeRef>) {
+        let eligible = refs.filter { canMark($0) && markState($0) != .covered }
+        guard !eligible.isEmpty else { return }
+        setMarked(eligible, !eligible.allSatisfy(marks.contains))
+    }
+
+    /// Puts marks on `refs` or takes them off.
+    ///
+    /// A folder's mark stands for everything in it. So a mark on something
+    /// already inside a marked folder is not added, marks beneath a folder
+    /// that is being marked are dropped, and a folder given together with its
+    /// own contents is marked once — which keeps the marks from ever nesting,
+    /// and the list of them from counting anything twice.
+    func setMarked(_ refs: Set<NodeRef>, _ marked: Bool) {
+        var next = marks
+        if marked {
+            for ref in distinctTargets(refs)
+            where canMark(ref) && markState(ref) != .covered {
+                if ref.isDirectory {
+                    next = next.filter { !Self.isWithin($0, ref.dir) }
+                }
+                next.insert(ref)
+            }
+        } else {
+            next.subtract(refs)
+        }
+        setMarks(next)
+    }
+
+    func clearMarks() { setMarks([]) }
+
+    /// Whether Space and the menu have anything to mark: what is selected and
+    /// on show, as for the delete keys, less whatever can't carry a mark.
+    var canMarkSelection: Bool {
+        guard !isEditingFilter else { return false }
+        let onShow = isOnShow
+        // Cheapest first: `canMark` builds a path, and this is asked on
+        // every publish.
+        return selection.contains { ref in
+            onShow(ref) && markState(ref) != .covered && canMark(ref)
+        }
+    }
+
+    /// True when marking the selection would take marks off: every part of
+    /// it that is on show and can carry a mark already does. For the menu's
+    /// wording.
+    var selectionIsMarked: Bool {
+        let onShow = isOnShow
+        guard selection.contains(where: { marks.contains($0) && onShow($0) })
+        else { return false }
+        return !selection.contains { ref in
+            onShow(ref) && !marks.contains(ref) && markState(ref) != .covered
+                && canMark(ref)
+        }
+    }
+
+    /// Marks what is selected and on show, or takes those marks off. False
+    /// when there was nothing to act on, so the key can go on to something
+    /// else that wants it.
+    @discardableResult
+    func markSelection() -> Bool {
+        guard canMarkSelection else { return false }
+        toggleMarks(selectionOnShow)
+        return true
+    }
+
+    /// The one place the marks are assigned, so the count kept beneath each
+    /// folder can't fall out of step with them.
+    private func setMarks(_ next: Set<NodeRef>) {
+        guard next != marks else { return }
+        marks = next
+        var beneath: [UInt64: Int] = [:]
+        for ref in next {
+            var above: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
+            while let step = above {
+                beneath[step.id, default: 0] += 1
+                above = step.parent
+            }
+        }
+        marksBeneath = beneath
+        // Nothing left to list, so the list is put away and starts shut the
+        // next time something is marked.
+        if next.isEmpty { showsMarks = false }
+    }
+
+    /// Whether `ref` is somewhere inside `dir`.
+    private static func isWithin(_ ref: NodeRef, _ dir: DirNode) -> Bool {
+        var above: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
+        while let step = above {
+            if step === dir { return true }
+            above = step.parent
+        }
+        return false
+    }
+
+    /// The marks as the list shows them: biggest first by the measure on
+    /// show, and by name where that ties.
+    var markedItems: [NodeRef] {
+        marks.sorted { a, b in
+            let (left, right) = (a.bytes(using: sizeMetric), b.bytes(using: sizeMetric))
+            if left != right { return left > right }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+    }
+
+    /// What removing every mark would give back, in the measure on show: the
+    /// same figure a selection of them is quoted, with a hard link's bytes
+    /// left out where another name would keep them on disk.
+    var markedBytes: UInt64 { reclaimableSize(marks) }
+
+    /// The status bar's line for the marks.
+    var marksSummary: String {
+        "\(ByteFormat.count(marks.count)) marked  •  "
+            + ByteFormat.decimal(markedBytes)
+    }
+
+    /// Moves every marked item to the Trash. Unasked, like ⌘⌫: the list of
+    /// them, open beside the button, is the looking-over.
+    func trashMarked() {
+        guard !isDeleting, !marks.isEmpty else { return }
+        moveToTrash(marks)
+    }
+
+    /// Asks before deleting every marked item for good.
+    func confirmDeletingMarked() {
+        guard !isDeleting, !marks.isEmpty else { return }
+        permanentDeleteTargets = marks
     }
 
     // MARK: - Delete keys
@@ -1566,6 +1750,9 @@ final class AppModel: ObservableObject {
         // same rows less those — which it can take out without redrawing the
         // rest.
         selection = selection.filter { !$0.isStale }
+        // A mark on something that went has done its job; one on something
+        // that could not be removed stays, to be tried again or taken off.
+        setMarks(marks.filter { !$0.isStale })
         // A delete still awaiting confirmation quoted what it would free
         // before this one changed that, so it is asked for again.
         permanentDeleteTargets = []

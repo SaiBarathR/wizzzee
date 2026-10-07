@@ -161,6 +161,16 @@ Deleting adjusts totals up the ancestor chain rather than recomputing, so the
 whole UI updates instantly after a delete. That path is the one place a bug does
 real damage, so `--selftest` checks it against ground truth rather than by eye.
 
+The selection and the marks are two sets and are kept apart on purpose. The
+selection is what is being looked at: a plain click replaces it, and a
+collapsed folder or a change of tab takes it off the screen, which is why the
+delete keys only act on the part of it that is on show. The marks are what has
+been decided on. They live in the model, not in a table, so they outlast all of
+that, and they never nest — a folder's mark stands for everything in it — so
+the list of them can be totalled without counting anything twice. Both are sets
+of `NodeRef`, which is only workable because a delete no longer renumbers what
+it leaves behind.
+
 ### `Removal` — deleting with something to show for it
 
 Deleting for good goes through `removefile(3)`, the routine underneath
@@ -207,7 +217,7 @@ Sources/Wizzzee/
   Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer,
               TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,
-              StatusBar, ItemContextMenu
+              StatusBar, ItemContextMenu, Marks
   App/        Main, WizzzeeApp, AppModel, AppInfo, Preferences, CLI, SelfTest,
               UIShot
 scripts/      build-app.sh, validate-release.sh, make-icon.swift

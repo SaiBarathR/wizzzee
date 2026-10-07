@@ -43,6 +43,8 @@ struct ItemContextMenu: View {
         if let refusal = model.deletionRefusal(for: ref) {
             Text(Self.menuNote(for: refusal))
         } else {
+            markItem([ref])
+            Divider()
             Button("Move to Trash") { model.moveToTrash(ref) }
                 .disabled(model.isDeleting)
             Button("Delete Permanently…") { model.permanentDeleteTargets = [ref] }
@@ -61,6 +63,21 @@ struct ItemContextMenu: View {
         }
     }
 
+    /// Marks what was clicked, or takes the marks off when all of it that can
+    /// carry one already does. Greyed for something inside a marked folder,
+    /// which is going with the folder either way.
+    @ViewBuilder
+    private func markItem(_ refs: Set<NodeRef>) -> some View {
+        let open = refs.filter { model.markState($0) != .covered }
+        Button(
+            !open.isEmpty && open.allSatisfy(model.marks.contains)
+                ? "Unmark" : "Mark for Removal"
+        ) {
+            model.toggleMarks(refs)
+        }
+        .disabled(open.isEmpty)
+    }
+
     /// Reveal, Open and Zoom all describe one item and have no sensible reading
     /// across a set, so a multiple selection is offered only the two actions
     /// that genuinely apply to all of it.
@@ -73,6 +90,8 @@ struct ItemContextMenu: View {
         if model.isDeletionRefused(refs) {
             Text("Some can't be removed — protected, or a root folder")
         } else {
+            markItem(refs)
+            Divider()
             Button("Move \(ByteFormat.count(refs.count)) Items to Trash") {
                 model.moveToTrash(refs)
             }
