@@ -239,21 +239,51 @@ final class AppModel: ObservableObject {
     /// How far a running delete batch has got. Nil when none is running.
     @Published private(set) var deleteProgress: DeleteProgress?
 
-    /// Progress of a delete batch, counted in top-level targets.
+    /// Progress of a delete batch.
     ///
-    /// Not in bytes: `FileManager.removeItem` recurses into a directory itself
-    /// and reports nothing on the way, so the honest unit is the item, and a
-    /// single huge tree is one long step.
+    /// Counted in files and folders removed, against what the scan found under
+    /// the targets. It was counted in top-level targets, because
+    /// `FileManager.removeItem` reported nothing on its way through a folder —
+    /// so deleting one folder, which is the usual case, was a bar that sat at
+    /// nothing until it was all over.
+    ///
+    /// The disk may have changed since the scan, so the totals are what was
+    /// expected rather than a promise, and `fraction` stops at 1.
     struct DeleteProgress: Equatable {
+        /// Top-level targets finished, and how many there are.
         var done: Int
         var total: Int
-        /// The item about to be removed, for the status line.
+        /// The target in hand, for the status line.
         var currentName: String
+        /// Files and folders removed so far, and what the scan counted.
+        var items = 0
+        var itemsTotal = 0
+        /// The space they occupied, and what the scan counted.
+        var bytes: UInt64 = 0
+        var bytesTotal: UInt64 = 0
 
         var fraction: Double {
-            total > 0 ? Double(done) / Double(total) : 0
+            guard itemsTotal > 0 else {
+                return total > 0 ? Double(done) / Double(total) : 0
+            }
+            return min(1, Double(items) / Double(itemsTotal))
         }
     }
+
+    /// The targets of the batch in hand, once it has run long enough to be
+    /// worth showing: their rows are set back until they go.
+    ///
+    /// Not from the first instant. A move to the Trash is over in a frame or
+    /// two, and a row that dimmed and then vanished would be the flicker this
+    /// is here to avoid.
+    @Published private(set) var removing: Set<NodeRef> = []
+
+    /// How long a batch runs before its rows are set back, in nanoseconds.
+    ///
+    /// A property so the self-test can ask for none: a batch that outlasts a
+    /// fifth of a second there would be one that depended on how fast the
+    /// disk was that day.
+    var removingGrace: UInt64 = 200_000_000
 
     /// What a folder holds that deleting it would not free.
     private struct SharedStorage {
@@ -302,6 +332,12 @@ final class AppModel: ObservableObject {
 
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?
+    /// Asks the removal in hand to stop at its next entry.
+    private var deleteStop: Removal.Stop?
+    /// Tells one batch's progress reports from the next one's: a report is
+    /// sent from the thread doing the removing and can land after its batch
+    /// has ended.
+    private var deleteBatch = 0
     private var fileFilterWork: DispatchWorkItem?
     /// Lets a walk already running on `treeQueue` give up part-way.
     ///
@@ -678,7 +714,7 @@ final class AppModel: ObservableObject {
         into rows: inout [TreeRow]
     ) {
         let isOpen = isExpanded(dir)
-        let hasChildren = !dir.subdirs.isEmpty || !dir.files.isEmpty
+        let hasChildren = !dir.isEmpty
         rows.append(
             TreeRow(
                 ref: NodeRef(dir),
@@ -694,10 +730,19 @@ final class AppModel: ObservableObject {
         var children: [NodeRef] = []
         children.reserveCapacity(dir.subdirs.count + dir.files.count)
         for sub in dir.subdirs { children.append(NodeRef(sub)) }
-        for index in dir.files.indices {
+        for index in dir.files.indices where !dir.files[index].isRemoved {
             children.append(NodeRef(dir: dir, fileIndex: index))
         }
-        children.sort { sort.compare($0, $1) == .orderedAscending }
+        // Rows the order can't tell apart stay as they were listed. Left to
+        // the sort, which promises nothing about them, a delete elsewhere in
+        // the folder could swap two files of one size.
+        children = children.enumerated().sorted { a, b in
+            switch sort.compare(a.element, b.element) {
+            case .orderedAscending: return true
+            case .orderedDescending: return false
+            case .orderedSame: return a.offset < b.offset
+            }
+        }.map(\.element)
 
         for (offset, child) in children.enumerated() {
             let last = offset == children.count - 1
@@ -785,7 +830,7 @@ final class AppModel: ObservableObject {
                     self.fileQuery == query,
                     self.treeRevision == revision, self.result === source
                 else { return }
-                self.fileRows = rows.sorted(using: self.fileSort)
+                self.fileRows = self.inFileOrder(rows)
                 self.isFilteringFiles = false
             }
         }
@@ -797,7 +842,25 @@ final class AppModel: ObservableObject {
     }
 
     func resortFileRows() {
-        fileRows = fileRows.sorted(using: fileSort)
+        fileRows = inFileOrder(fileRows)
+    }
+
+    /// `rows` in the order the File View is sorted by, with those it can't
+    /// tell apart left in the order they came in — which, fresh from a walk,
+    /// is the order the walk found them in. The sort alone promises nothing
+    /// about rows that compare equal, and files of one size are common.
+    private func inFileOrder(_ rows: [FileRow]) -> [FileRow] {
+        let comparators = fileSort
+        return rows.enumerated().sorted { a, b in
+            for comparator in comparators {
+                switch comparator.compare(a.element, b.element) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame: continue
+                }
+            }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     // MARK: - Treemap visibility
@@ -814,7 +877,7 @@ final class AppModel: ObservableObject {
     var canZoomOut: Bool { treemapRoot?.parent != nil }
 
     func zoom(into dir: DirNode) {
-        guard !dir.subdirs.isEmpty || !dir.files.isEmpty else { return }
+        guard !dir.isEmpty else { return }
         treemapRoot = dir
     }
 
@@ -832,23 +895,53 @@ final class AppModel: ObservableObject {
     /// refuse to start another.
     var isDeleting: Bool { deleteProgress != nil }
 
-    /// Stops a running batch after the item currently being removed.
-    func cancelDelete() { deleteTask?.cancel() }
+    /// Stops a running batch: at the next file for a delete, which can be
+    /// part-way through a folder, and after the item in hand for a move to
+    /// the Trash, which is a single step.
+    func cancelDelete() {
+        deleteTask?.cancel()
+        deleteStop?.request()
+    }
 
     func moveToTrash(_ ref: NodeRef) { moveToTrash([ref]) }
 
-    func moveToTrash(_ refs: Set<NodeRef>) {
-        // A name in the Trash is moved, not removed: it is still a name for its
-        // inode, so whatever shared storage with it still does.
-        performBatch(on: refs, unlinks: false) { try FileActions.moveToTrash($0) }
-    }
+    func moveToTrash(_ refs: Set<NodeRef>) { performBatch(on: refs, as: .trash) }
 
     func deletePermanently(_ ref: NodeRef) { deletePermanently([ref]) }
 
     func deletePermanently(_ refs: Set<NodeRef>) {
-        performBatch(on: refs, unlinks: true) {
-            try FileActions.deletePermanently($0)
+        performBatch(on: refs, as: .delete)
+    }
+
+    /// Whether `ref` is on its way out with the batch in hand, itself or
+    /// inside a folder that is.
+    func isBeingRemoved(_ ref: NodeRef) -> Bool {
+        guard !removing.isEmpty else { return false }
+        if removing.contains(ref) { return true }
+        var above: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
+        while let step = above {
+            if removing.contains(NodeRef(step)) { return true }
+            above = step.parent
         }
+        return false
+    }
+
+    /// The status line's figures for a batch in hand: how many of the files
+    /// and folders the scan counted have gone, and the space they held.
+    ///
+    /// The space stops at what the scan counted. A hard link's bytes are
+    /// counted under one of its names and removing any of them reports the
+    /// lot, so the running figure can pass a total it was never part of.
+    func deleteSummary(_ progress: DeleteProgress) -> String {
+        let items =
+            "\(ByteFormat.count(min(progress.items, progress.itemsTotal))) of "
+            + ByteFormat.counted(progress.itemsTotal, "item")
+        // Nothing to say about space when what is going takes none: a folder
+        // of empty files read "0 bytes of 0 bytes" the whole way through.
+        guard progress.bytesTotal > 0 else { return items }
+        return items + "  •  "
+            + "\(ByteFormat.decimal(min(progress.bytes, progress.bytesTotal))) of "
+            + ByteFormat.decimal(progress.bytesTotal)
     }
 
     // MARK: - Delete keys
@@ -951,8 +1044,9 @@ final class AppModel: ObservableObject {
         let selectedDirs = Set(
             refs.lazy.filter(\.isDirectory).map { ObjectIdentifier($0.dir) }
         )
-        // A reference whose folder has since been renumbered names either
-        // nothing or the wrong file, so it is dropped rather than acted on.
+        // A reference to something that has since been deleted, or that was
+        // in a folder that has, names nothing, so it is dropped rather than
+        // acted on.
         return refs.filter { !$0.isStale }.filter { ref in
             // A file's containing directory counts as an ancestor; a directory's
             // does not, or every folder would exclude itself.
@@ -1082,9 +1176,40 @@ final class AppModel: ObservableObject {
         return shared
     }
 
+    /// What a batch does with each of its targets.
+    private enum Disposal {
+        /// Moved to the Trash. The name leaves the tree and is still a name
+        /// for its inode, so whatever shared storage with it still does.
+        case trash
+        /// Removed outright.
+        case delete
+
+        var unlinks: Bool { self == .delete }
+    }
+
+    /// A target of a batch, as the thread doing the removing is handed it.
+    ///
+    /// Sent across on the batch's say-so. Nothing changes the tree while a
+    /// batch runs — the batch itself only does once it is back on the main
+    /// actor, and a scan can't start until then — so it is safe to read from
+    /// there, and reading is all the removal does with it.
+    private struct Target: @unchecked Sendable {
+        let ref: NodeRef
+        let path: String
+    }
+
+    /// How one target came out.
+    private struct Disposed: @unchecked Sendable {
+        /// What has left the disk: the target, or, where only part of a
+        /// folder went, the files and folders in it that did.
+        var gone: [NodeRef] = []
+        var failure: (title: String, detail: String)?
+        var tally = Removal.Tally()
+    }
+
     /// Runs a delete batch off the main actor, reporting progress as it goes.
     ///
-    /// `removeItem` on a large tree is tens of seconds to minutes of `unlink(2)`.
+    /// Removing a large tree is tens of seconds to minutes of `unlink(2)`.
     /// Run on the main actor — which is where every caller of this is — it
     /// stopped the run loop for the whole of that: no spinner, no progress, no
     /// cancel, and long enough that the responsiveness watchdog could kill the
@@ -1094,21 +1219,14 @@ final class AppModel: ObservableObject {
     /// One target at a time rather than concurrently: the batch is already
     /// deduplicated to non-overlapping subtrees, and deleting several huge trees
     /// at once only makes the disk seek more.
-    ///
-    /// `unlinks` says whether `body` removes a name outright or only moves it
-    /// out of the tree, which decides what its hard-linked partners are told.
-    private func performBatch(
-        on refs: Set<NodeRef>,
-        unlinks: Bool,
-        _ body: @escaping @Sendable (String) throws -> Void
-    ) {
+    private func performBatch(on refs: Set<NodeRef>, as disposal: Disposal) {
         // One batch at a time. A second started mid-flight would resolve its
         // paths against a tree the first is still changing.
         guard deleteTask == nil else { return }
 
-        // Paths are resolved up front: removing one file renumbers its siblings,
-        // so a NodeRef read after the first deletion would name the wrong path.
-        let targets = distinctTargets(refs).map { (ref: $0, path: $0.path) }
+        // Paths are resolved up front, on the main actor, where the folders
+        // above each target are known to be alive.
+        let targets = distinctTargets(refs).map { Target(ref: $0, path: $0.path) }
         guard !targets.isEmpty else { return }
 
         let refusals = targets.compactMap { deletionRefusal(for: $0.ref) }
@@ -1122,69 +1240,231 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let paths = allowed.map(\.path)
+        deleteBatch += 1
+        let batch = deleteBatch
+        let stop = Removal.Stop()
+        deleteStop = stop
         deleteProgress = DeleteProgress(
             done: 0,
-            total: paths.count,
-            currentName: (paths[0] as NSString).lastPathComponent
+            total: allowed.count,
+            currentName: (allowed[0].path as NSString).lastPathComponent,
+            itemsTotal: allowed.reduce(0) { $0 + Self.scanned($1.ref).items },
+            bytesTotal: allowed.reduce(0) { $0 + Self.scanned($1.ref).bytes }
         )
+        let attempted = targets.count
+        let onTheirWayOut = Set(allowed.map(\.ref))
 
         deleteTask = Task { [weak self] in
-            var deleted: [NodeRef] = []
-            var failures: [(title: String, detail: String)] = []
+            // The rows are set back only once the batch has outlasted a
+            // glance, so the quick ones go without a flash of grey first.
+            let grace = self?.removingGrace ?? 0
+            let dimming = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: grace)
+                guard let self, !Task.isCancelled, self.deleteBatch == batch,
+                    self.isDeleting
+                else { return }
+                self.removing = onTheirWayOut
+            }
 
-            for (index, path) in paths.enumerated() {
-                // Checked between items. `removeItem` itself can't be
-                // interrupted, so Stop takes effect at the next target rather
-                // than part-way through the one in hand.
+            var gone: [NodeRef] = []
+            var failures: [(title: String, detail: String)] = []
+            var finished = Removal.Tally()
+
+            for (index, target) in allowed.enumerated() {
+                // Checked between items as well as inside one: a move to the
+                // Trash is a single step with nowhere to stop in the middle.
                 if Task.isCancelled { break }
 
-                let failure = await Task.detached(priority: .userInitiated) {
-                    () -> (title: String, detail: String)? in
-                    do {
-                        try body(path)
-                        return nil
-                    } catch let error as FileActions.ActionError {
-                        return (
-                            error.errorDescription ?? "Couldn’t delete an item",
-                            error.recoverySuggestion ?? ""
+                let before = finished
+                let disposed = await Task.detached(priority: .userInitiated) {
+                    Self.dispose(of: target, as: disposal, stop: stop) { tally in
+                        let total = Removal.Tally(
+                            items: before.items + tally.items,
+                            bytes: before.bytes + tally.bytes
                         )
-                    } catch {
-                        let name = (path as NSString).lastPathComponent
-                        return (
-                            "Couldn’t delete “\(name)”", error.localizedDescription
-                        )
+                        DispatchQueue.main.async { [weak self] in
+                            self?.noteProgress(total, of: batch)
+                        }
                     }
                 }.value
 
-                if let failure {
-                    failures.append(failure)
-                } else {
-                    deleted.append(allowed[index].ref)
-                }
+                gone.append(contentsOf: disposed.gone)
+                if let failure = disposed.failure { failures.append(failure) }
+                finished.items += disposed.tally.items
+                finished.bytes += disposed.tally.bytes
 
                 guard let self else { return }
-                self.deleteProgress = DeleteProgress(
-                    done: index + 1,
-                    total: paths.count,
-                    currentName: index + 1 < paths.count
-                        ? (paths[index + 1] as NSString).lastPathComponent : ""
-                )
+                if var progress = self.deleteProgress {
+                    progress.done = index + 1
+                    progress.currentName =
+                        index + 1 < allowed.count
+                        ? (allowed[index + 1].path as NSString).lastPathComponent
+                        : ""
+                    progress.items = finished.items
+                    progress.bytes = finished.bytes
+                    self.deleteProgress = progress
+                }
             }
 
+            dimming.cancel()
             guard let self else { return }
             self.deleteTask = nil
+            self.deleteStop = nil
             self.deleteProgress = nil
-            // Successes are applied even when part of the batch failed or was
+            self.removing = []
+            // What went is applied even when part of the batch failed or was
             // stopped, so the tree never claims space that is already gone.
-            self.detach(deleted, unlinked: unlinks)
+            self.detach(gone, unlinked: disposal.unlinks)
             self.rereadCapacity()
             self.report(
                 failures: failures,
                 refusals: refusals,
-                attempted: targets.count
+                attempted: attempted
             )
         }
+    }
+
+    /// What the scan counted `ref` as: itself and everything under it, and
+    /// the space that takes.
+    private nonisolated static func scanned(_ ref: NodeRef) -> Removal.Tally {
+        Removal.Tally(
+            items: ref.isDirectory ? ref.dir.totalItems + 1 : 1,
+            bytes: ref.alloc
+        )
+    }
+
+    /// Takes a progress report from the thread doing the removing.
+    ///
+    /// Reports are sent, not awaited, so one can arrive after its batch has
+    /// ended or after a later one has overtaken it. Either would walk the bar
+    /// backwards.
+    private func noteProgress(_ tally: Removal.Tally, of batch: Int) {
+        guard batch == deleteBatch, var progress = deleteProgress,
+            tally.items >= progress.items
+        else { return }
+        progress.items = tally.items
+        progress.bytes = tally.bytes
+        deleteProgress = progress
+    }
+
+    /// Removes one target and says what became of it. Off the main actor.
+    private nonisolated static func dispose(
+        of target: Target,
+        as disposal: Disposal,
+        stop: Removal.Stop,
+        onProgress: (Removal.Tally) -> Void
+    ) -> Disposed {
+        var disposed = Disposed()
+        let name = (target.path as NSString).lastPathComponent
+        do {
+            switch disposal {
+            case .trash:
+                try FileActions.moveToTrash(target.path)
+                disposed.gone = [target.ref]
+                // A move is one step, so it counts for all of it at once.
+                disposed.tally = scanned(target.ref)
+            case .delete:
+                let outcome = try FileActions.deletePermanently(
+                    target.path,
+                    stop: stop,
+                    onProgress: onProgress
+                )
+                disposed.tally = outcome.tally
+                if outcome.isGone {
+                    disposed.gone = [target.ref]
+                    break
+                }
+                // Part of a folder can have gone before a Stop or a file that
+                // wouldn't budge. The disk is asked which part, not the
+                // callbacks: what is still there is what the tree has to show.
+                if target.ref.isDirectory {
+                    disposed.gone = missing(under: target.ref.dir, at: target.path)
+                }
+                // Being stopped is what was asked for, and nothing to report.
+                if outcome.failures > 0 || !outcome.wasStopped {
+                    disposed.failure = failure(outcome, removing: name)
+                }
+            }
+        } catch let error as FileActions.ActionError {
+            disposed.failure = (
+                error.errorDescription ?? "Couldn’t delete an item",
+                error.recoverySuggestion ?? ""
+            )
+        } catch {
+            disposed.failure = ("Couldn’t delete “\(name)”", error.localizedDescription)
+        }
+        return disposed
+    }
+
+    /// The alert for a delete that left something behind.
+    private nonisolated static func failure(
+        _ outcome: Removal.Outcome,
+        removing name: String
+    ) -> (title: String, detail: String) {
+        let title =
+            outcome.tally.items > 0
+            ? "Couldn’t delete all of “\(name)”" : "Couldn’t delete “\(name)”"
+        guard let first = outcome.firstFailure else { return (title, "") }
+        let reason = String(cString: strerror(first.code))
+        let leaf = (first.path as NSString).lastPathComponent
+        var detail = leaf == name ? "\(reason)." : "“\(leaf)”: \(reason)."
+        if outcome.failures > 1 {
+            detail +=
+                " \(ByteFormat.counted(outcome.failures - 1, "other item")) "
+                + "couldn’t be removed either."
+        }
+        return (title, detail)
+    }
+
+    /// The files and folders the scan found under `dir` that are no longer on
+    /// disk. A folder that has gone is named once, not entry by entry.
+    ///
+    /// Asked by path, and where a path is too long to ask by, of the folder
+    /// the entry is in. A scan opens folders by path and so reaches down to
+    /// `PATH_MAX`, which leaves it holding one level of entries whose own
+    /// paths are past it — and a removal that had to change directory to get
+    /// that deep removes exactly those. Taken for still there, they stayed in
+    /// the tree, and could not be deleted from it either.
+    ///
+    /// Anything that still can't be looked at — a folder that can't be opened
+    /// — is taken to be there. Wrongly kept, it overstates a total until the
+    /// next scan; wrongly dropped, it would be a file the tree says has gone
+    /// that has not.
+    private nonisolated static func missing(
+        under dir: DirNode,
+        at path: String
+    ) -> [NodeRef] {
+        var gone: [NodeRef] = []
+        var pending: [(dir: DirNode, path: String)] = [(dir, path)]
+        while let (dir, path) = pending.popLast() {
+            // Opened only for a name in here that is past `PATH_MAX`.
+            var folder: Int32 = -1
+            defer { if folder >= 0 { close(folder) } }
+            func isMissing(_ name: String) -> Bool {
+                var info = stat()
+                if lstat(path + "/" + name, &info) == 0 { return false }
+                if errno == ENOENT { return true }
+                guard errno == ENAMETOOLONG else { return false }
+                if folder < 0 { folder = open(path, O_RDONLY | O_DIRECTORY) }
+                guard folder >= 0 else { return false }
+                return fstatat(folder, name, &info, AT_SYMLINK_NOFOLLOW) != 0
+                    && errno == ENOENT
+            }
+
+            for index in dir.files.indices where !dir.files[index].isRemoved {
+                if isMissing(dir.files[index].name) {
+                    gone.append(NodeRef(dir: dir, fileIndex: index))
+                }
+            }
+            for sub in dir.subdirs {
+                if isMissing(sub.name) {
+                    gone.append(NodeRef(sub))
+                } else {
+                    pending.append((sub, path + "/" + sub.name))
+                }
+            }
+        }
+        return gone
     }
 
     /// Surfaces the first failure — a wall of alerts helps nobody — but says how
@@ -1253,13 +1533,12 @@ final class AppModel: ObservableObject {
         // this makes it safe to run it off the main thread at all.
         treemapQueue.sync {}
 
-        // Files come off first, highest index first: removing an entry shifts
-        // every sibling after it, so any other order unlinks the wrong ones.
-        // Sorting the whole batch at once is safe because entries in different
-        // folders can't disturb each other's indices.
-        let files = refs.lazy.filter { !$0.isDirectory }
-            .sorted { $0.fileIndex > $1.fileIndex }
-        for ref in files { detachFile(ref, unlinked: unlinked) }
+        // Worked out while the rows still hold what is leaving.
+        let anchor = selectionAnchor(for: Set(refs))
+
+        // A file's slot is kept, so its siblings keep their indices and the
+        // order these come off in doesn't matter.
+        for ref in refs where !ref.isDirectory { detachFile(ref, unlinked: unlinked) }
 
         // Hard links before the folders themselves, while they are still
         // attached, and for the whole batch in one go. A name under a folder
@@ -1280,31 +1559,107 @@ final class AppModel: ObservableObject {
         result?.rankTypes()
         for folder in folders { detachDirectory(folder) }
 
-        // Removing a file shifts the indices of its siblings, invalidating any
-        // NodeRef held elsewhere, so all derived rows are rebuilt and the
-        // selection is dropped — along with a delete still awaiting
-        // confirmation, which would otherwise be confirmed against whatever
-        // shifted into its place.
-        selection = []
+        // Everything that outlived the delete goes on naming what it named:
+        // a file's siblings were not renumbered, and a folder's were never
+        // numbered. So the selection, the rows and the pointer are only
+        // relieved of what has actually gone, and the table is handed the
+        // same rows less those — which it can take out without redrawing the
+        // rest.
+        selection = selection.filter { !$0.isStale }
+        // A delete still awaiting confirmation quoted what it would free
+        // before this one changed that, so it is asked for again.
         permanentDeleteTargets = []
-        hoveredRef = nil
+        if hoveredRef?.isStale == true { hoveredRef = nil }
         sharedStorageCache = [:]
         treeRevision += 1
-        // Dropped here and now, not when the walk below returns with fresh ones.
-        // A row names its file by index, so the rows already on screen name
-        // whatever shifted into their place — and double-clicking one, or
-        // deleting it, would act on that instead. They also hold a folder
-        // without holding its ancestors, so a row inside a deleted subtree
-        // outlives its own parent chain.
-        fileRows = []
+        // Now, not when the walk below returns: a row for a file that has
+        // gone would otherwise sit in the list until it did.
+        fileRows.removeAll { $0.ref.isStale }
         rebuildTreeRows()
+        if selection.isEmpty, let anchor, let next = row(at: anchor) {
+            selection = [next]
+        }
         refreshFileRows(immediately: true)
+    }
+
+    /// Where in the tab in front the selection was, when all of it is leaving.
+    private enum SelectionAnchor {
+        /// The place among `parent`'s rows in the Tree View.
+        case treeRow(parent: DirNode, ordinal: Int)
+        /// The place in the File View's list.
+        case fileRow(Int)
+    }
+
+    /// The folder a row hangs off in the Tree View.
+    private func rowParent(_ ref: NodeRef) -> DirNode? {
+        ref.isDirectory ? ref.dir.parent : ref.dir
+    }
+
+    /// Notes where the selection is, if `leaving` is about to take all of it.
+    ///
+    /// Left empty, the next press of an arrow key starts again from the top of
+    /// the table, which in a long list is nowhere near what was being worked
+    /// through. Nil when any of the selection is staying — that is then what
+    /// is selected — or when it was never a row: a tile picked on the treemap
+    /// has no neighbours to move to.
+    private func selectionAnchor(for leaving: Set<NodeRef>) -> SelectionAnchor? {
+        func isLeaving(_ ref: NodeRef) -> Bool {
+            if leaving.contains(ref) { return true }
+            var above = rowParent(ref)
+            while let step = above {
+                if leaving.contains(NodeRef(step)) { return true }
+                above = step.parent
+            }
+            return false
+        }
+        guard !selection.isEmpty, selection.allSatisfy(isLeaving) else { return nil }
+
+        switch tab {
+        case .files:
+            return fileRows.firstIndex { isLeaving($0.ref) }.map { .fileRow($0) }
+        case .tree:
+            guard let first = treeRows.firstIndex(where: { leaving.contains($0.ref) }),
+                selection.contains(where: { isTreeRow($0) }),
+                let parent = rowParent(treeRows[first].ref)
+            else { return nil }
+            var ordinal = 0
+            for row in treeRows[..<first].reversed() {
+                if row.ref == NodeRef(parent) { break }
+                if rowParent(row.ref) === parent { ordinal += 1 }
+            }
+            return .treeRow(parent: parent, ordinal: ordinal)
+        case .about:
+            return nil
+        }
+    }
+
+    /// The row now at `anchor`: what moved up into the place of what left,
+    /// or the last of its neighbours when it was at the end. With none left
+    /// in the Tree View it is the folder they were in, which is then empty.
+    private func row(at anchor: SelectionAnchor) -> NodeRef? {
+        switch anchor {
+        case .fileRow(let index):
+            guard !fileRows.isEmpty else { return nil }
+            return fileRows[min(index, fileRows.count - 1)].ref
+        case .treeRow(let parent, let ordinal):
+            guard isTreeRow(NodeRef(parent)), !NodeRef(parent).isStale else {
+                return nil
+            }
+            var seen = 0
+            var last: NodeRef?
+            for row in treeRows where rowParent(row.ref) === parent {
+                if seen == ordinal { return row.ref }
+                seen += 1
+                last = row.ref
+            }
+            return last ?? NodeRef(parent)
+        }
     }
 
     private func detachFile(_ ref: NodeRef, unlinked: Bool) {
         let dir = ref.dir
         let index = Int(ref.fileIndex)
-        guard index < dir.files.count else { return }
+        guard index < dir.files.count, !dir.files[index].isRemoved else { return }
         let file = dir.files[index]
 
         if file.isDuplicateLink {
@@ -1320,7 +1675,7 @@ final class AppModel: ObservableObject {
             result?.forgetDuplicate(file)
             result?.forgetType(of: file)
             subtract(size: 0, alloc: 0, files: 1, dirs: 0, from: dir)
-            dir.files.remove(at: index)
+            dir.files[index] = .removed
             return
         }
 
@@ -1344,7 +1699,8 @@ final class AppModel: ObservableObject {
 
         result?.forgetType(of: file)
         subtract(size: file.size, alloc: file.alloc, files: 1, dirs: 0, from: dir)
-        dir.files.remove(at: index)
+        // The slot stays, so no sibling is renumbered. See `FileEntry.isRemoved`.
+        dir.files[index] = .removed
     }
 
     private func detachDirectory(_ node: DirNode) {
@@ -1360,6 +1716,10 @@ final class AppModel: ObservableObject {
         if treemapRoot === node || isDescendant(treemapRoot, of: node) {
             treemapRoot = parent
         }
+        // Cut off, so that a reference to it or to anything under it reads as
+        // stale. Left pointing at a parent that no longer lists it, the
+        // selection would go on naming a folder that is not in the tree.
+        node.parent = nil
     }
 
     private func isDescendant(_ node: DirNode?, of ancestor: DirNode) -> Bool {

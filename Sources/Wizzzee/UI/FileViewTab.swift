@@ -88,7 +88,13 @@ struct FileViewTab: View {
                     if let file = row.ref.file {
                         StorageNote(file: file)
                     }
+                    if model.removing.contains(row.ref) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.7)
+                    }
                 }
+                .leaving(row.ref, in: model)
             }
             .width(min: 160, ideal: 280)
 
@@ -98,6 +104,7 @@ struct FileViewTab: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.head)
+                    .leaving(row.ref, in: model)
             }
             .width(min: 180, ideal: 380)
 
@@ -106,6 +113,7 @@ struct FileViewTab: View {
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
+                    .leaving(row.ref, in: model)
             }
             .width(min: 64, ideal: 74, max: 110)
 
@@ -116,6 +124,7 @@ struct FileViewTab: View {
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(model.sizeMetric.emphasis(of: .allocated))
                     .frame(maxWidth: .infinity, alignment: .trailing)
+                    .leaving(row.ref, in: model)
             }
             .width(min: 70, ideal: 84, max: 120)
 
@@ -124,6 +133,7 @@ struct FileViewTab: View {
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(model.sizeMetric.emphasis(of: .logical))
                     .frame(maxWidth: .infinity, alignment: .trailing)
+                    .leaving(row.ref, in: model)
             }
             .width(min: 70, ideal: 84, max: 120)
 
@@ -132,6 +142,7 @@ struct FileViewTab: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
+                    .leaving(row.ref, in: model)
             }
             .width(min: 100, ideal: 130, max: 190)
         }

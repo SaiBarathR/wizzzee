@@ -5,8 +5,12 @@ let package = Package(
     name: "Wizzzee",
     platforms: [.macOS(.v14)],
     targets: [
+        // `removefile(3)`, for SDKs whose Darwin module doesn't carry it. See
+        // the module map.
+        .systemLibrary(name: "CRemoveFile", path: "Sources/CRemoveFile"),
         .executableTarget(
             name: "Wizzzee",
+            dependencies: ["CRemoveFile"],
             path: "Sources/Wizzzee",
             swiftSettings: [
                 // The scan engine deliberately shares mutable state across worker

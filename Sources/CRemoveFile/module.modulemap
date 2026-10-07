@@ -1,0 +1,7 @@
+// `removefile.h` only joined the Darwin module in the macOS 27 SDK. Built with
+// an older one — which is what a release is built with — `import Darwin`
+// leaves it out, so it is brought in here.
+module CRemoveFile [system] {
+    header "removefile-shim.h"
+    export *
+}

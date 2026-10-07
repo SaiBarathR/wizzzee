@@ -158,7 +158,9 @@ enum TreemapLayout {
         }
         for index in dir.files.indices {
             let ref = NodeRef(dir: dir, fileIndex: index)
-            if dir.files[index].isDuplicateLink { continue }
+            if dir.files[index].isDuplicateLink || dir.files[index].isRemoved {
+                continue
+            }
             if weight(ref, metric) > 0 { children.append(ref) }
         }
         guard !children.isEmpty else { return }

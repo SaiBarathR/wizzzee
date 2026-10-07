@@ -33,7 +33,7 @@ struct ItemContextMenu: View {
 
         if ref.isDirectory {
             Button("Zoom Treemap Here") { model.zoom(into: ref.dir) }
-                .disabled(ref.dir.subdirs.isEmpty && ref.dir.files.isEmpty)
+                .disabled(ref.dir.isEmpty)
         } else {
             Button("Show in Tree") { model.revealInTree(ref) }
         }

@@ -91,9 +91,18 @@ read as gone, not as whatever now occupies its memory.
 `NodeRef` is the shared currency of the UI — it points at either a directory or
 one file within a directory (`fileIndex == -1` means the directory itself), so
 the tree table, the file list and the treemap can all carry the same selection.
-Because a file reference is an index, deleting a file invalidates every
-`NodeRef` for its later siblings; `AppModel` drops the selection and rebuilds
-derived rows after any removal rather than trying to patch indices.
+
+A file reference is an index, so taking a deleted file's entry out of its
+folder's array would renumber every sibling after it. That is what it used to
+do, and everything holding a reference paid for it: the table was handed a list
+of rows it had never seen and redrew all of them, the File View was emptied
+until a walk refilled it, and the selection was thrown away because it could no
+longer be trusted. The entry is kept instead — flagged removed and reset to
+hold nothing — and every walk over files steps past it. A reference to a
+sibling goes on naming the sibling, so a delete takes one row out of the table
+and leaves the rest, and the selection, where they were. A folder that is
+deleted has its parent pointer cleared, which is what makes a reference to it,
+or to anything inside it, read as stale.
 
 Paths are not stored per node. `DirNode.path` rebuilds by walking up to the
 root, whose `name` holds the full path the scan started from. Storing an
@@ -152,12 +161,49 @@ Deleting adjusts totals up the ancestor chain rather than recomputing, so the
 whole UI updates instantly after a delete. That path is the one place a bug does
 real damage, so `--selftest` checks it against ground truth rather than by eye.
 
+### `Removal` — deleting with something to show for it
+
+Deleting for good goes through `removefile(3)`, the routine underneath
+`FileManager.removeItem`, called directly. `removeItem` keeps what it learns on
+the way to itself: a folder of a million files was one call that reported
+nothing until it returned and could not be interrupted, so the progress bar for
+the usual case — one folder — sat at nothing until it was over, and Stop did
+nothing until then either. `removefile` calls back per entry, and hands over
+the `FTSENT` it already has for each, so counting what has gone and the space
+it held costs no extra look at the disk.
+
+Three things follow from doing it this way:
+
+- **Stop works inside a folder.** The callback is where it is checked, so it
+  takes effect at the next file.
+- **A failure costs one file, not the rest.** What can be removed is, as
+  `rm -rf` does it, and the caller is told what could not be.
+- **Part of a folder can be gone and part not.** The tree is then brought into
+  line by asking the disk which of the entries it knew about are still there —
+  not by trusting the callbacks — and those that are not go through the same
+  detach as any other delete.
+
+A tree deeper than `PATH_MAX` needs `REMOVEFILE_ALLOW_LONG_PATHS`, which has
+`removefile` change the working directory of the whole process as it descends.
+It is passed only on a second attempt, for a tree that turned out to need it.
+
+That reaches what is *under* the item being deleted. An item whose own path is
+already past `PATH_MAX` — a scan lists one level of them, the contents of the
+deepest folder it could open — can't be handed to `removefile` at all:
+`removefileat`, relative to the folder it is in, turns it down the same way.
+Deleting one of those on its own fails as it always has, and says why; deleting
+the folder above it is what removes it.
+
+`removefile.h` is imported through `Sources/CRemoveFile`, a module map and a
+one-line header. It only joined the Darwin module in the macOS 27 SDK, and a
+release is built with an older one.
+
 ## Layout
 
 ```
 Sources/Wizzzee/
   Core/       BulkEnumerator (getattrlistbulk), ScanEngine, ScanTree,
-              Volumes, FileActions, Formatting
+              Volumes, FileActions, Removal (removefile), Formatting
   Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer,
               TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,

@@ -248,8 +248,8 @@ struct HeaderBar: View {
         }
         .controlSize(.small)
         // Off while a batch runs, as the context menu's are: a confirmation
-        // raised now would be answered after that batch had renumbered the
-        // files it names.
+        // raised now would be answered after that batch had changed what it
+        // says will be freed.
         .disabled(blocked || model.isDeleting)
         .help(
             blocked

@@ -74,7 +74,11 @@ rebuilding.
   leave it is how it opens next launch.
 - **Right-click anything** for Reveal in Finder, Open, Open in Terminal, Copy
   Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the
-  way up the tree without rescanning.
+  way up the tree without rescanning: the row goes, its neighbours stay where
+  they were, and the selection moves to whatever took its place. A delete that
+  takes a while shows how many items and how much space have gone in the status
+  bar, and **Stop** there ends it part-way — what is left stays in the tree,
+  measured as it now is.
 - **`⌘⌫` and `⌥⌘⌫`** do what they do in Finder, to whatever is selected: the
   first moves it to the Trash straight away, the second asks and then deletes it
   for good. They act only on a selection you can see — a row in the tab in
@@ -200,7 +204,7 @@ dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest
 ```
 
 `--selftest` builds a throwaway tree with known contents and checks the scanner
-and both delete paths against ground truth — 317 checks, no permissions needed.
+and both delete paths against ground truth — 370 checks, no permissions needed.
 CI runs it on every push, along with a universal-binary and signature check.
 
 ## Releasing
