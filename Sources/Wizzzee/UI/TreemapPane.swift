@@ -99,20 +99,11 @@ struct ExtensionLegend: View {
     /// for any change published by the model, hovering the treemap included.
     /// Both orders are instead kept by the scan result, which re-ranks them
     /// when a delete changes what the types hold.
-    private var stats: [ExtensionStat] {
-        guard let result = model.result else { return [] }
-        if showsEveryType {
-            return model.sizeMetric == .logical
-                ? result.allBySize : result.allByAllocated
-        }
-        return model.sizeMetric == .logical
-            ? result.topBySize : result.topByAllocated
-    }
-
-    /// Whether the list runs to every type in the scan. It starts at the
-    /// largest few: a real disk has thousands, and this view is handed all of
-    /// its rows again for anything the model publishes.
-    @State private var showsEveryType = false
+    ///
+    /// The list starts at the largest few: a real disk has thousands, and
+    /// this view is handed all of its rows again for anything the model
+    /// publishes.
+    private var stats: [ExtensionStat] { model.legendTypes }
 
     /// The row picked, which is the type in focus. Picking another moves the
     /// focus; a click below the last row, or ⌘-click on the one picked, takes
@@ -138,12 +129,13 @@ struct ExtensionLegend: View {
                     total > ScanResult.legendLength
                 {
                     Button {
-                        showsEveryType.toggle()
+                        model.listsEveryType.toggle()
                     } label: {
                         Text(
-                            showsEveryType
+                            model.listsEveryType
                                 ? "all \(ByteFormat.count(total))"
-                                : "top \(stats.count) of \(ByteFormat.count(total))"
+                                : "top \(ScanResult.legendLength) of "
+                                    + ByteFormat.count(total)
                         )
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
@@ -151,7 +143,7 @@ struct ExtensionLegend: View {
                     }
                     .buttonStyle(.plain)
                     .help(
-                        showsEveryType
+                        model.listsEveryType
                             ? "List only the \(ScanResult.legendLength) largest types"
                             : "List all \(ByteFormat.count(total)) types"
                     )

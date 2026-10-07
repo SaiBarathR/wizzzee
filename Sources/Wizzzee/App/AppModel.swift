@@ -220,6 +220,11 @@ final class AppModel: ObservableObject {
     /// the type shows as lit patches across the disk, and the File View lists
     /// that type's largest files and no others.
     @Published private(set) var focusedType: String?
+    /// Whether File Types lists every type in the scan, not only the
+    /// largest. Here and not in the view: the tab it is on is thrown away at
+    /// every change of tab, and came back at the short list with the type in
+    /// focus nowhere in it.
+    @Published var listsEveryType = false
 
     // Treemap
     /// Whether Tree View shows the treemap under the table. Hiding it hands the
@@ -527,13 +532,45 @@ final class AppModel: ObservableObject {
         focusedType.flatMap { result?.stat(for: $0) }
     }
 
+    /// The types the legend lists: the largest by the measure on show, or
+    /// all of them, and in either case the one in focus.
+    ///
+    /// The one in focus is kept in the list wherever it ranks. It can be
+    /// outside the largest few — picked from the full list, or ranked there
+    /// by the other measure — and a list without it had nothing selected
+    /// while the map stayed dim and the File View stayed narrowed.
+    var legendTypes: [ExtensionStat] {
+        guard let result else { return [] }
+        let logical = sizeMetric == .logical
+        if listsEveryType {
+            return logical ? result.allBySize : result.allByAllocated
+        }
+        let top = logical ? result.topBySize : result.topByAllocated
+        guard let focused = focusedTypeStat,
+            !top.contains(where: { $0.ext == focused.ext })
+        else { return top }
+        return top + [focused]
+    }
+
+    /// Whether a type has anything to put in focus.
+    ///
+    /// Not whether it has files. A second name for a hard-linked file is
+    /// counted under its own type and takes no space there: its bytes are
+    /// with the name the scan reached first, which may be another type. A
+    /// type made of nothing else has no tile on the map and no row in the
+    /// File View, and in focus would turn the one dark and the other empty.
+    private func canFocus(on ext: String) -> Bool {
+        guard let stat = result?.stat(for: ext), stat.count > 0 else { return false }
+        return stat.size > 0 || stat.alloc > 0
+    }
+
     /// Puts `ext` in focus, or takes the focus off with nil.
     ///
-    /// A type with no files left can't be focused on: the map would go dark
-    /// all over and the File View would empty, with nothing in the legend to
-    /// say which row had done it.
+    /// A type with nothing to show can't be focused on: the map would go
+    /// dark all over and the File View would empty, with nothing in the
+    /// legend to say which row had done it.
     func focusType(_ ext: String?) {
-        let next = ext.flatMap { (result?.stat(for: $0)?.count ?? 0) > 0 ? $0 : nil }
+        let next = ext.flatMap { canFocus(on: $0) ? $0 : nil }
         guard next != focusedType else { return }
         focusedType = next
         // A different list, not the same one filtered: the largest thousand
@@ -1798,10 +1835,9 @@ final class AppModel: ObservableObject {
         // files that are gone against a total that no longer includes them.
         result?.forgetTypes(under: folders)
         result?.rankTypes()
-        // The last file of the type in focus has gone, and its row with it:
-        // left in focus, it would hold the map dark and the File View empty
-        // with nothing on screen to click to let go of it.
-        if let focusedType, (result?.stat(for: focusedType)?.count ?? 0) == 0 {
+        // The last file of the type in focus that took any space has gone:
+        // left in focus, it would hold the map dark and the File View empty.
+        if let focusedType, !canFocus(on: focusedType) {
             self.focusedType = nil
         }
         for folder in folders { detachDirectory(folder) }
