@@ -187,6 +187,13 @@ A tree deeper than `PATH_MAX` needs `REMOVEFILE_ALLOW_LONG_PATHS`, which has
 `removefile` change the working directory of the whole process as it descends.
 It is passed only on a second attempt, for a tree that turned out to need it.
 
+That reaches what is *under* the item being deleted. An item whose own path is
+already past `PATH_MAX` — a scan lists one level of them, the contents of the
+deepest folder it could open — can't be handed to `removefile` at all:
+`removefileat`, relative to the folder it is in, turns it down the same way.
+Deleting one of those on its own fails as it always has, and says why; deleting
+the folder above it is what removes it.
+
 `removefile.h` is imported through `Sources/CRemoveFile`, a module map and a
 one-line header. It only joined the Darwin module in the macOS 27 SDK, and a
 release is built with an older one.
