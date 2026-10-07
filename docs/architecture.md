@@ -170,6 +170,13 @@ Deleting adjusts totals up the ancestor chain rather than recomputing, so the
 whole UI updates instantly after a delete. That path is the one place a bug does
 real damage, so `--selftest` checks it against ground truth rather than by eye.
 
+A scan throws the tree away, and nothing that points into one tree means
+anything in the next: a `NodeRef` is a node and an index. What carries over a
+rescan of the same folder is therefore kept as paths — the open folders, the
+map's root, the selection, the marks — taken before the old tree is let go and
+looked up in the new one when it lands. What is no longer there is not put
+back, and a mark that could not be is counted.
+
 The selection and the marks are two sets and are kept apart on purpose. The
 selection is what is being looked at: a plain click replaces it, and a
 collapsed folder or a change of tab takes it off the screen, which is why the

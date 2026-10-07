@@ -785,6 +785,34 @@ final class ScanResult {
         )
     }
 
+    // MARK: - Finding things by where they are
+    //
+    // A node is only good for the scan it came from. What carries over to the
+    // next scan of the same folder is where a thing was, and these find what
+    // is there now.
+
+    /// The folder at `path`, or nil when this scan has none there.
+    func directory(at path: String) -> DirNode? {
+        if path == rootPath { return root }
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        var dir = root
+        for name in path.dropFirst(prefix.count).split(separator: "/") {
+            guard let next = dir.subdir(named: String(name)) else { return nil }
+            dir = next
+        }
+        return dir
+    }
+
+    /// The file at `path`, or nil when this scan has none there.
+    func file(at path: String) -> NodeRef? {
+        let name = (path as NSString).lastPathComponent
+        guard let dir = directory(at: (path as NSString).deletingLastPathComponent),
+            let index = dir.files.firstIndex(where: { !$0.isRemoved && $0.name == name })
+        else { return nil }
+        return NodeRef(dir: dir, fileIndex: index)
+    }
+
     /// Total across every file, ignoring hard-link duplicates.
     var fileCount: Int { root.totalFiles }
 

@@ -121,6 +121,12 @@ rebuilding.
   click that to open the list, which gives each item's size, lets you take a
   mark back off, and has **Move to Trash** and **Delete…** for the lot. Marked
   tiles are hatched on the treemap.
+- **A rescan keeps your place.** `⌘R`, or Scan on the folder already on show,
+  brings the figures up to date and leaves the window as it was: the same
+  folders open, the map zoomed to the same folder, the same selection and the
+  same marks, wherever those things are still there. A mark whose item has
+  gone is counted beside "Scan complete", so a shorter list is not taken for
+  the whole of it. A scan of somewhere else starts afresh.
 - **`⌘⌫` and `⌥⌘⌫`** do what they do in Finder, to whatever is selected: the
   first moves it to the Trash straight away, the second asks and then deletes it
   for good. They act only on a selection you can see — a row in the tab in
@@ -154,7 +160,8 @@ rebuilding.
 actually allocated. They diverge enormously for sparse files — an OrbStack disk
 image on this machine reports 996 GB but occupies 42 GB, on a 995 GB disk. The
 app defaults to **On Disk**, since that is the space you get back by deleting
-something. The toggle is in the top right.
+something. The toggle is in the top right, and the next launch starts with
+whichever was chosen — as it does with the volume or folder last scanned.
 
 Whichever is on show is what the window reports: the header's **Scanned** line,
 the status bar, the bars and the treemap. The tables show both, **On Disk**

@@ -81,8 +81,7 @@ struct HeaderBar: View {
             get: { model.customFolder ?? model.selectedVolumePath },
             set: { newValue in
                 if newValue == model.customFolder { return }
-                model.customFolder = nil
-                model.selectedVolumePath = newValue
+                model.chooseVolume(newValue)
             }
         )
     }
@@ -109,6 +108,18 @@ struct HeaderBar: View {
                 if let denied = model.result?.deniedCount, denied > 0 {
                     Text("• \(ByteFormat.counted(denied, "folder")) unreadable")
                         .foregroundStyle(.orange)
+                }
+                if model.marksLostToRescan > 0 {
+                    Text(
+                        "• \(ByteFormat.counted(model.marksLostToRescan, "marked item"))"
+                            + " no longer there"
+                    )
+                    .foregroundStyle(.orange)
+                    .help(
+                        "What these marks were on has gone since the last scan, "
+                            + "or can no longer be removed. The other marks "
+                            + "were put back."
+                    )
                 }
             }
             .font(.system(size: 10))
@@ -206,7 +217,13 @@ struct HeaderBar: View {
 
     private var metricPicker: some View {
         VStack(alignment: .trailing, spacing: 4) {
-            Picker("", selection: $model.sizeMetric) {
+            Picker(
+                "",
+                selection: Binding(
+                    get: { model.sizeMetric },
+                    set: { model.chooseMetric($0) }
+                )
+            ) {
                 Text("Size").tag(SizeMetric.logical)
                 Text("On Disk").tag(SizeMetric.allocated)
             }
