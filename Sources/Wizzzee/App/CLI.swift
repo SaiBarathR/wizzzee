@@ -20,6 +20,7 @@ enum CLI {
               Wizzzee --uishot --out <png>   render the real UI to a PNG
                                              [--path <dir>] [--size WxH]
                                              [--tab tree|files|about] [--zoom N]
+                                             [--metric size|disk]
                                              [--select-largest] [--no-access-banner]
               Wizzzee --version              print the version
             """
@@ -47,7 +48,7 @@ enum CLI {
                     size = CGSize(width: w, height: h)
                 }
             case "--metric":
-                metric = arguments[index + 1] == "disk" ? .allocated : .logical
+                metric = Self.metric(named: arguments[index + 1]) ?? .logical
             default:
                 break
             }
@@ -62,7 +63,7 @@ enum CLI {
         }
         print(
             "  \(ByteFormat.count(result.root.totalFiles)) files, "
-                + "\(ByteFormat.decimal(result.root.totalSize)) in "
+                + "\(ByteFormat.decimal(result.root.bytes(using: metric))) in "
                 + ByteFormat.duration(result.elapsed)
         )
 
@@ -105,6 +106,15 @@ enum CLI {
             print("  wrote \(output) (\(image.width)x\(image.height))")
         } else {
             print("  failed to write \(output)")
+        }
+    }
+
+    /// The measure a `--metric` argument names, or nil when it names neither.
+    static func metric(named name: String) -> SizeMetric? {
+        switch name.lowercased() {
+        case "size": return .logical
+        case "disk": return .allocated
+        default: return nil
         }
     }
 
@@ -171,7 +181,7 @@ enum CLI {
             if Date().timeIntervalSince(lastReport) > 0.5 {
                 lastReport = Date()
                 FileHandle.standardError.write(
-                    "  \(p.items) items, \(ByteFormat.decimal(p.bytes))\n"
+                    "  \(p.items) items, \(ByteFormat.decimal(p.allocated))\n"
                         .data(using: .utf8)!
                 )
             }
@@ -192,45 +202,61 @@ enum CLI {
             "Scan of \(result.rootPath) complete in "
                 + "\(String(format: "%.2f", elapsed))s"
         )
-        print(
-            "  total size:      \(ByteFormat.decimal(root.totalSize)) "
-                + "(\(root.totalSize) bytes)"
-        )
+        // Space on disk leads throughout, as it does in the app, and it is the
+        // figure `du` prints. Everything below was ranked by length, so one
+        // sparse image headed every list at a size the disk could not hold.
         print(
             "  on disk:         \(ByteFormat.decimal(root.totalAlloc)) "
                 + "(\(root.totalAlloc) bytes)"
         )
+        print(
+            "  logical size:    \(ByteFormat.decimal(root.totalSize)) "
+                + "(\(root.totalSize) bytes)"
+        )
         print("  files:           \(root.totalFiles)")
         print("  folders:         \(root.totalDirs)")
         print("  unreadable dirs: \(result.deniedCount)")
-        print("  hardlinks saved: \(ByteFormat.decimal(result.hardLinkSavings))")
+        print(
+            "  hardlinks saved: "
+                + ByteFormat.decimal(result.hardLinkSavings(using: .allocated))
+        )
         print("  du -sk equivalent: \(root.totalAlloc / 1024)")
 
-        print("\nLargest folders:")
-        for child in root.subdirs.sorted(by: { $0.totalSize > $1.totalSize })
+        // The length is printed only where it tells you something, which is
+        // where it isn't the space taken give or take a block.
+        func length(_ size: UInt64, against alloc: UInt64) -> String {
+            let apart = size > alloc ? size - alloc : alloc - size
+            guard apart > max(alloc / 20, 65_536) else { return "" }
+            return "  (\(ByteFormat.decimal(size)) long)"
+        }
+
+        print("\nLargest folders, by space on disk:")
+        for child in root.subdirs.sorted(by: { $0.totalAlloc > $1.totalAlloc })
             .prefix(15)
         {
             print(
-                "  \(pad(ByteFormat.decimal(child.totalSize), 10))  "
-                    + "\(pct(child.totalSize, of: root.totalSize))  \(child.name)"
+                "  \(pad(ByteFormat.decimal(child.totalAlloc), 10))  "
+                    + "\(pct(child.totalAlloc, of: root.totalAlloc))  \(child.name)"
+                    + length(child.totalSize, against: child.totalAlloc)
             )
         }
 
-        print("\nLargest files:")
-        // Ranked by the same measure that gets printed. The default is
-        // allocated size, which would list logical sizes out of order.
-        for file in result.largestFiles(limit: 15, metric: .logical) {
+        print("\nLargest files, by space on disk:")
+        for file in result.largestFiles(limit: 15, metric: .allocated) {
             print(
-                "  \(pad(ByteFormat.decimal(file.size), 10))  \(file.path)"
+                "  \(pad(ByteFormat.decimal(file.alloc), 10))  \(file.path)"
+                    + length(file.size, against: file.alloc)
             )
         }
 
-        print("\nLargest file types:")
-        for stat in result.extensionStats.prefix(15) {
+        print("\nLargest file types, by space on disk:")
+        for stat in result.topByAllocated.prefix(15) {
             print(
-                "  \(pad(ByteFormat.decimal(stat.size), 10))  "
-                    + "\(pct(stat.size, of: root.totalSize))  "
-                    + "\(pad(stat.displayName, 12))  \(stat.count) files"
+                "  \(pad(ByteFormat.decimal(stat.alloc), 10))  "
+                    + "\(pct(stat.alloc, of: root.totalAlloc))  "
+                    + "\(pad(stat.displayName, 12))  "
+                    + "\(stat.count) file\(stat.count == 1 ? "" : "s")"
+                    + length(stat.size, against: stat.alloc)
             )
         }
     }

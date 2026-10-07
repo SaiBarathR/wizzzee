@@ -55,7 +55,7 @@ struct StatusBar: View {
         Group {
             if let single = model.primarySelection {
                 Label {
-                    Text(selectionSummary(single))
+                    Text(model.selectionSummary(single))
                 } icon: {
                     Image(systemName: single.isDirectory ? "folder" : "doc")
                 }
@@ -78,14 +78,30 @@ struct StatusBar: View {
                     "\(ByteFormat.counted(result.root.totalFiles, "file")), "
                         + ByteFormat.counted(result.root.totalDirs, "folder")
                 )
-                Text("Total \(ByteFormat.decimal(result.root.totalSize))")
+                // Space occupied first, and the combined length named for
+                // what it is. It read "Total", which is the one thing a sum of
+                // lengths is not: a single sparse image puts it past the size
+                // of the disk.
                 Text("On disk \(ByteFormat.decimal(result.root.totalAlloc))")
+                Text("Logical size \(ByteFormat.decimal(result.root.totalSize))")
+                    .help(
+                        "Every file's length added up. Sparse files, such as "
+                            + "container and virtual machine images, are longer "
+                            + "than the space they occupy, so this can exceed "
+                            + "the size of the disk."
+                    )
 
-                if result.hardLinkSavings > 0 {
-                    Text("Hard links \(ByteFormat.decimal(result.hardLinkSavings))")
+                // Space, whichever measure is on show: it sits between two
+                // totals that are each named, and a length here — a second
+                // name for a sparse image is worth the image's whole length —
+                // would read as disk that isn't there.
+                let savings = result.hardLinkSavings(using: .allocated)
+                if savings > 0 {
+                    Text("Hard links \(ByteFormat.decimal(savings))")
                         .help(
-                            "Space that would be double-counted if hard-linked "
-                                + "files were each counted in full."
+                            "Space on disk that would be counted twice if "
+                                + "every name of a hard-linked file were "
+                                + "counted in full."
                         )
                 }
             }
@@ -97,14 +113,6 @@ struct StatusBar: View {
     private var multipleSelectionSummary: String {
         "\(ByteFormat.count(model.selection.count)) items selected  •  "
             + ByteFormat.decimal(model.reclaimableSize(model.selection))
-    }
-
-    private func selectionSummary(_ ref: NodeRef) -> String {
-        var parts = [ref.path, ByteFormat.decimal(ref.size)]
-        if ref.isDirectory {
-            parts.append(ByteFormat.counted(ref.dir.totalItems, "item"))
-        }
-        return parts.joined(separator: "  •  ")
     }
 }
 
@@ -128,11 +136,13 @@ struct AboutTab: View {
                         row("Duration", ByteFormat.duration(result.elapsed))
                         row("Files", ByteFormat.count(result.root.totalFiles))
                         row("Folders", ByteFormat.count(result.root.totalDirs))
-                        row("Logical size", ByteFormat.decimal(result.root.totalSize))
                         row("Size on disk", ByteFormat.decimal(result.root.totalAlloc))
+                        row("Logical size", ByteFormat.decimal(result.root.totalSize))
                         row(
                             "Hard links skipped",
-                            ByteFormat.decimal(result.hardLinkSavings)
+                            ByteFormat.decimal(
+                                result.hardLinkSavings(using: .allocated)
+                            )
                         )
                         row("Unreadable folders", ByteFormat.count(result.deniedCount))
                         row("File types", ByteFormat.count(result.typeCount))
@@ -152,7 +162,11 @@ struct AboutTab: View {
                         "Sizes come in two flavours. “Size” is the logical file "
                             + "length; “On Disk” is the space actually allocated. "
                             + "They diverge sharply for sparse files such as "
-                            + "virtual machine and container images."
+                            + "virtual machine and container images, which can "
+                            + "be longer than the disk they are on. Those are "
+                            + "marked “sparse” in the tables. Compressed files "
+                            + "occupy less than their length too, with nothing "
+                            + "missing, and are not marked."
                     )
                     bullet(
                         "Hard-linked files are counted once, so totals line up "

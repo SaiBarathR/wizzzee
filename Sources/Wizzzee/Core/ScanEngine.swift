@@ -72,7 +72,13 @@ private final class ShardedKeySet {
 final class ScanEngine {
     struct Progress {
         var items: Int = 0
+        /// Combined length of the files seen so far.
         var bytes: UInt64 = 0
+        /// The space those files occupy. Reported alongside `bytes` so a scan
+        /// under way can be described in the measure the finished one will be
+        /// shown in — the running length alone climbs past the size of the
+        /// disk the moment the walk reaches a sparse image.
+        var allocated: UInt64 = 0
         var currentPath: String = ""
         var elapsed: TimeInterval = 0
     }
@@ -86,8 +92,10 @@ final class ScanEngine {
     // Shared counters, updated in batches by the workers.
     private var itemsSeen = 0
     private var bytesSeen: UInt64 = 0
+    private var allocSeen: UInt64 = 0
     private var deniedCount = 0
     private var hardLinkSavings: UInt64 = 0
+    private var hardLinkAllocSavings: UInt64 = 0
     private var currentPath = ""
 
     func cancel() {
@@ -246,6 +254,10 @@ final class ScanEngine {
         // On an APFS boot volume the sealed system volume and the data volume
         // report the same st_dev, so one allowed device covers both halves.
         let excluded = Self.excludedPaths(forRoot: normalized)
+        // Asked once: a scan never leaves the volume it started on.
+        let shortfallMeansHoles = FileStorage.shortfallMeansHoles(
+            onFilesystem: VolumeInfo.filesystemType(of: normalized)
+        )
 
         let root = DirNode(
             name: normalized,
@@ -273,6 +285,7 @@ final class ScanEngine {
                     stack: stack,
                     allowedDev: rootDev,
                     excludedPaths: excluded,
+                    shortfallMeansHoles: shortfallMeansHoles,
                     visitedDirs: visitedDirs,
                     seenHardLinks: seenHardLinks
                 )
@@ -314,6 +327,7 @@ final class ScanEngine {
                     elapsed: Date().timeIntervalSince(started),
                     deniedCount: deniedCount,
                     hardLinkSavings: hardLinkSavings,
+                    hardLinkAllocSavings: hardLinkAllocSavings,
                     volumeTotal: total,
                     volumeFree: free,
                     volumeUsed: total > free ? total - free : 0,
@@ -330,18 +344,25 @@ final class ScanEngine {
         timer.schedule(deadline: .now() + 0.15, repeating: 0.15)
         timer.setEventHandler { [weak self] in
             guard let self, let report = self.onProgress else { return }
-            let snapshot = self.stateLock.withLock {
-                Progress(
-                    items: self.itemsSeen,
-                    bytes: self.bytesSeen,
-                    currentPath: self.currentPath,
-                    elapsed: Date().timeIntervalSince(started)
-                )
-            }
-            report(snapshot)
+            report(self.counters(elapsed: Date().timeIntervalSince(started)))
         }
         timer.resume()
         return timer
+    }
+
+    /// The running counts as they stand. Once the workers have joined these
+    /// are the finished scan's own totals, which is what lets a check hold the
+    /// two against each other without waiting on a timer.
+    func counters(elapsed: TimeInterval = 0) -> Progress {
+        stateLock.withLock {
+            Progress(
+                items: itemsSeen,
+                bytes: bytesSeen,
+                allocated: allocSeen,
+                currentPath: currentPath,
+                elapsed: elapsed
+            )
+        }
     }
 
     // MARK: - Worker
@@ -350,6 +371,7 @@ final class ScanEngine {
         stack: WorkStack,
         allowedDev: Int32,
         excludedPaths: Set<String>,
+        shortfallMeansHoles: Bool,
         visitedDirs: ShardedKeySet,
         seenHardLinks: ShardedKeySet
     ) {
@@ -358,8 +380,10 @@ final class ScanEngine {
         // Batched locally, flushed to the shared counters per directory.
         var localItems = 0
         var localBytes: UInt64 = 0
+        var localAlloc: UInt64 = 0
         var localDenied = 0
         var localSavings: UInt64 = 0
+        var localAllocSavings: UInt64 = 0
         var flushCountdown = 0
 
         while let item = stack.next() {
@@ -429,9 +453,15 @@ final class ScanEngine {
                         isDuplicate = !seenHardLinks.insert(
                             ObjectKey(dev: item.dev, ino: entry.fileID)
                         )
-                        if isDuplicate { localSavings += entry.size }
+                        if isDuplicate {
+                            localSavings += entry.size
+                            localAllocSavings += entry.alloc
+                        }
                     }
-                    if !isDuplicate { localBytes += entry.size }
+                    if !isDuplicate {
+                        localBytes += entry.size
+                        localAlloc += entry.alloc
+                    }
                     files.append(
                         FileEntry(
                             name: entry.name,
@@ -442,6 +472,9 @@ final class ScanEngine {
                             isSymlink: entry.isSymlink,
                             isDuplicateLink: isDuplicate,
                             linkCount: UInt8(min(entry.linkCount, 255)),
+                            storage: entry.storage(
+                                shortfallMeansHoles: shortfallMeansHoles
+                            ),
                             fileID: entry.fileID
                         )
                     )
@@ -469,14 +502,18 @@ final class ScanEngine {
                 stateLock.withLock {
                     itemsSeen += localItems
                     bytesSeen += localBytes
+                    allocSeen += localAlloc
                     deniedCount += localDenied
                     hardLinkSavings += localSavings
+                    hardLinkAllocSavings += localAllocSavings
                     currentPath = path
                 }
                 localItems = 0
                 localBytes = 0
+                localAlloc = 0
                 localDenied = 0
                 localSavings = 0
+                localAllocSavings = 0
             }
 
             stack.complete(pushing: children)
@@ -485,8 +522,10 @@ final class ScanEngine {
         stateLock.withLock {
             itemsSeen += localItems
             bytesSeen += localBytes
+            allocSeen += localAlloc
             deniedCount += localDenied
             hardLinkSavings += localSavings
+            hardLinkAllocSavings += localAllocSavings
         }
     }
 

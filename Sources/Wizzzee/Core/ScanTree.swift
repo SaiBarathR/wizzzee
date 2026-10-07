@@ -1,5 +1,64 @@
 import Foundation
 
+/// How much of a file's length is really stored on the disk it was found on.
+///
+/// A file's length is whatever it says it is. A virtual machine or container
+/// image is created at the size of the disk it pretends to be and filled in as
+/// it is used, so one can be 995 GB long while occupying 42 GB — and be longer
+/// than the volume it sits on. Summed into a folder, a length like that makes
+/// the folder look bigger than the disk, which is why the two measures are kept
+/// apart and why a file like this is pointed out rather than left to be found.
+enum FileStorage: UInt8 {
+    /// Every byte of its length is accounted for on disk.
+    case whole
+    /// Has stretches that were never written and take up no space.
+    case sparse
+    /// Its contents are with a cloud provider; only the name is here.
+    case dataless
+
+    /// `UF_COMPRESSED` and `SF_DATALESS` (sys/stat.h), as `st_flags` has them.
+    private static let compressedFlag: UInt32 = 0x0000_0020
+    private static let datalessFlag: UInt32 = 0x4000_0000
+
+    /// Tells the cases apart from what `getattrlistbulk` already returns.
+    ///
+    /// The filesystem has a flag of its own for a sparse file, but asking for
+    /// it means a second attribute group on every entry of every scan. It is
+    /// not needed: a regular file that is neither compressed nor dataless and
+    /// still occupies less than its length has nowhere else to have lost the
+    /// difference. Measured against that flag over the 3.1 million files of a
+    /// home folder, the two picked out the same 85 files and no others.
+    ///
+    /// That measurement was on APFS, and the reasoning holds only where the
+    /// allocation reported is the file's own and exact — which is what
+    /// `shortfallMeansHoles` says. A network share can report no allocation at
+    /// all, and a server that compresses behind its back reports less than the
+    /// length for every file; called sparse, each of those would be described
+    /// as mostly unwritten. Elsewhere a shortfall is left unexplained.
+    ///
+    /// A compressed file occupies less than its length as well, but all of it
+    /// is there, so it counts as whole. A dataless one says so itself, on any
+    /// filesystem.
+    static func classify(
+        isRegularFile: Bool,
+        size: UInt64,
+        alloc: UInt64,
+        bsdFlags: UInt32,
+        shortfallMeansHoles: Bool
+    ) -> FileStorage {
+        guard isRegularFile else { return .whole }
+        if bsdFlags & datalessFlag != 0 { return .dataless }
+        if bsdFlags & compressedFlag != 0 { return .whole }
+        return shortfallMeansHoles && alloc < size ? .sparse : .whole
+    }
+
+    /// Whether, on a filesystem of this type, a file occupying less than its
+    /// length can be taken to have holes in it. See `classify`.
+    static func shortfallMeansHoles(onFilesystem type: String) -> Bool {
+        type == "apfs"
+    }
+}
+
 /// One file inside a `DirNode`.
 ///
 /// Files are stored in a contiguous array on their parent rather than as
@@ -30,6 +89,11 @@ struct FileEntry {
     /// True when this name shares its bytes with another, so removing it frees
     /// nothing on its own.
     var isHardLinked: Bool { linkCount > 1 || linkCount == UInt8.max }
+    /// Whether the file's length is all on disk, and why not when it isn't.
+    ///
+    /// Declared here, ahead of `fileID`, because that is where the struct had
+    /// a byte of padding going spare: anywhere else it would cost eight.
+    var storage: FileStorage = .whole
     /// Inode number, used to pair the names of one hard-linked file.
     ///
     /// Unique per volume, and a scan never leaves the volume it started on, so
@@ -39,6 +103,41 @@ struct FileEntry {
     /// True when the bytes survive this name being removed, either because
     /// another name was already counted for them or because one still exists.
     var sharesStorage: Bool { isDuplicateLink || isHardLinked }
+
+    func bytes(using metric: SizeMetric) -> UInt64 {
+        metric == .logical ? size : alloc
+    }
+
+    /// The word shown beside a file's name when its length is not what it
+    /// occupies, or nil when the two agree.
+    var storageNote: String? {
+        switch storage {
+        case .whole: return nil
+        case .sparse: return "sparse"
+        case .dataless: return "online only"
+        }
+    }
+
+    /// The sentence behind `storageNote`, for a tooltip.
+    var storageExplanation: String? {
+        switch storage {
+        case .whole:
+            return nil
+        case .sparse:
+            let both =
+                "A sparse file: \(ByteFormat.decimal(size)) long, of which "
+                + "\(ByteFormat.decimal(alloc)) has been written and takes up "
+                + "space."
+            // Not promised for a name that shares its storage: removing one
+            // of those frees nothing while another still holds the file.
+            return sharesStorage
+                ? both : both + " Deleting it frees the smaller figure."
+        case .dataless:
+            return "Kept by a cloud provider and not downloaded: "
+                + "\(ByteFormat.decimal(size)) long, with "
+                + "\(ByteFormat.decimal(alloc)) of it on this disk."
+        }
+    }
 }
 
 /// Why a directory's contents are missing from the scan.
@@ -118,6 +217,10 @@ final class DirNode {
 
     /// Total entries in this subtree, matching WizTree's "Items" column.
     var totalItems: Int { totalFiles + totalDirs }
+
+    func bytes(using metric: SizeMetric) -> UInt64 {
+        metric == .logical ? totalSize : totalAlloc
+    }
 
     var isRoot: Bool { parent == nil }
 
@@ -223,6 +326,16 @@ struct NodeRef: Hashable, Identifiable {
 
     var alloc: UInt64 {
         fileIndex < 0 ? dir.totalAlloc : (file?.alloc ?? 0)
+    }
+
+    /// `size` or `alloc`, whichever `metric` asks for.
+    ///
+    /// Anything that states how big an item is goes through here. Reading
+    /// `size` directly is how the header came to report a scan as 1.7 TB on a
+    /// 995 GB disk while the rest of the window was showing space on disk: one
+    /// sparse image's length, added in as though it were occupied.
+    func bytes(using metric: SizeMetric) -> UInt64 {
+        metric == .logical ? size : alloc
     }
 
     var mtime: Double {
@@ -335,6 +448,12 @@ final class ScanResult {
     /// were counted in full. Falls as duplicates are promoted or removed, so the
     /// status line keeps describing the tree actually on show.
     private(set) var hardLinkSavings: UInt64
+    /// The same, measured in space on disk rather than in length.
+    ///
+    /// Kept separately because the two are not a ratio apart: a second name for
+    /// a sparse image saves the image's whole length by one measure and next to
+    /// nothing by the other.
+    private(set) var hardLinkAllocSavings: UInt64
     let volumeTotal: UInt64
     let volumeFree: UInt64
     let volumeUsed: UInt64
@@ -349,6 +468,7 @@ final class ScanResult {
         elapsed: TimeInterval,
         deniedCount: Int,
         hardLinkSavings: UInt64,
+        hardLinkAllocSavings: UInt64,
         volumeTotal: UInt64,
         volumeFree: UInt64,
         volumeUsed: UInt64,
@@ -360,6 +480,7 @@ final class ScanResult {
         self.elapsed = elapsed
         self.deniedCount = deniedCount
         self.hardLinkSavings = hardLinkSavings
+        self.hardLinkAllocSavings = hardLinkAllocSavings
         self.volumeTotal = volumeTotal
         self.volumeFree = volumeFree
         self.volumeUsed = volumeUsed
@@ -546,7 +667,7 @@ final class ScanResult {
                 if wantsPromotion, promoted == nil, dir.files[i].isDuplicateLink {
                     dir.files[i].isDuplicateLink = false
                     promoted = (dir, dir.files[i].size, dir.files[i].alloc)
-                    hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                    dropSavings(of: dir.files[i])
                     creditType(of: dir.files[i])
                 }
             }
@@ -589,7 +710,7 @@ final class ScanResult {
                 var going = leaving[dir.files[i].fileID] ?? (0, false)
                 going.names += 1
                 if dir.files[i].isDuplicateLink {
-                    hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                    dropSavings(of: dir.files[i])
                 } else {
                     going.counted = true
                 }
@@ -622,7 +743,7 @@ final class ScanResult {
                 if going.counted, dir.files[i].isDuplicateLink {
                     dir.files[i].isDuplicateLink = false
                     promoted.append((dir, dir.files[i].size, dir.files[i].alloc))
-                    hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                    dropSavings(of: dir.files[i])
                     creditType(of: dir.files[i])
                     // Only the first survivor takes the bytes over.
                     leaving[dir.files[i].fileID]?.counted = false
@@ -633,10 +754,23 @@ final class ScanResult {
         return promoted
     }
 
-    /// Drops `size` from the double-counting statistic when a duplicate name is
+    /// Takes a duplicate name out of the double-counting statistic when it is
     /// removed outright rather than promoted.
-    func forgetDuplicate(size: UInt64) {
-        hardLinkSavings -= min(hardLinkSavings, size)
+    func forgetDuplicate(_ file: FileEntry) {
+        dropSavings(of: file)
+    }
+
+    /// The double-counting statistic in the measure asked for.
+    func hardLinkSavings(using metric: SizeMetric) -> UInt64 {
+        metric == .logical ? hardLinkSavings : hardLinkAllocSavings
+    }
+
+    /// One duplicate name stops being a duplicate, by either route. Both
+    /// measures move together, or the status line's two readings of the same
+    /// tree drift apart with every delete.
+    private func dropSavings(of file: FileEntry) {
+        hardLinkSavings -= min(hardLinkSavings, file.size)
+        hardLinkAllocSavings -= min(hardLinkAllocSavings, file.alloc)
     }
 }
 

@@ -99,6 +99,20 @@ Paths are not stored per node. `DirNode.path` rebuilds by walking up to the
 root, whose `name` holds the full path the scan started from. Storing an
 absolute path on four million nodes would cost more than the rest of the tree.
 
+Every file carries two sizes: its length and the space it occupies. They are
+not interchangeable, and summing the wrong one is the easiest way for this app
+to be badly wrong — a container image can be longer than the disk it is on.
+`SizeMetric` says which is on show, and whatever states how big something is
+has to choose by it — the lines that summarise a scan through `bytes(using:)`,
+the treemap, the legend and the file list each in their own way — rather than
+reading `size` directly. The places that mean the length specifically say so.
+`FileStorage` records why the two differ when they do. A sparse file is told
+from attributes the scan already reads instead of asking the filesystem for its
+own flag, which would mean a second attribute group on every entry: over the
+3.1 million files of a home folder the two agreed on all of them. That was
+measured on APFS and is trusted only there — a network share can report no
+allocation at all, and every file on it would otherwise be called sparse.
+
 ## Treemap
 
 ### `TreemapLayout` — squarified tiles with cushions
@@ -122,7 +136,10 @@ million-file treemap costs the same as a hundred-file one.
 ## App
 
 `AppModel` is the single `@MainActor` owner of scan state, derived table rows,
-and treemap zoom and selection.
+and treemap zoom and selection. The lines that summarise a scan — the header's
+"Scanned", the status bar's selection, the running count — are put together
+there too rather than in the views, so `--selftest` can hold them to the
+measure on show.
 
 Two pieces of background work read the tree off the main thread — the scan
 itself, and the File View's largest-files walk. Deletes mutate the tree in place

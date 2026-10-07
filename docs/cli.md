@@ -22,6 +22,19 @@ biggest file types.
 Wizzzee --scan ~/Library
 ```
 
+Everything is ranked and sized by space on disk, the figure `du` prints and the
+one the app shows by default. Where an entry's length is something else — a
+sparse image, a folder holding one — the length follows in brackets:
+
+```
+Largest folders, by space on disk:
+     95.0 MB   69.3%  Movies
+     24.0 MB   17.5%  Group Containers  (1.5 TB long)
+```
+
+The totals give both: `on disk`, and `logical size`, which is every file's
+length added up and can exceed the size of the disk.
+
 Totals match `du -sk` exactly on the trees they have been compared against.
 Progress lines are written as the walk proceeds, so piping through `head` is
 safe on a large tree.
@@ -73,13 +86,15 @@ Wizzzee --uishot --tab files --path /System/Library \
 | `--size WxH` | `1500x900` | Window size in points (rendered at 2×) |
 | `--tab tree\|files\|about` | `tree` | Which tab to show |
 | `--zoom N` | `0` | Zoom the treemap N levels into the largest folder |
+| `--metric size\|disk` | `disk` | Which measure is on show, as the Size / On Disk control sets it |
 | `--select-largest` | off | Select the biggest item before rendering |
 | `--no-access-banner` | off | Hide the Full Disk Access warning |
 | `--no-treemap` | off | Hide the treemap, as the View menu's Hide Treemap does |
 
 `--tab` accepts either the short name or the display title, matched by prefix,
 so `files`, `file`, and `"file view"` all select the File View. An unrecognized
-value exits with status 2 rather than silently falling back.
+value exits with status 2 rather than silently falling back, and so does an
+unrecognized `--metric`.
 
 A command-line build can never hold Full Disk Access, so the warning banner is
 always up; `--no-access-banner` produces the layout a user who has granted it
@@ -125,8 +140,9 @@ Wizzzee --selftest
 ```
 
 Exits 0 when every check passes, 1 otherwise, so it works as a CI gate. It
-covers logical and allocated totals, hard-link deduplication, extension
-statistics, filtering and ranking, that trashing and permanent deletion adjust
+covers logical and allocated totals, that a scan is reported in the measure on
+show even when its files are longer than the volume, hard-link deduplication,
+extension statistics, filtering and ranking, that trashing and permanent deletion adjust
 every ancestor's totals correctly, that System Integrity Protection paths are
 refused, and that a stopped scan is reported as cancelled while an unreadable
 root is reported as an error.

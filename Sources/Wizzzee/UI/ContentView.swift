@@ -33,13 +33,6 @@ struct ContentView: View {
         // columns instead of compressing them, so this is the real floor.
         // Enforced as the window minimum via .windowResizability(.contentMinSize).
         .frame(minWidth: 1160, minHeight: 660)
-        .onChange(of: model.sizeMetric) {
-            // The file list is ranked by the active metric, so it has to be
-            // recomputed when the metric changes.
-            model.refreshFileRows(immediately: true)
-            // So is the tree, when it is ordered by "% of Parent".
-            if model.treeSort.first?.key == .percent { model.rebuildTreeRows() }
-        }
         .alert(
             model.actionError ?? "Something went wrong",
             isPresented: Binding(
@@ -86,7 +79,7 @@ struct ContentView: View {
     private var deleteMessage: String {
         let targets = model.permanentDeleteTargets
         var warning =
-            "\(ByteFormat.decimal(model.reclaimableSize(targets))) will be "
+            "\(ByteFormat.decimal(model.reclaimableSpace(targets))) will be "
             + "reclaimed. This bypasses the Trash and cannot be undone."
         // Hard-linked bytes stay on disk under their other names, so the figure
         // above deliberately excludes them and says so rather than quoting a

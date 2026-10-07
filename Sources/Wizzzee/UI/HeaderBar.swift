@@ -92,13 +92,10 @@ struct HeaderBar: View {
         switch model.phase {
         case .scanning:
             VStack(alignment: .leading, spacing: 2) {
-                Text(
-                    "Scanning… \(ByteFormat.count(model.progress.items)) items, "
-                        + ByteFormat.decimal(model.progress.bytes)
-                )
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                Text(model.progressSummary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 ProgressView().progressViewStyle(.linear).frame(width: 380)
             }
         case .complete:
@@ -155,12 +152,10 @@ struct HeaderBar: View {
             }
             GridRow {
                 rowLabel("Scanned:")
-                if let result = model.result {
-                    Text(
-                        "\(ByteFormat.decimal(result.root.totalSize))  "
-                            + "(\(ByteFormat.counted(result.root.totalFiles, "file")))"
-                    )
-                    .fontWeight(.medium)
+                if let scanned = model.scannedSummary {
+                    Text(scanned)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
                 } else {
                     Text("—").foregroundStyle(.secondary)
                 }
@@ -219,8 +214,10 @@ struct HeaderBar: View {
             .pickerStyle(.segmented)
             .frame(width: 150)
             .help(
-                "Which measure the treemap uses. Sparse files occupy far less "
-                    + "on disk than their logical size."
+                "Which measure is on show. Size is how long files are; On Disk "
+                    + "is the space they occupy. A sparse file, such as a "
+                    + "container or virtual machine image, can be far longer "
+                    + "than the space it takes."
             )
 
             // The bulk actions take the version line's place rather than adding
