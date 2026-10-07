@@ -109,6 +109,8 @@ rebuilding.
 
 ![File View, showing the biggest files in the scan](docs/images/file-view.png)
 
+![Two folders marked for removal: ticked in the table, hatched on the treemap, and listed with their sizes above the status bar](docs/images/marks.png)
+
 ## Reading the numbers
 
 **Size vs On Disk.** "Size" is the logical file length; "On Disk" is the space
