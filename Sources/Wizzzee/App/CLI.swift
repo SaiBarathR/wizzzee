@@ -23,7 +23,7 @@ enum CLI {
                                              [--metric size|disk]
                                              [--select-largest] [--no-access-banner]
                                              [--no-treemap] [--mark N]
-                                             [--type EXT]
+                                             [--type EXT] [--filter TEXT]
               Wizzzee --version              print the version
             """
         )

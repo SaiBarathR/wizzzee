@@ -24,6 +24,7 @@ enum UIShot {
         var metric = SizeMetric.allocated
         var markCount = 0
         var focusType: String?
+        var filter = ""
 
         var index = 0
         while index < arguments.count {
@@ -80,6 +81,10 @@ enum UIShot {
                 index += 2
             case "--zoom":
                 zoomDepth = Int(next ?? "1") ?? 1
+                index += 2
+            case "--filter":
+                // What would be typed into the File View's filter.
+                if let next { filter = next }
                 index += 2
             case "--type":
                 // A row of File Types is picked by clicking it. Given as the
@@ -197,6 +202,7 @@ enum UIShot {
                 exit(2)
             }
         }
+        model.fileQuery = filter
         if tab == .files { model.refreshFileRows(immediately: true) }
 
         pump(seconds: 2.5)

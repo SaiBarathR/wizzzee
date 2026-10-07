@@ -110,6 +110,9 @@ enum SelfTest {
         testThePathAboveTheMapZoomsOut()
         testTabsAnswerTheirKeys()
         testQuickLookShowsWhatIsSelected()
+        testASearchIsReadFromWhatWasTyped()
+        testASearchFindsFoldersAndCountsWhatItFinds()
+        testTheFileViewSearches()
         testARevealedRowIsScrolledIntoView()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
@@ -6903,6 +6906,408 @@ enum SelfTest {
             "showing \(showing()), said \(model.actionError ?? "nothing")"
         )
         model.selection = []
+    }
+
+    // MARK: - Search
+
+    /// The filter was one piece of text. It is now read: words to find, and
+    /// filters for size, age, type and kind.
+    private static func testASearchIsReadFromWhatWasTyped() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func read(_ text: String) -> SearchQuery { SearchQuery(text, now: now) }
+
+        let nothing = read("   ")
+        check(
+            "nothing typed asks for nothing, and for files",
+            nothing.isEmpty && nothing.finds(.file) && !nothing.finds(.folder),
+            "empty \(nothing.isEmpty)"
+        )
+
+        let words = read("Node_Modules  src/app \"two words\"")
+        check(
+            "words are looked for in names, and one with a slash in the path",
+            words.names == ["node_modules", "two words"] && words.paths == ["src/app"]
+                && words.needsPaths && !words.isEmpty,
+            "names \(words.names), paths \(words.paths)"
+        )
+        check(
+            "a word to go by brings folders in as well as files",
+            words.finds(.file) && words.finds(.folder),
+            "files \(words.finds(.file)), folders \(words.finds(.folder))"
+        )
+        check(
+            "every word has to be there, in any order and any case",
+            words.matches(name: "Two Words in NODE_MODULES")
+                && !words.matches(name: "node_modules")
+                && words.matches(path: "/x/SRC/App/y") && !words.matches(path: "/x/src"),
+            ""
+        )
+
+        let sizes = read(">1.5gb <2TB")
+        check(
+            "> and < are sizes, in the units the app shows",
+            sizes.above == 1_500_000_000 && sizes.below == 2_000_000_000_000
+                && sizes.names.isEmpty,
+            "above \(String(describing: sizes.above)), below "
+                + "\(String(describing: sizes.below))"
+        )
+        check(
+            "and both ends are left out",
+            !sizes.admits(bytes: 1_500_000_000, mtime: 0)
+                && sizes.admits(bytes: 1_500_000_001, mtime: 0)
+                && !sizes.admits(bytes: 2_000_000_000_000, mtime: 0),
+            ""
+        )
+        check(
+            "a bare number is bytes, and k, m, g and t are enough",
+            read(">10").above == 10 && read(">3k").above == 3_000
+                && read("<4m").below == 4_000_000 && read(">5g").above == 5_000_000_000
+                && read(">1t").above == 1_000_000_000_000,
+            "\(String(describing: read(">3k").above))"
+        )
+
+        let day = 86_400.0
+        let ages = read("older:1y newer:6m")
+        check(
+            "older: and newer: are counted back from now",
+            ages.modifiedBefore == now.timeIntervalSince1970 - 365 * day
+                && ages.modifiedAfter == now.timeIntervalSince1970 - 180 * day,
+            "before \(String(describing: ages.modifiedBefore)), after "
+                + "\(String(describing: ages.modifiedAfter))"
+        )
+        let old = read("older:2w")
+        check(
+            "something modified before the cutoff is older, and at it is not",
+            old.admits(bytes: 0, mtime: now.timeIntervalSince1970 - 14 * day - 1)
+                && !old.admits(bytes: 0, mtime: now.timeIntervalSince1970 - 14 * day),
+            ""
+        )
+        check(
+            "days and weeks are read too",
+            read("newer:30d").modifiedAfter == now.timeIntervalSince1970 - 30 * day
+                && read("older:2w").modifiedBefore
+                    == now.timeIntervalSince1970 - 14 * day,
+            ""
+        )
+
+        check(
+            "ext: names one type, with or without its dot, in any case",
+            read("ext:DMG").ext == "dmg" && read("ext:.dmg").ext == "dmg"
+                && read("ext:none").ext == "",
+            "\(String(describing: read("ext:DMG").ext))"
+        )
+        check(
+            "a type asked for leaves folders out, word or no word",
+            !read("backup ext:dmg").finds(.folder) && read("backup ext:dmg").finds(.file),
+            ""
+        )
+        let folders = read("kind:folder")
+        check(
+            "kind: says which of the two, and needs no word to go with it",
+            folders.kind == .folder && folders.finds(.folder) && !folders.finds(.file)
+                && !folders.isEmpty && read("x kind:file").finds(.file)
+                && !read("x kind:file").finds(.folder),
+            "kind \(String(describing: folders.kind))"
+        )
+
+        let bad = [">", ">1zb", "<big", "older:", "older:5x", "newer:soon", "kind:thing", "ext:"]
+        let unread = bad.filter { read($0).unreadable != [$0] }
+        check(
+            "a filter that can't be read is kept as one that could not be",
+            unread.isEmpty,
+            "read without complaint: \(unread)"
+        )
+        let both = read("report >1zb")
+        check(
+            "and is not mistaken for a word to look for",
+            both.names == ["report"] && both.unreadable == [">1zb"] && !both.isEmpty,
+            "names \(both.names), unreadable \(both.unreadable)"
+        )
+        let literal = read("12:30 \">1gb\" a:b")
+        check(
+            "a name with a colon in it, or a filter in quotes, is a word",
+            literal.names == ["12:30", ">1gb", "a:b"] && literal.unreadable.isEmpty
+                && literal.above == nil,
+            "names \(literal.names), above \(String(describing: literal.above))"
+        )
+        check(
+            "a word typed with an accent has names folded to meet it",
+            read("café").foldsNames && !read("cafe").foldsNames,
+            ""
+        )
+    }
+
+    /// proj1/node_modules/a.js (4,000), proj1/node_modules/pkg/node_modules/
+    /// b.js (2,000), proj1/src/main.js (1,000), proj2/node_modules/c.js
+    /// (3,000), big.bin (50,000), old.log (8,000, two years old), new.log
+    /// (6,000).
+    private static func buildSearchFixture(at base: URL) throws {
+        let manager = FileManager.default
+        for folder in [
+            "proj1/node_modules/pkg/node_modules", "proj1/src", "proj2/node_modules",
+        ] {
+            try manager.createDirectory(
+                at: base.appendingPathComponent(folder),
+                withIntermediateDirectories: true
+            )
+        }
+        try write(base.appendingPathComponent("proj1/node_modules/a.js"), bytes: 4_000)
+        try write(
+            base.appendingPathComponent("proj1/node_modules/pkg/node_modules/b.js"),
+            bytes: 2_000
+        )
+        try write(base.appendingPathComponent("proj1/src/main.js"), bytes: 1_000)
+        try write(base.appendingPathComponent("proj2/node_modules/c.js"), bytes: 3_000)
+        try write(base.appendingPathComponent("big.bin"), bytes: 50_000)
+        try write(base.appendingPathComponent("old.log"), bytes: 8_000)
+        try write(base.appendingPathComponent("new.log"), bytes: 6_000)
+        try manager.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -2 * 365 * 86_400)],
+            ofItemAtPath: base.appendingPathComponent("old.log").path
+        )
+    }
+
+    /// "Every node_modules, and what they come to" is a question about
+    /// folders, and the filter only ever looked at files. Nor did it say how
+    /// much it had found: only the largest thousand of it.
+    private static func testASearchFindsFoldersAndCountsWhatItFinds() {
+        let base = scratch("search")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildSearchFixture(at: base)
+        } catch {
+            check("the search fixture can be built", false, "\(error)")
+            return
+        }
+        let result = scan(base)
+        func find(_ text: String, ofType type: Int? = nil, limit: Int = 100) -> SearchResult {
+            result.search(SearchQuery(text), ofType: type, limit: limit, metric: .logical)
+        }
+        func names(_ found: SearchResult) -> [String] { found.rows.map(\.name) }
+        func said(_ found: SearchResult) -> String {
+            "rows \(names(found)), \(String(describing: found.matches)) matches, "
+                + "\(found.bytes) bytes"
+        }
+
+        let modules = find("node_modules")
+        check(
+            "a word finds the folders of that name, wherever they are",
+            modules.rows.count == 3 && modules.rows.allSatisfy(\.isDirectory)
+                && Set(names(modules)) == ["node_modules"],
+            said(modules)
+        )
+        check(
+            "largest first, each at everything it holds",
+            modules.rows.map(\.size) == [6_000, 3_000, 2_000],
+            "\(modules.rows.map(\.size))"
+        )
+        check(
+            "the count is of all three, and one inside another adds nothing to the size",
+            modules.matches == 3 && modules.bytes == 9_000,
+            said(modules)
+        )
+        check(
+            "kind:file holds the same word to files, of which there are none",
+            find("node_modules kind:file").rows.isEmpty
+                && find("node_modules kind:file").matches == 0,
+            said(find("node_modules kind:file"))
+        )
+
+        let scripts = find("js")
+        check(
+            "a word finds files as it always did, and says what they come to",
+            names(scripts) == ["a.js", "c.js", "b.js", "main.js"]
+                && scripts.matches == 4 && scripts.bytes == 10_000,
+            said(scripts)
+        )
+        let few = find("js", limit: 2)
+        check(
+            "everything found is counted, however few of them are listed",
+            names(few) == ["a.js", "c.js"] && few.matches == 4 && few.bytes == 10_000,
+            said(few)
+        )
+
+        let folders = find("kind:folder")
+        check(
+            "kind:folder lists every folder, and totals only the outermost",
+            folders.matches == 7 && folders.rows.allSatisfy(\.isDirectory)
+                && names(folders).first == "proj1" && folders.bytes == 10_000,
+            said(folders)
+        )
+
+        let large = find(">5kb")
+        check(
+            "a size on its own is asked of files, not of the folders they are in",
+            names(large) == ["big.bin", "old.log", "new.log"] && large.matches == 3
+                && large.bytes == 64_000,
+            said(large)
+        )
+        check(
+            "two sizes are a range",
+            names(find(">5kb <10kb")) == ["old.log", "new.log"],
+            said(find(">5kb <10kb"))
+        )
+        check(
+            "older: finds what has not been touched since",
+            names(find("older:1y")) == ["old.log"] && find("older:1y").matches == 1,
+            said(find("older:1y"))
+        )
+        check(
+            "newer: finds the rest, and a word narrows it",
+            names(find("newer:30d log")) == ["new.log"],
+            said(find("newer:30d log"))
+        )
+
+        check(
+            "ext: is one type exactly",
+            names(find("ext:log")) == ["old.log", "new.log"]
+                && find("ext:log").bytes == 14_000,
+            said(find("ext:log"))
+        )
+        check(
+            "a type the scan has none of finds nothing",
+            find("ext:nope").rows.isEmpty && find("ext:nope").matches == 0,
+            said(find("ext:nope"))
+        )
+        let bin = result.typeIndex(for: "bin")
+        check(
+            "nor does one that is not the type in focus",
+            find("ext:log", ofType: bin).rows.isEmpty
+                && names(find("ext:bin", ofType: bin)) == ["big.bin"],
+            said(find("ext:log", ofType: bin))
+        )
+        check(
+            "with a type in focus, a word finds no folders",
+            names(find("proj", ofType: bin)).isEmpty
+                && names(find("big", ofType: bin)) == ["big.bin"],
+            said(find("proj", ofType: bin))
+        )
+
+        let under = find("proj1/")
+        check(
+            "a word with a slash is looked for in the path, of folders too",
+            under.matches == 7 && under.rows.filter(\.isDirectory).count == 4
+                && under.bytes == 7_000,
+            said(under)
+        )
+
+        let unread = find("js >zz")
+        check(
+            "a filter that can't be read finds nothing, not everything",
+            unread.rows.isEmpty && unread.matches == 0,
+            said(unread)
+        )
+
+        let plain = find("")
+        check(
+            "with nothing asked for, the list is the largest files and nothing is counted",
+            plain.matches == nil && plain.rows.count == 7
+                && plain.rows.allSatisfy { !$0.isDirectory }
+                && names(plain).first == "big.bin",
+            said(plain)
+        )
+        check(
+            "the largest-files list never has a folder in it, whatever is typed",
+            result.largestFiles(matching: "node_modules").isEmpty
+                && result.largestFiles(matching: "proj1/").count == 3,
+            "\(result.largestFiles(matching: "proj1/").map(\.name))"
+        )
+    }
+
+    /// The same, through the File View: what it lists, what it says it found,
+    /// and that a folder it found can be acted on like any other row.
+    @MainActor
+    private static func testTheFileViewSearches() {
+        let base = scratch("file-view-search")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildSearchFixture(at: base)
+        } catch {
+            check("the search fixture can be built", false, "\(error)")
+            return
+        }
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        pumpUntilFileRowsSettle(model, expecting: 7)
+        check(
+            "with nothing typed the File View counts nothing",
+            model.fileTally == nil && model.fileRows.count == 7,
+            "tally \(String(describing: model.fileTally))"
+        )
+
+        model.beginSearch()
+        check(
+            "⌘F brings the File View to the front and asks for the keyboard",
+            model.tab == .files && model.takeFilterFocus(),
+            "tab \(model.tab)"
+        )
+        check(
+            "asked once, the filter takes it once",
+            !model.takeFilterFocus(),
+            ""
+        )
+
+        model.fileQuery = "node_modules"
+        model.refreshFileRows(immediately: true)
+        pumpUntilFileRowsSettle(model, expecting: 3)
+        let found = model.fileRows
+        let onDisk = found.prefix(2).reduce(UInt64(0)) { $0 + $1.alloc }
+        check(
+            "a folder search lists folders, each with the folder it is in",
+            found.count == 3 && found.allSatisfy { $0.ref.isDirectory }
+                && found.first?.name == "node_modules"
+                && found.first?.directory == result.root.path + "/proj1",
+            "\(found.map { $0.directory + "/" + $0.name })"
+        )
+        check(
+            "and says how many it found and what they take up, counted once",
+            model.fileTally == SearchTally(matches: 3, bytes: onDisk),
+            "tally \(String(describing: model.fileTally)), expected 3 and \(onDisk)"
+        )
+
+        // The one inside another goes: a row like any other.
+        guard let nested = found.first(where: { $0.directory.hasSuffix("/pkg") })?.ref
+        else {
+            check("the nested folder is among the rows", false, "\(found.map(\.directory))")
+            return
+        }
+        model.selection = [nested]
+        check(
+            "a folder the search found can be removed with the delete key",
+            model.canUseDeleteKeys && model.selectionOnShow == [nested],
+            "on show \(model.selectionOnShow.map(\.name))"
+        )
+        model.trashSelection()
+        pumpUntilDeleteSettles(model)
+        pumpUntilFileRowsSettle(model, expecting: 2)
+        check(
+            "which takes its row out and counts again",
+            model.fileRows.count == 2 && model.fileTally?.matches == 2
+                && !FileManager.default.fileExists(atPath: base.path
+                    + "/proj1/node_modules/pkg/node_modules"),
+            "\(model.fileRows.count) rows, tally \(String(describing: model.fileTally))"
+        )
+
+        model.fileQuery = "js >zz"
+        model.refreshFileRows(immediately: true)
+        pumpUntilFileRowsSettle(model, expecting: 0)
+        check(
+            "a filter that can't be read lists nothing, and is named",
+            model.fileRows.isEmpty && model.fileTally?.matches == 0
+                && model.fileSearch.unreadable == [">zz"],
+            "\(model.fileRows.count) rows, unreadable \(model.fileSearch.unreadable)"
+        )
+
+        model.clearSearch()
+        pumpUntilFileRowsSettle(model, expecting: 6)
+        check(
+            "clearing the filter goes back to the largest files, uncounted",
+            model.fileQuery.isEmpty && model.fileTally == nil
+                && model.fileRows.count == 6
+                && model.fileRows.allSatisfy { !$0.ref.isDirectory },
+            "\(model.fileRows.count) rows, tally \(String(describing: model.fileTally))"
+        )
     }
 
     /// A row picked from somewhere other than the table — a tile on the map,

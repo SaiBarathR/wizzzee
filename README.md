@@ -66,8 +66,23 @@ rebuilding.
   sorting applies within each parent, so the hierarchy stays intact. `→` opens
   the selected folder and `←` shuts it, as in Finder's list view; pressed again
   they step into the folder and back out of it.
-- **File View** — the 1,000 biggest files anywhere in the scan. Type in the
-  filter to search by name; include a `/` to match against the full path.
+- **File View** — the 1,000 biggest files anywhere in the scan, and where to
+  search it. `⌘F` goes to its filter from any tab. Words are looked for in
+  names — all of them, in any order — and find folders as well as files, so
+  `node_modules` lists every folder of that name and what they come to. A word
+  with a `/` in it is looked for in the whole path, and `"two words"` in quotes
+  are one. The rest are filters:
+
+  | Filter | Finds |
+  | --- | --- |
+  | `>1gb` `<500kb` | what is bigger, or smaller, in the measure on show |
+  | `older:1y` `newer:30d` | by when it was last modified (`d`, `w`, `m`, `y`) |
+  | `ext:dmg` | one file type; `ext:none` for files with no extension |
+  | `kind:folder` `kind:file` | folders only, or files only |
+
+  The line at the right says how many things matched, listed or not, and what
+  they take up; a match inside a folder that also matched is counted and adds
+  nothing to the size. `Esc` empties the filter.
 - **Treemap** — every file as a rectangle, area proportional to size, colored by
   extension. Click to select, double-click a folder to zoom in, and click any
   folder in the path above it to zoom back out to there. **View ▸ Hide Treemap**, or the
@@ -117,6 +132,7 @@ rebuilding.
 | `⌘O` | Choose a folder to scan |
 | `⌘.` | Stop a running scan |
 | `⌘R` | Rescan |
+| `⌘F` | Search: go to the File View's filter |
 | `⌘Y` | Quick Look at the selected item, or shut it |
 | `Space` or `⇧⌘M` | Mark the selected rows for removal, or unmark them |
 | `⌘⌫` | Move the selection to the Trash |

@@ -631,16 +631,7 @@ final class ScanResult {
     }
 
     /// The `limit` largest files whose name or path matches `query`, ranked by
-    /// `metric`.
-    ///
-    /// Walks the tree with a bounded min-heap instead of keeping a flat sorted
-    /// array of every file, which on a full disk would cost tens of megabytes.
-    /// Returns an empty array if `token` is cancelled part-way: a caller that
-    /// gave up is about to change the tree this is reading, and a partial
-    /// ranking of it is worth nothing.
-    ///
-    /// `typeIndex` holds the list to one file type, named as `typeIndex(for:)`
-    /// gives it.
+    /// `metric`. `search` held to files, for the callers that want only them.
     func largestFiles(
         matching query: String = "",
         ofType typeIndex: Int? = nil,
@@ -648,18 +639,63 @@ final class ScanResult {
         metric: SizeMetric = .allocated,
         token: WalkToken? = nil
     ) -> [NodeRef] {
-        let needle = query.foldedForSearch
-        let wantedType = typeIndex.map { Int32($0) }
-        // Nearly every filter is plain ASCII, and is matched byte for byte
-        // against names as they are stored. Anything else needs each name
-        // folded the same way as the needle before the two can be compared.
-        //
-        // Asked of what was typed, not of the needle. Folding can leave a
-        // needle that is pure ASCII — `ß` becomes "ss" — and the name it was
-        // typed to find still has the `ß` in it.
-        let foldsNames = query.utf8.contains { $0 >= 0x80 }
-        let matchPath = needle.contains("/")
+        var files = SearchQuery(query)
+        if files.kind == nil { files.kind = .file }
+        return search(
+            files,
+            ofType: typeIndex,
+            limit: limit,
+            metric: metric,
+            token: token
+        ).rows
+    }
+
+    /// The `limit` largest things `query` finds, ranked by `metric`, with a
+    /// count of everything it found and what that comes to.
+    ///
+    /// Walks the tree with a bounded min-heap instead of keeping a flat sorted
+    /// array of every file, which on a full disk would cost tens of megabytes.
+    /// Comes back empty if `token` is cancelled part-way: a caller that gave
+    /// up is about to change the tree this is reading, and a partial ranking
+    /// of it is worth nothing.
+    ///
+    /// `typeIndex` holds the list to one file type, named as `typeIndex(for:)`
+    /// gives it.
+    ///
+    /// With nothing asked for, nothing is counted, and a file too small to
+    /// make the list is passed over without a look. Counting is what a query
+    /// costs: every file is then held up to it, whether or not it could have
+    /// been listed, because "how many, and how much" is half of what was
+    /// asked.
+    func search(
+        _ query: SearchQuery,
+        ofType typeIndex: Int? = nil,
+        limit: Int = 1000,
+        metric: SizeMetric = .allocated,
+        token: WalkToken? = nil
+    ) -> SearchResult {
+        // A filter that could not be read finds nothing. Left out, it would
+        // list everything, as though whatever it was meant to say had been met.
+        guard query.unreadable.isEmpty else { return SearchResult(matches: 0) }
+
+        var wantedType = typeIndex.map { Int32($0) }
+        if let ext = query.ext {
+            // A type this scan never saw, or one that is not the type in
+            // focus, is a type no file here can be.
+            guard let index = self.typeIndex(for: ext).map({ Int32($0) }),
+                wantedType == nil || wantedType == index
+            else { return SearchResult(matches: 0) }
+            wantedType = index
+        }
+        let counts = !query.isEmpty
+        let wantsFiles = query.finds(.file)
+        // A folder is no one type, so a type asked for leaves folders out.
+        let wantsFolders = query.finds(.folder) && wantedType == nil
+        let needsPaths = query.needsPaths
+
         var heap = SizeHeap(limit: limit)
+        var matches = 0
+        var bytes: UInt64 = 0
         // Checked per directory rather than per file — the flag is behind a
         // lock, and a directory is a short enough unit to keep the wait small.
         var sinceCheck = 0
@@ -669,46 +705,70 @@ final class ScanResult {
         // 512 KB stack. Each entry carries its own path, so a path filter
         // extends the parent's string instead of rebuilding an absolute path
         // from the parent chain once per directory.
-        var stack: [(dir: DirNode, path: String)] = [
-            (root, matchPath ? root.path : "")
+        //
+        // `covered` is true beneath a folder that matched: what matches in
+        // there is listed and counted, and adds nothing to the total, which
+        // already has the folder it is in.
+        var stack: [(dir: DirNode, path: String, covered: Bool)] = [
+            (root, needsPaths ? root.path : "", false)
         ]
-        while let (dir, dirPath) = stack.popLast() {
+        while let (dir, dirPath, covered) = stack.popLast() {
             sinceCheck += 1
             if sinceCheck >= 64, let token {
                 sinceCheck = 0
-                if token.isCancelled { return [] }
+                if token.isCancelled { return SearchResult() }
             }
-            for i in dir.files.indices {
-                let file = dir.files[i]
-                if file.isDuplicateLink || file.isRemoved { continue }
-                if let wantedType, file.extIndex != wantedType { continue }
-                let weight = metric == .logical ? file.size : file.alloc
-                if !heap.wouldAccept(weight) { continue }
-                if !needle.isEmpty {
-                    let haystack =
-                        matchPath
-                        ? (dirPath + "/" + file.name) : file.name
-                    let matches =
-                        foldsNames
-                        ? haystack.containsFolded(needle)
-                        : haystack.containsCaseInsensitive(needle)
-                    if !matches { continue }
+            if wantsFiles {
+                for i in dir.files.indices {
+                    let file = dir.files[i]
+                    if file.isDuplicateLink || file.isRemoved { continue }
+                    if let wantedType, file.extIndex != wantedType { continue }
+                    let weight = metric == .logical ? file.size : file.alloc
+                    if counts {
+                        guard query.admits(bytes: weight, mtime: file.mtime),
+                            query.matches(name: file.name),
+                            !needsPaths
+                                || query.matches(
+                                    path: dirPath.hasSuffix("/")
+                                        ? dirPath + file.name
+                                        : dirPath + "/" + file.name
+                                )
+                        else { continue }
+                        matches += 1
+                        if !covered { bytes += weight }
+                    } else if !heap.wouldAccept(weight) {
+                        continue
+                    }
+                    heap.insert(NodeRef(dir: dir, fileIndex: i), size: weight)
                 }
-                heap.insert(NodeRef(dir: dir, fileIndex: i), size: weight)
             }
             for sub in dir.subdirs {
-                stack.append(
-                    (
-                        sub,
-                        matchPath
-                            ? (dirPath.hasSuffix("/")
-                                ? dirPath + sub.name : dirPath + "/" + sub.name)
-                            : ""
-                    )
-                )
+                let subPath =
+                    needsPaths
+                    ? (dirPath.hasSuffix("/")
+                        ? dirPath + sub.name : dirPath + "/" + sub.name)
+                    : ""
+                var found = false
+                if wantsFolders {
+                    let weight = sub.bytes(using: metric)
+                    if query.admits(bytes: weight, mtime: sub.mtime),
+                        query.matches(name: sub.name),
+                        !needsPaths || query.matches(path: subPath)
+                    {
+                        found = true
+                        matches += 1
+                        if !covered { bytes += weight }
+                        heap.insert(NodeRef(sub), size: weight)
+                    }
+                }
+                stack.append((sub, subPath, covered || found))
             }
         }
-        return heap.sortedDescending()
+        return SearchResult(
+            rows: heap.sortedDescending(),
+            matches: counts ? matches : nil,
+            bytes: bytes
+        )
     }
 
     /// Total across every file, ignoring hard-link duplicates.

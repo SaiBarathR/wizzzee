@@ -35,10 +35,14 @@ struct ItemContextMenu: View {
         if ref.isDirectory {
             Button("Zoom Treemap Here") { model.zoom(into: ref.dir) }
                 .disabled(ref.dir.isEmpty)
-        } else {
-            // From the File View this is a change of tab as well: the row was
-            // found, opened to and selected behind a tab that stayed where
-            // it was.
+        }
+        // A folder a search turned up is as much in need of placing as a
+        // file. In the tree itself it is already where this would put it.
+        //
+        // From the File View this is a change of tab as well: the row was
+        // found, opened to and selected behind a tab that stayed where it
+        // was.
+        if !ref.isDirectory || model.tab == .files {
             Button("Show in Tree") {
                 model.show(.tree)
                 model.revealInTree(ref)
