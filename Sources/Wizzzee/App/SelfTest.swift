@@ -44,6 +44,11 @@ enum SelfTest {
         testFilterAndRanking(root)
         testFilteringFoldsCaseBeyondASCII()
         testPercentOfParentSortsByTheMetricOnShow()
+        testStorageIsClassified()
+        testAScanIsReportedInTheSpaceItOccupies()
+        testTheRunningCountEndsAtTheScansTotals()
+        testTheTablesAreRankedByTheMeasureOnShow()
+        testHardLinkSavingsAreKeptInBothMeasures()
         testASupersededWalkNeverDelivers()
         testDeepestReachableTreeIsWalked()
         // Runs before anything that deletes from the fixture: it asserts the
@@ -678,6 +683,715 @@ enum SelfTest {
             order() == ["solid.dat", "sparse.img"],
             "got \(order())"
         )
+    }
+
+    // MARK: - Length against space occupied
+    //
+    // A file's length and the space it takes are two different numbers, and a
+    // sparse image can put them a thousandfold apart. Everything on screen is
+    // supposed to pick whichever the Size / On Disk control says; the lines
+    // that summarise the scan didn't, and quoted lengths regardless.
+
+    /// Which files have a length that isn't all on disk, and why.
+    ///
+    /// Told apart from attributes the scan already reads, so the cases that
+    /// can't be made in a temporary folder — a file a cloud provider holds, a
+    /// compressed system binary — are put to the rule directly, and the ones
+    /// that can are scanned for real.
+    private static func testStorageIsClassified() {
+        let compressed: UInt32 = 0x20
+        let dataless: UInt32 = 0x4000_0000
+        func kind(
+            _ size: UInt64,
+            _ alloc: UInt64,
+            _ flags: UInt32 = 0,
+            regular: Bool = true,
+            holes: Bool = true
+        ) -> FileStorage {
+            FileStorage.classify(
+                isRegularFile: regular,
+                size: size,
+                alloc: alloc,
+                bsdFlags: flags,
+                shortfallMeansHoles: holes
+            )
+        }
+
+        check(
+            "a file occupying less than its length is sparse",
+            kind(8_000_000, 0) == .sparse && kind(50_065_536, 147_456) == .sparse,
+            "got \(kind(8_000_000, 0)) and \(kind(50_065_536, 147_456))"
+        )
+        check(
+            "one rounded up to whole blocks, or exactly filling them, is not",
+            kind(5_000, 8_192) == .whole && kind(4_096, 4_096) == .whole
+                && kind(0, 0) == .whole,
+            "got \(kind(5_000, 8_192)), \(kind(4_096, 4_096)), \(kind(0, 0))"
+        )
+        check(
+            "a compressed file is all there, however little it occupies",
+            kind(184_336, 24_576, compressed) == .whole,
+            "got \(kind(184_336, 24_576, compressed))"
+        )
+        check(
+            "a file a cloud provider is holding is dataless, compressed or not",
+            kind(2_000_000_000, 0, dataless) == .dataless
+                && kind(2_000_000_000, 0, dataless | compressed) == .dataless,
+            "got \(kind(2_000_000_000, 0, dataless))"
+        )
+        check(
+            "a symlink is its target's path and nothing else",
+            kind(9, 0, regular: false) == .whole,
+            "got \(kind(9, 0, regular: false))"
+        )
+        // A share that reports no allocation, or less than the length for
+        // every file it compresses, would have each of them called mostly
+        // unwritten. Only a filesystem the rule was measured on is trusted.
+        check(
+            "where allocation can't be taken at its word, a shortfall isn't holes",
+            kind(8_000_000, 0, holes: false) == .whole
+                && kind(50_065_536, 147_456, holes: false) == .whole,
+            "got \(kind(8_000_000, 0, holes: false))"
+        )
+        check(
+            "a dataless file still says so itself there",
+            kind(2_000_000_000, 0, dataless, holes: false) == .dataless,
+            "got \(kind(2_000_000_000, 0, dataless, holes: false))"
+        )
+        check(
+            "that trust is given to APFS and nothing else",
+            FileStorage.shortfallMeansHoles(onFilesystem: "apfs")
+                && !["hfs", "smbfs", "nfs", "exfat", "msdos", "ntfs", ""]
+                    .contains(where: FileStorage.shortfallMeansHoles(onFilesystem:)),
+            "apfs: \(FileStorage.shortfallMeansHoles(onFilesystem: "apfs"))"
+        )
+        check(
+            "the startup volume's filesystem can be named",
+            VolumeInfo.filesystemType(of: "/") == "apfs"
+                && VolumeInfo.filesystemType(
+                    of: NSTemporaryDirectory() + "wizzzee-nowhere-\(getpid())"
+                ).isEmpty,
+            "got “\(VolumeInfo.filesystemType(of: "/"))”"
+        )
+
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-storage-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildSparseFixture(at: base)
+            try FileManager.default.createSymbolicLink(
+                at: base.appendingPathComponent("alias.img"),
+                withDestinationURL: base.appendingPathComponent("sparse.img")
+            )
+        } catch {
+            check("the storage fixture can be built", false, "\(error)")
+            return
+        }
+        let result = scan(base)
+        func found(_ name: String) -> FileEntry? {
+            result.root.files.first { $0.name == name }
+        }
+        check(
+            "a scan marks the sparse file",
+            found("sparse.img")?.storage == .sparse
+                && found("sparse.img")?.storageNote == "sparse",
+            "got \(String(describing: found("sparse.img")?.storage))"
+        )
+        check(
+            "and leaves the file beside it, and the link to it, unmarked",
+            found("solid.dat")?.storage == .whole
+                && found("solid.dat")?.storageNote == nil
+                && found("alias.img")?.storage == .whole,
+            "solid \(String(describing: found("solid.dat")?.storage)), "
+                + "alias \(String(describing: found("alias.img")?.storage))"
+        )
+        check(
+            "the note's explanation gives both figures",
+            found("sparse.img")?.storageExplanation?.contains(
+                ByteFormat.decimal(8_000_000)
+            ) == true,
+            "got \(String(describing: found("sparse.img")?.storageExplanation))"
+        )
+
+        // Compressed and dataless files are told from their flags, which come
+        // out of the same reply buffer as the sizes. A flag read from the
+        // wrong place would leave every size right and every other check
+        // green while each compressed file on the disk was called sparse, so
+        // one is set here where it can be looked for.
+        let flagged = base.appendingPathComponent("solid.dat").path
+        let wasSet = chflags(flagged, UInt32(UF_NODUMP)) == 0
+        var flagsRead: [String: UInt32] = [:]
+        let fixtureFD = open(base.path, O_RDONLY | O_DIRECTORY)
+        if fixtureFD >= 0 {
+            _ = BulkEnumerator().enumerate(fd: fixtureFD) { entry in
+                flagsRead[entry.name] = entry.bsdFlags
+            }
+            close(fixtureFD)
+        }
+        check(
+            "a file's flags are read from where the filesystem puts them",
+            wasSet
+                && flagsRead["solid.dat"].map { $0 & UInt32(UF_NODUMP) != 0 } == true
+                && flagsRead["sparse.img"].map { $0 & UInt32(UF_NODUMP) == 0 } == true,
+            "set: \(wasSet); read back "
+                + "\(flagsRead.mapValues { String($0, radix: 16) })"
+        )
+
+        // The system's own binaries are stored compressed, so they occupy a
+        // fraction of their length without a byte of them being missing. Only
+        // entries the filesystem itself says are compressed are judged, so
+        // what a machine happens to keep in `/bin` can't fail this — and where
+        // it keeps nothing compressed there, the check above is what stands.
+        var compressedEntries: [BulkEntry] = []
+        let fd = open("/bin", O_RDONLY | O_DIRECTORY)
+        if fd >= 0 {
+            _ = BulkEnumerator().enumerate(fd: fd) { entry in
+                if entry.bsdFlags & compressed != 0 { compressedEntries.append(entry) }
+            }
+            close(fd)
+        }
+        let mistaken = compressedEntries.filter {
+            $0.storage(shortfallMeansHoles: true) != .whole
+        }
+        let shorter = compressedEntries.filter { $0.alloc < $0.size }.count
+        check(
+            "the system's compressed binaries are not taken for sparse files",
+            mistaken.isEmpty,
+            "\(compressedEntries.count) compressed, \(shorter) of them occupying "
+                + "less than their length; marked: "
+                + "\(mistaken.map { "\($0.name) \($0.size)/\($0.alloc)" })"
+        )
+    }
+
+    /// A sparse image longer than the volume it sits on, beside an ordinary
+    /// file — the shape of a container runtime's disk image.
+    ///
+    /// image.raw   twice the volume's capacity long, 300,000 bytes written
+    /// solid.dat   200,000 bytes, all of them written
+    ///
+    /// Returns nil where the filesystem would not keep the image sparse: the
+    /// length is only safe to ask for where it costs nothing.
+    private static func buildOversizedImage(at root: URL) throws -> UInt64? {
+        try buildSparseFixture(at: root)
+        var probe = stat()
+        guard stat(root.appendingPathComponent("sparse.img").path, &probe) == 0,
+            UInt64(probe.st_blocks) * 512 < UInt64(probe.st_size)
+        else { return nil }
+        try FileManager.default.removeItem(
+            at: root.appendingPathComponent("sparse.img")
+        )
+
+        let capacity = VolumeInfo.capacity(of: root.path).total
+        guard capacity > 0, capacity < UInt64.max / 4 else { return nil }
+        let image = root.appendingPathComponent("image.raw")
+        try write(image, bytes: 300_000)
+        let handle = try FileHandle(forWritingTo: image)
+        try handle.truncate(atOffset: capacity * 2)
+        try handle.close()
+        return capacity
+    }
+
+    /// The header reported a scan of a 995 GB disk as 1.7 TB.
+    ///
+    /// One file did it: a container runtime's disk image, 995 GB long and
+    /// occupying 42 GB. With On Disk showing — the default — the treemap, the
+    /// bars and the sort all measured the 42 GB, while the header's "Scanned"
+    /// line, the status line and the tooltip strip added up lengths whatever
+    /// the control said. The result was a scan that claimed to have found more
+    /// than the volume holds, directly above the line giving its capacity.
+    @MainActor
+    private static func testAScanIsReportedInTheSpaceItOccupies() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-oversized-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let capacity: UInt64
+        do {
+            guard let total = try buildOversizedImage(at: base) else {
+                check(
+                    "an image longer than its volume can be made",
+                    false,
+                    "the temporary folder's filesystem doesn't keep files sparse"
+                )
+                return
+            }
+            capacity = total
+        } catch {
+            check("the oversized image can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        let root = result.root
+        guard let index = root.files.firstIndex(where: { $0.name == "image.raw" })
+        else {
+            check("the image was scanned", false, "\(root.files.map(\.name))")
+            return
+        }
+        let image = NodeRef(dir: root, fileIndex: index)
+        let length = ByteFormat.decimal(root.totalSize)
+        let occupied = ByteFormat.decimal(root.totalAlloc)
+
+        check(
+            "the fixture's files are longer than the volume they are on",
+            root.totalSize > capacity && root.totalAlloc < capacity
+                && model.targetCapacity.total == capacity,
+            "length \(root.totalSize), on disk \(root.totalAlloc), "
+                + "volume \(capacity)"
+        )
+        check(
+            "what the scan says it found fits on the volume it found it on",
+            model.sizeMetric == .allocated
+                && model.scannedBytes == root.totalAlloc
+                && model.scannedBytes <= capacity,
+            "reported \(model.scannedBytes) on a volume of \(capacity)"
+        )
+        check(
+            "the header's Scanned line quotes that, and not the files' length",
+            model.scannedSummary == "\(occupied)  (2 files)",
+            "got \(String(describing: model.scannedSummary))"
+        )
+        check(
+            "the status line sizes a selected folder the same way",
+            model.selectionSummary(NodeRef(root)).contains("  •  \(occupied)  •  ")
+                && !model.selectionSummary(NodeRef(root)).contains(length),
+            "got \(model.selectionSummary(NodeRef(root)))"
+        )
+        check(
+            "and a selected file, where the two are furthest apart",
+            model.selectionSummary(image).hasSuffix(
+                ByteFormat.decimal(root.files[index].alloc)
+            ),
+            "got \(model.selectionSummary(image))"
+        )
+        check(
+            "the image is marked, so the gap between its two sizes explains itself",
+            root.files[index].storage == .sparse
+                && root.files[index].storageExplanation?
+                    .hasSuffix("Deleting it frees the smaller figure.") == true,
+            "got \(root.files[index].storage): "
+                + "\(root.files[index].storageExplanation ?? "no explanation")"
+        )
+
+        // A scan still running has no totals yet, only what it has passed.
+        var running = ScanEngine.Progress()
+        running.items = 3
+        running.bytes = capacity * 2
+        running.allocated = 500_000
+        model.progress = running
+        check(
+            "a scan under way is counted in space on disk too",
+            model.progressSummary.hasSuffix("items, \(ByteFormat.decimal(500_000))"),
+            "got \(model.progressSummary)"
+        )
+
+        model.sizeMetric = .logical
+        check(
+            "with Size showing, the line leads with the length that was asked for",
+            model.scannedBytes == root.totalSize
+                && model.scannedSummary?.hasPrefix("\(length)  •  ") == true,
+            "got \(String(describing: model.scannedSummary))"
+        )
+        // Ahead of the file count, which is what a narrow header cuts short.
+        check(
+            "and says what that occupies straight after, since a length can exceed the disk",
+            model.scannedSummary == "\(length)  •  \(occupied) on disk  (2 files)",
+            "got \(String(describing: model.scannedSummary))"
+        )
+        check(
+            "the status line follows the control",
+            model.selectionSummary(NodeRef(root)).contains("  •  \(length)  •  "),
+            "got \(model.selectionSummary(NodeRef(root)))"
+        )
+        check(
+            "so does the running count, with the space it takes beside it",
+            model.progressSummary.hasSuffix(
+                "items, \(ByteFormat.decimal(capacity * 2))  •  "
+                    + "\(ByteFormat.decimal(500_000)) on disk"
+            ),
+            "got \(model.progressSummary)"
+        )
+        model.progress = ScanEngine.Progress()
+
+        // Still with Size showing: what a delete gives back is space, and the
+        // confirmation that says so can't quote the length the list is in.
+        check(
+            "a delete promises back what the image occupies, not how long it is",
+            model.reclaimableSpace([image]) == root.files[index].alloc
+                && model.reclaimableSize([image]) == root.files[index].size,
+            "promised \(model.reclaimableSpace([image])) for a file occupying "
+                + "\(root.files[index].alloc); the selection reads "
+                + "\(model.reclaimableSize([image]))"
+        )
+        check(
+            "the treemap's tooltip leads with the measure its tiles are drawn from",
+            TreemapNSView.tooltipDetail(for: image, metric: .logical)
+                .hasPrefix("\(ByteFormat.decimal(root.files[index].size))  •  on disk ")
+                && TreemapNSView.tooltipDetail(for: image, metric: .allocated)
+                    .hasPrefix("\(ByteFormat.decimal(root.files[index].alloc)) on disk"),
+            "got “\(TreemapNSView.tooltipDetail(for: image, metric: .logical))” "
+                + "and “\(TreemapNSView.tooltipDetail(for: image, metric: .allocated))”"
+        )
+
+        // Deleting the image has to take the right figure out of each.
+        model.sizeMetric = .allocated
+        let solid = root.files.first { $0.name == "solid.dat" }?.alloc ?? 0
+        deletePermanently(model, [image])
+        check(
+            "deleting the image leaves both measures describing what is left",
+            model.actionError == nil && root.totalAlloc == solid
+                && root.totalSize == 200_000
+                && model.scannedSummary
+                    == "\(ByteFormat.decimal(solid))  (1 file)",
+            "error \(model.actionError ?? "none"); on disk \(root.totalAlloc) "
+                + "of \(solid), length \(root.totalSize); "
+                + "line \(String(describing: model.scannedSummary))"
+        )
+    }
+
+    /// The count shown while a scan runs is kept by the workers as they go, in
+    /// both measures, apart from the totals worked out once they finish. The
+    /// two have to end in the same place, or the line under the Scan button
+    /// stops on one number and the header opens on another.
+    private static func testTheRunningCountEndsAtTheScansTotals() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-running-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildSparseFixture(at: base)
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("inner"),
+                withIntermediateDirectories: true
+            )
+            try write(base.appendingPathComponent("inner/more.dat"), bytes: 30_000)
+            try FileManager.default.linkItem(
+                at: base.appendingPathComponent("inner/more.dat"),
+                to: base.appendingPathComponent("inner/again.dat")
+            )
+        } catch {
+            check("the running-count fixture can be built", false, "\(error)")
+            return
+        }
+
+        let engine = ScanEngine()
+        guard case .completed(let result) =
+            engine.scanSynchronously(rootPath: base.path)
+        else {
+            check("the running-count fixture scans", false, "no result")
+            return
+        }
+        let counted = engine.counters()
+        check(
+            "the running count of space on disk ends at the scan's total",
+            counted.allocated == result.root.totalAlloc,
+            "counted \(counted.allocated), total \(result.root.totalAlloc)"
+        )
+        check(
+            "so does the running length, with a hard link's bytes counted once",
+            counted.bytes == result.root.totalSize
+                && counted.items == result.root.totalItems,
+            "counted \(counted.bytes) in \(counted.items) items, total "
+                + "\(result.root.totalSize) in \(result.root.totalItems)"
+        )
+        check(
+            "the two measures are far apart here, so neither stood in for the other",
+            counted.bytes > counted.allocated * 10,
+            "length \(counted.bytes), on disk \(counted.allocated)"
+        )
+    }
+
+    /// An order that was by the measure on show becomes an order by the new
+    /// one when the measure changes.
+    ///
+    /// Changing it used to leave both tables ranked by the measure just
+    /// switched away from, under bars — redrawn from the new one — that no
+    /// longer ran in any order.
+    @MainActor
+    private static func testTheTablesAreRankedByTheMeasureOnShow() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-leading-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try buildSparseFixture(at: base)
+        } catch {
+            check("the leading-column fixture can be built", false, "\(error)")
+            return
+        }
+        let model = AppModel()
+        model.customFolder = base.path
+        guard loadSynchronously(into: model) != nil else { return }
+        pumpUntilFileRowsSettle(model, expecting: 2)
+
+        func tree() -> [String] {
+            model.treeRows.filter { !$0.ref.isDirectory }.map(\.ref.name)
+        }
+        func files() -> [String] { model.fileRows.map(\.name) }
+        func settle() {
+            let deadline = Date().addingTimeInterval(10)
+            // One turn first: the walk is queued, not yet marked as running.
+            repeat {
+                RunLoop.main.run(
+                    mode: .default,
+                    before: Date().addingTimeInterval(0.02)
+                )
+            } while model.isFilteringFiles && Date() < deadline
+        }
+
+        check(
+            "to begin with both tables are ranked by space on disk",
+            model.sizeMetric == .allocated
+                && model.treeSort.first?.key == SizeMetric.allocated.sortKey
+                && model.fileSort.first?.keyPath == \FileRow.alloc
+                && tree() == ["solid.dat", "sparse.img"]
+                && files() == ["solid.dat", "sparse.img"],
+            "tree \(tree()), files \(files())"
+        )
+
+        model.sizeMetric = .logical
+        settle()
+        check(
+            "switching to Size ranks the tree by length without another click",
+            model.treeSort.first?.key == .size
+                && tree() == ["sparse.img", "solid.dat"],
+            "sorted by \(String(describing: model.treeSort.first?.key)): \(tree())"
+        )
+        check(
+            "and the file list with it",
+            model.fileSort.first?.keyPath == \FileRow.size
+                && files() == ["sparse.img", "solid.dat"],
+            "got \(files())"
+        )
+
+        model.treeSort = [TreeSort(.size, order: .forward)]
+        model.fileSort = [KeyPathComparator(\FileRow.size, order: .forward)]
+        model.sizeMetric = .allocated
+        settle()
+        check(
+            "an ascending order stays ascending across the change",
+            model.treeSort.first == TreeSort(.allocated, order: .forward)
+                && model.fileSort.first?.order == .forward
+                && model.fileSort.first?.keyPath == \FileRow.alloc
+                && tree() == ["sparse.img", "solid.dat"]
+                && files() == ["sparse.img", "solid.dat"],
+            "tree \(tree()), files \(files())"
+        )
+
+        model.treeSort = [TreeSort(.name, order: .forward)]
+        model.fileSort = [KeyPathComparator(\FileRow.name, order: .forward)]
+        model.sizeMetric = .logical
+        settle()
+        check(
+            "an order by something else is left as it was chosen",
+            model.treeSort.first == TreeSort(.name, order: .forward)
+                && model.fileSort.first?.keyPath == \FileRow.name
+                && tree() == ["solid.dat", "sparse.img"],
+            "sorted by \(String(describing: model.treeSort.first?.key)): \(tree())"
+        )
+
+        // Ranked by the measure that is *not* on show: picked on purpose.
+        model.treeSort = [TreeSort(.allocated)]
+        model.fileSort = [KeyPathComparator(\FileRow.alloc, order: .reverse)]
+        model.sizeMetric = .allocated
+        settle()
+        check(
+            "so is an order by the measure that was not the one on show",
+            model.treeSort.first?.key == .allocated
+                && model.fileSort.first?.keyPath == \FileRow.alloc
+                && tree() == ["solid.dat", "sparse.img"],
+            "sorted by \(String(describing: model.treeSort.first?.key)): \(tree())"
+        )
+    }
+
+    /// Every duplicate name still in the tree, added up in both measures —
+    /// what the double-counting figures ought to read at any moment.
+    private static func duplicateNames(
+        under root: DirNode
+    ) -> (size: UInt64, alloc: UInt64) {
+        var size: UInt64 = 0
+        var alloc: UInt64 = 0
+        var stack: [DirNode] = [root]
+        while let dir = stack.popLast() {
+            for file in dir.files where file.isDuplicateLink {
+                size += file.size
+                alloc += file.alloc
+            }
+            stack.append(contentsOf: dir.subdirs)
+        }
+        return (size, alloc)
+    }
+
+    /// The status line's "Hard links" figure was a sum of lengths, quoted next
+    /// to a total of space on disk.
+    ///
+    /// For ordinary files the two are a block's rounding apart and nobody
+    /// could tell. A second name for a sparse image is the other extreme: it
+    /// saves the image's whole length by one measure and almost nothing by the
+    /// other. The figure is now kept in both, and both have to stay right
+    /// through every way a name can leave the tree.
+    @MainActor
+    private static func testHardLinkSavingsAreKeptInBothMeasures() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-sparselink-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            let manager = FileManager.default
+            // The plain file gets a folder to itself. Which of the pair's two
+            // names the scan counts is down to which worker gets there first,
+            // so neither of their folders can hold anything else: deleting
+            // the counted one has to remove a name and nothing more.
+            for folder in ["one", "two", "three"] {
+                try manager.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            let image = base.appendingPathComponent("one/image.raw")
+            try write(image, bytes: 100_000)
+            let handle = try FileHandle(forWritingTo: image)
+            try handle.truncate(atOffset: 8_000_000)
+            try handle.close()
+            try manager.linkItem(
+                at: image,
+                to: base.appendingPathComponent("two/second.raw")
+            )
+            try write(base.appendingPathComponent("three/plain.dat"), bytes: 50_000)
+        } catch {
+            check("the sparse hard link can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard
+            let pair = roles(
+                result.root.subdir(named: "one"),
+                result.root.subdir(named: "two")
+            ),
+            let duplicate = pair.duplicate.files.first(where: \.isDuplicateLink)
+        else {
+            check("the sparse pair scanned as a pair", false, "no duplicate")
+            return
+        }
+
+        check(
+            "a second name for a sparse image saves its length by one measure",
+            result.hardLinkSavings(using: .logical) == 8_000_000,
+            "got \(result.hardLinkSavings(using: .logical))"
+        )
+        check(
+            "and only what it occupies by the other",
+            result.hardLinkSavings(using: .allocated) == duplicate.alloc
+                && duplicate.alloc > 0 && duplicate.alloc < 800_000,
+            "got \(result.hardLinkSavings(using: .allocated)), "
+                + "the file occupies \(duplicate.alloc)"
+        )
+        // Both names are the same sparse file, and are marked as one. Neither
+        // is told that deleting it frees anything: the other name holds it.
+        let names = pair.counted.files + pair.duplicate.files
+        check(
+            "each name of the pair is marked sparse, without a promise of space",
+            names.count == 2 && names.allSatisfy { $0.storage == .sparse }
+                && names.allSatisfy {
+                    $0.storageExplanation?.contains("Deleting it frees") == false
+                },
+            "\(names.map { "\($0.name): \($0.storageExplanation ?? "nothing")" })"
+        )
+        check(
+            "the bytes are in the totals once, in both",
+            result.root.totalSize == 8_050_000
+                && result.root.totalAlloc
+                    == result.root.subdirs.reduce(0) { $0 + $1.totalAlloc },
+            "length \(result.root.totalSize), on disk \(result.root.totalAlloc)"
+        )
+
+        // The counted name goes; the duplicate takes the bytes over and stops
+        // being a duplicate, so there is nothing left to have double-counted.
+        let allocBefore = result.root.totalAlloc
+        deletePermanently(model, [NodeRef(pair.counted)])
+        check(
+            "once the other name is promoted, neither measure saves anything",
+            model.actionError == nil
+                && result.hardLinkSavings(using: .logical) == 0
+                && result.hardLinkSavings(using: .allocated) == 0,
+            "error \(model.actionError ?? "none"); length "
+                + "\(result.hardLinkSavings(using: .logical)), on disk "
+                + "\(result.hardLinkSavings(using: .allocated))"
+        )
+        check(
+            "and the space on disk is where it was, under the name that is left",
+            result.root.totalAlloc == allocBefore
+                && result.root.totalSize == 8_050_000,
+            "on disk \(result.root.totalAlloc) of \(allocBefore), "
+                + "length \(result.root.totalSize)"
+        )
+
+        // Every way a name leaves, on a tree with links in each arrangement.
+        func agrees(_ result: ScanResult) -> (Bool, String) {
+            let names = duplicateNames(under: result.root)
+            let size = result.hardLinkSavings(using: .logical)
+            let alloc = result.hardLinkSavings(using: .allocated)
+            return (
+                size == names.size && alloc == names.alloc,
+                "length \(size) against \(names.size) in the tree, "
+                    + "on disk \(alloc) against \(names.alloc)"
+            )
+        }
+        withLinkFarm("measures") { model, result in
+            let start = agrees(result)
+            check(
+                "on a tree full of links, both figures are the duplicates' sum",
+                start.0 && result.hardLinkSavings(using: .allocated) > 0,
+                start.1
+            )
+
+            // A whole folder holding one name of a pair.
+            if let left = result.root.subdir(named: "left") {
+                deletePermanently(model, [NodeRef(left)])
+            }
+            let afterFolder = agrees(result)
+            check(
+                "they still are once a folder holding one name is deleted",
+                model.actionError == nil && afterFolder.0,
+                afterFolder.1
+            )
+
+            // One name of three, by itself.
+            if let a = result.root.subdir(named: "trio")?.subdir(named: "a"),
+                !a.files.isEmpty
+            {
+                deletePermanently(model, [NodeRef(dir: a, fileIndex: 0)])
+            }
+            let afterFile = agrees(result)
+            check(
+                "and once a single name of three is",
+                model.actionError == nil && afterFile.0,
+                afterFile.1
+            )
+
+            // A trashed name leaves the tree but not the disk.
+            if let b = result.root.subdir(named: "trio")?.subdir(named: "b") {
+                trash(model, [NodeRef(b)])
+            }
+            let afterTrash = agrees(result)
+            check(
+                "and once a folder is moved to the Trash",
+                model.actionError == nil && afterTrash.0,
+                afterTrash.1
+            )
+
+            // A folder with both names of a pair in it.
+            if let both = result.root.subdir(named: "both") {
+                deletePermanently(model, [NodeRef(both)])
+            }
+            let afterBoth = agrees(result)
+            check(
+                "and once a folder holding both names of a pair is deleted",
+                model.actionError == nil && afterBoth.0,
+                afterBoth.1
+            )
+        }
     }
 
     /// A newer File View walk replaced the older one's token without cancelling

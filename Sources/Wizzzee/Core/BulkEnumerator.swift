@@ -58,6 +58,17 @@ struct BulkEntry {
     var isSymlink: Bool { objType == vtypeLNK }
     var isMountPoint: Bool { mountStatus & mntStatusMountPoint != 0 }
     var isHardLinked: Bool { linkCount > 1 }
+
+    /// How much of this entry's length is really on the disk.
+    func storage(shortfallMeansHoles: Bool) -> FileStorage {
+        FileStorage.classify(
+            isRegularFile: isRegularFile,
+            size: size,
+            alloc: alloc,
+            bsdFlags: bsdFlags,
+            shortfallMeansHoles: shortfallMeansHoles
+        )
+    }
 }
 
 /// Fast directory reader built on `getattrlistbulk(2)`, which returns names,

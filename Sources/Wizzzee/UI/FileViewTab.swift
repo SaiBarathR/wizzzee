@@ -79,6 +79,9 @@ struct FileViewTab: View {
                         .font(.system(size: 11))
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    if let file = row.ref.file {
+                        StorageNote(file: file)
+                    }
                 }
             }
             .width(min: 160, ideal: 280)
@@ -100,16 +103,20 @@ struct FileViewTab: View {
             }
             .width(min: 64, ideal: 74, max: 110)
 
-            TableColumn("Size", value: \.size) { row in
-                Text(ByteFormat.decimal(row.size))
+            // As in the Tree View: space on disk leads, and whichever of the
+            // two is not on show is set back.
+            TableColumn("On Disk", value: \.alloc) { row in
+                Text(ByteFormat.decimal(row.alloc))
                     .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(model.sizeMetric.emphasis(of: .allocated))
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .width(min: 70, ideal: 84, max: 120)
 
-            TableColumn("Allocated", value: \.alloc) { row in
-                Text(ByteFormat.decimal(row.alloc))
+            TableColumn("Size", value: \.size) { row in
+                Text(ByteFormat.decimal(row.size))
                     .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(model.sizeMetric.emphasis(of: .logical))
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .width(min: 70, ideal: 84, max: 120)

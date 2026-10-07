@@ -51,13 +51,25 @@ struct TreeTable: View {
             }
             .width(min: 68, ideal: 88, max: 140)
 
-            TableColumn("Size", sortUsing: TreeSort(.size)) { row in
-                numeric(ByteFormat.decimal(row.ref.size))
+            // Space on disk leads, next to the bars that are drawn from it
+            // unless someone asks otherwise. With Size in front, the first
+            // figure read for a folder was its files' combined length: one
+            // holding a sparse image read 1.2 TB beside a bar worked out from
+            // the 198 GB it occupied.
+            //
+            // The two keep their places whichever is on show, and the one that
+            // isn't is set back instead. A column that changed what it held
+            // with the picker would be asking the table to follow a sort
+            // comparator from one column to the other between two redraws.
+            TableColumn("On Disk", sortUsing: TreeSort(.allocated)) { row in
+                numeric(ByteFormat.decimal(row.ref.alloc))
+                    .foregroundStyle(model.sizeMetric.emphasis(of: .allocated))
             }
             .width(min: 62, ideal: 78, max: 120)
 
-            TableColumn("Allocated", sortUsing: TreeSort(.allocated)) { row in
-                numeric(ByteFormat.decimal(row.ref.alloc))
+            TableColumn("Size", sortUsing: TreeSort(.size)) { row in
+                numeric(ByteFormat.decimal(row.ref.size))
+                    .foregroundStyle(model.sizeMetric.emphasis(of: .logical))
             }
             .width(min: 62, ideal: 78, max: 120)
 
@@ -142,6 +154,11 @@ private struct NameCell: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.orange)
             }
+            // As well as, not instead of: a second name for a sparse image is
+            // both, and "hard link" alone leaves its two sizes unexplained.
+            if let file = row.ref.file {
+                StorageNote(file: file)
+            }
             Spacer(minLength: 0)
         }
     }
@@ -173,6 +190,23 @@ private struct NameCell: View {
         case .otherVolume: return "other volume"
         case .alreadyCounted: return "counted elsewhere"
         case .partiallyRead: return "partly read"
+        }
+    }
+}
+
+/// The word beside a file whose length is not the space it takes — a sparse
+/// image, or one a cloud provider is holding — with the two figures behind it
+/// on hover. Without it the only sign is a pair of columns that disagree, and
+/// nothing says which of them to believe.
+struct StorageNote: View {
+    let file: FileEntry
+
+    var body: some View {
+        if let note = file.storageNote {
+            Text(note)
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+                .help(file.storageExplanation ?? note)
         }
     }
 }

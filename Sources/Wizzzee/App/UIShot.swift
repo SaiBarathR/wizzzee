@@ -21,6 +21,7 @@ enum UIShot {
         var zoomDepth = 0
         var hideAccessBanner = false
         var showTreemap = true
+        var metric = SizeMetric.allocated
 
         var index = 0
         while index < arguments.count {
@@ -73,6 +74,18 @@ enum UIShot {
             case "--zoom":
                 zoomDepth = Int(next ?? "1") ?? 1
                 index += 2
+            case "--metric":
+                // The Size / On Disk picker, which is otherwise only reachable
+                // by clicking it.
+                if let next {
+                    if let match = CLI.metric(named: next) {
+                        metric = match
+                    } else {
+                        print("unknown metric “\(next)”; expected size or disk")
+                        exit(2)
+                    }
+                }
+                index += 2
             default:
                 index += 1
             }
@@ -86,6 +99,7 @@ enum UIShot {
         model.customFolder = scanPath
         model.dismissedAccessPrompt = hideAccessBanner
         model.showsTreemap = showTreemap
+        model.sizeMetric = metric
 
         let hosting = NSHostingView(rootView: ContentView(model: model))
         let frame = NSRect(x: 0, y: 0, width: width, height: height)
@@ -116,7 +130,9 @@ enum UIShot {
             exit(1)
         }
         if selectLargest {
-            let biggest = model.result?.root.subdirs.max { $0.totalSize < $1.totalSize }
+            let biggest = model.result?.root.subdirs.max {
+                $0.bytes(using: metric) < $1.bytes(using: metric)
+            }
             if let biggest {
                 model.selection = [NodeRef(biggest)]
                 model.setExpanded(biggest, true)
@@ -127,7 +143,7 @@ enum UIShot {
         for _ in 0..<zoomDepth {
             guard
                 let deeper = model.treemapRoot?.subdirs.max(by: {
-                    $0.totalAlloc < $1.totalAlloc
+                    $0.bytes(using: metric) < $1.bytes(using: metric)
                 })
             else { break }
             model.zoom(into: deeper)

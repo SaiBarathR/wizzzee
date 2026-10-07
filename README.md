@@ -90,9 +90,21 @@ rebuilding.
 
 **Size vs On Disk.** "Size" is the logical file length; "On Disk" is the space
 actually allocated. They diverge enormously for sparse files — an OrbStack disk
-image on this machine reports 996 GB but occupies 42 GB. The app defaults to
-**On Disk**, since that is the space you get back by deleting something. The
-toggle is in the top right.
+image on this machine reports 996 GB but occupies 42 GB, on a 995 GB disk. The
+app defaults to **On Disk**, since that is the space you get back by deleting
+something. The toggle is in the top right.
+
+Whichever is on show is what the window reports: the header's **Scanned** line,
+the status bar, the bars and the treemap. The tables show both, **On Disk**
+first, with the one that is not on show set back. A file with stretches that
+were never written is marked **sparse** — or **online only**, when a cloud
+provider is holding its contents — and hovering the mark gives both figures.
+Compressed files occupy less than their length too, as most of the system's
+own do, but nothing of theirs is missing and they are left unmarked.
+
+Lengths added up can come to more than the disk holds; a single sparse image
+does it. That sum is the status bar's **Logical size**, and it is why a length
+is never quoted on its own next to the volume's capacity.
 
 **Base-10 units.** 1 GB is 1,000,000,000 bytes, matching Finder and Get Info.
 Note this differs from `df -h`, which is base-2, and from WizTree on Windows,
@@ -100,7 +112,9 @@ which labels base-2 units "GB".
 
 **Hard links are counted once.** The status bar shows how much would have been
 double-counted otherwise. Which of the linked names is the one shown is
-arbitrary — whichever the scanner reaches first.
+arbitrary — whichever the scanner reaches first. An analyzer that counts every
+name in full reports a folder of hard links — a package store, a developer
+cache — as larger than Wizzzee and `du` do.
 
 **One volume per scan.** Other disks, network shares and the synthetic mounts
 under `/System/Volumes` are left out. APFS firmlinks are followed once, so
@@ -178,7 +192,7 @@ dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest
 ```
 
 `--selftest` builds a throwaway tree with known contents and checks the scanner
-and both delete paths against ground truth — 249 checks, no permissions needed.
+and both delete paths against ground truth — 297 checks, no permissions needed.
 CI runs it on every push, along with a universal-binary and signature check.
 
 ## Releasing

@@ -8,6 +8,20 @@ import SwiftUI
 enum SizeMetric: String, CaseIterable, Hashable {
     case logical = "Size"
     case allocated = "Allocated"
+
+    /// How a column holding `measure` is drawn while this one is on show: at
+    /// full strength if it is the one, set back if it is the other.
+    func emphasis(of measure: SizeMetric) -> HierarchicalShapeStyle {
+        self == measure ? .primary : .secondary
+    }
+
+    /// The Tree View order that ranks rows by this measure.
+    var sortKey: TreeSort.Key { self == .logical ? .size : .allocated }
+
+    /// Where a File View row keeps this measure.
+    var fileRowKeyPath: KeyPath<FileRow, UInt64> {
+        self == .logical ? \FileRow.size : \FileRow.alloc
+    }
 }
 
 /// One row of the Tree View table.
@@ -166,7 +180,11 @@ final class AppModel: ObservableObject {
     /// Defaults to space actually occupied. Logical size is badly misleading on
     /// macOS, where sparse container and VM images routinely report hundreds of
     /// gigabytes they don't occupy — and reclaimable space is the whole point.
-    @Published var sizeMetric: SizeMetric = .allocated
+    @Published var sizeMetric: SizeMetric = .allocated {
+        didSet {
+            if sizeMetric != oldValue { sizeMetricChanged(from: oldValue) }
+        }
+    }
     @Published var hasFullDiskAccess = true
     @Published var dismissedAccessPrompt = false
 
@@ -346,6 +364,82 @@ final class AppModel: ObservableObject {
     /// highlight and the status line describe a single thing, so they ask for
     /// this rather than picking arbitrarily out of a set.
     var primarySelection: NodeRef? { selection.count == 1 ? selection.first : nil }
+
+    // MARK: - Figures on show
+    //
+    // Each of these used to be put together in a view from `totalSize` or
+    // `size`, whatever the picker said. With On Disk showing — the default —
+    // the treemap, the bars and the sort all measured space occupied while the
+    // lines around them added up file lengths, and one sparse image was enough
+    // to have the header report more scanned than the volume can hold.
+
+    /// How much the scan found, in the measure on show. Zero with no scan.
+    var scannedBytes: UInt64 { result?.root.bytes(using: sizeMetric) ?? 0 }
+
+    /// The header's "Scanned" line, or nil when there is no scan to describe.
+    ///
+    /// It sits directly above the volume's capacity, so it is read against it.
+    /// With Size showing it still leads with the combined length, since that is
+    /// what was asked for, but says what that occupies in the same breath: a
+    /// length is the one figure here that can exceed the disk. The file count
+    /// goes last, so it is what a narrow header cuts short.
+    var scannedSummary: String? {
+        guard let result else { return nil }
+        return figure(
+            length: result.root.totalSize,
+            onDisk: result.root.totalAlloc
+        ) + "  (\(ByteFormat.counted(result.root.totalFiles, "file")))"
+    }
+
+    /// The line under the Scan button while a scan runs.
+    var progressSummary: String {
+        "Scanning… \(ByteFormat.count(progress.items)) items, "
+            + figure(length: progress.bytes, onDisk: progress.allocated)
+    }
+
+    /// A total in the measure on show. A length never stands alone: it is
+    /// followed by the space it takes.
+    private func figure(length: UInt64, onDisk: UInt64) -> String {
+        guard sizeMetric == .logical else { return ByteFormat.decimal(onDisk) }
+        return "\(ByteFormat.decimal(length))  •  "
+            + "\(ByteFormat.decimal(onDisk)) on disk"
+    }
+
+    /// The status line's description of a single selected item.
+    func selectionSummary(_ ref: NodeRef) -> String {
+        var parts = [ref.path, ByteFormat.decimal(ref.bytes(using: sizeMetric))]
+        if ref.isDirectory {
+            parts.append(ByteFormat.counted(ref.dir.totalItems, "item"))
+        }
+        return parts.joined(separator: "  •  ")
+    }
+
+    /// Brings the tables into line with a change of measure.
+    ///
+    /// An order that was by the old measure becomes an order by the new one:
+    /// left alone, the rows stay ranked by the column that has just been set
+    /// back while the bars beside them, redrawn from the new measure, run in
+    /// no order at all. An order by anything else — a name, a date, the
+    /// measure that was *not* on show — was chosen for its own sake and is
+    /// kept.
+    ///
+    /// Here, not in a view's `onChange`, so the tables are right for anything
+    /// that sets the measure, a view being on screen or not. The picker sets
+    /// it from a click, which is an ordinary place to publish from.
+    private func sizeMetricChanged(from old: SizeMetric) {
+        if let first = treeSort.first, first.key == old.sortKey {
+            treeSort = [TreeSort(sizeMetric.sortKey, order: first.order)]
+        }
+        if let first = fileSort.first, first.keyPath == old.fileRowKeyPath {
+            fileSort = [
+                KeyPathComparator(sizeMetric.fileRowKeyPath, order: first.order)
+            ]
+        }
+        // The file list is the largest thousand by the measure on show, so it
+        // is a different list now, not the same one reordered.
+        refreshFileRows(immediately: true)
+        rebuildTreeRows()
+    }
 
     // MARK: - Scan target
 
@@ -548,9 +642,7 @@ final class AppModel: ObservableObject {
         // ordering by the percentage is ordering by that metric's bytes. Ranked
         // by logical size regardless, a sparse image sorted above a file that
         // visibly took far more of the folder.
-        if sort.key == .percent {
-            sort.key = sizeMetric == .logical ? .size : .allocated
-        }
+        if sort.key == .percent { sort.key = sizeMetric.sortKey }
         var rows: [TreeRow] = []
         rows.reserveCapacity(min(4096, root.subdirs.count * 4 + 16))
         appendRows(for: root, depth: 0, isLast: true, sort: sort, into: &rows)
@@ -798,12 +890,26 @@ final class AppModel: ObservableObject {
     /// in it in full, so the ones with a name left over outside the folder are
     /// taken back off.
     func reclaimableSize(_ refs: Set<NodeRef>) -> UInt64 {
+        reclaimable(refs, using: sizeMetric)
+    }
+
+    /// The space deleting `refs` gives back, whatever measure is on show.
+    ///
+    /// For the sentence in the delete confirmation, which says the figure
+    /// "will be reclaimed". That is a statement about the disk, and with Size
+    /// showing it was made in lengths: 995 GB promised back from a sparse
+    /// image whose removal frees the 42 GB it occupies.
+    func reclaimableSpace(_ refs: Set<NodeRef>) -> UInt64 {
+        reclaimable(refs, using: .allocated)
+    }
+
+    private func reclaimable(_ refs: Set<NodeRef>, using metric: SizeMetric) -> UInt64 {
         distinctTargets(refs).reduce(0) { total, ref in
             if let file = ref.file, file.sharesStorage { return total }
-            let weight = sizeMetric == .logical ? ref.size : ref.alloc
+            let weight = ref.bytes(using: metric)
             guard ref.isDirectory else { return total + weight }
             let shared = sharedStorage(under: ref.dir)
-            let staying = sizeMetric == .logical ? shared.size : shared.alloc
+            let staying = metric == .logical ? shared.size : shared.alloc
             return total + weight - min(weight, staying)
         }
     }
@@ -1098,7 +1204,7 @@ final class AppModel: ObservableObject {
                 promoting: false,
                 unlinking: unlinked
             )
-            result?.forgetDuplicate(size: file.size)
+            result?.forgetDuplicate(file)
             result?.forgetType(of: file)
             subtract(size: 0, alloc: 0, files: 1, dirs: 0, from: dir)
             dir.files.remove(at: index)

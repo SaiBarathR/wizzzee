@@ -58,6 +58,16 @@ struct VolumeInfo: Identifiable, Hashable {
         }
     }
 
+    /// The type of the filesystem `path` is on, as `statfs` names it — "apfs",
+    /// "hfs", "smbfs", "exfat" — or empty when it can't be read.
+    static func filesystemType(of path: String) -> String {
+        var info = statfs()
+        guard statfs(path, &info) == 0 else { return "" }
+        return withUnsafeBytes(of: &info.f_fstypename) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
+
     /// Total and available bytes, straight from `statfs`.
     static func capacity(of path: String) -> (total: UInt64, free: UInt64) {
         var info = statfs()

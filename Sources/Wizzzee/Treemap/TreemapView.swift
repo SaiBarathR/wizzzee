@@ -346,10 +346,7 @@ final class TreemapNSView: NSView {
         let ref = hovered.ref
 
         let title = ref.path
-        let detail =
-            "\(ByteFormat.decimal(ref.size))  •  on disk \(ByteFormat.decimal(ref.alloc))"
-                + (ref.isDirectory
-                    ? "  •  \(ByteFormat.counted(ref.dir.totalItems, "item"))" : "")
+        let detail = Self.tooltipDetail(for: ref, metric: metric)
 
         let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .medium),
@@ -408,6 +405,23 @@ final class TreemapNSView: NSView {
                 y: box.minY + padding + titleSize.height + 2
             )
         )
+    }
+
+    /// The tooltip's second line: both measures, each named, with the one the
+    /// tiles are drawn from in front. It led with the length whatever the map
+    /// was showing, so the tile for a sparse image — sized by the 42 GB it
+    /// occupies — opened on "995 GB".
+    static func tooltipDetail(for ref: NodeRef, metric: SizeMetric) -> String {
+        let size = ByteFormat.decimal(ref.size)
+        let alloc = ByteFormat.decimal(ref.alloc)
+        var detail =
+            metric == .logical
+            ? "\(size)  •  on disk \(alloc)"
+            : "\(alloc) on disk  •  size \(size)"
+        if ref.isDirectory {
+            detail += "  •  \(ByteFormat.counted(ref.dir.totalItems, "item"))"
+        }
+        return detail
     }
 
     private func sizeValue(_ dir: DirNode) -> UInt64 {

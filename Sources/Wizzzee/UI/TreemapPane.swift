@@ -62,7 +62,7 @@ struct TreemapPane: View {
                 Text(hovered.name)
                     .font(.system(size: 10, weight: .medium))
                     .lineLimit(1)
-                Text(ByteFormat.decimal(hovered.size))
+                Text(ByteFormat.decimal(hovered.bytes(using: model.sizeMetric)))
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(.secondary)
             } else {
