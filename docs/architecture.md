@@ -187,6 +187,10 @@ A tree deeper than `PATH_MAX` needs `REMOVEFILE_ALLOW_LONG_PATHS`, which has
 `removefile` change the working directory of the whole process as it descends.
 It is passed only on a second attempt, for a tree that turned out to need it.
 
+`removefile.h` is imported through `Sources/CRemoveFile`, a module map and a
+one-line header. It only joined the Darwin module in the macOS 27 SDK, and a
+release is built with an older one.
+
 ## Layout
 
 ```
