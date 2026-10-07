@@ -3164,6 +3164,18 @@ enum SelfTest {
             model.markedItems == [mRef, aRef, cRef],
             "listed \(model.markedItems.map(\.name))"
         )
+        // The total sits beside a button that removes without asking again,
+        // so it is what removing gives back whatever the tables are showing.
+        // None of these files fills its last block, so the two differ.
+        model.sizeMetric = .logical
+        check(
+            "with Size showing, the total is still space on disk",
+            model.markedBytes == aRef.alloc + cRef.alloc + mRef.alloc
+                && model.markedBytes != aRef.size + cRef.size + mRef.size,
+            "\(model.markedBytes), lengths come to "
+                + "\(aRef.size + cRef.size + mRef.size)"
+        )
+        model.sizeMetric = .allocated
 
         // A folder's mark stands for all of it.
         model.toggleMarks([NodeRef(docs)])
@@ -3260,6 +3272,18 @@ enum SelfTest {
         )
 
         model.trashMarked()
+        // The batch took the marks as they stood. Taken off now, the list
+        // would stop showing something that is still on its way out.
+        model.setMarked([aRef], false)
+        model.toggleMarks([bRef])
+        model.clearMarks()
+        check(
+            "the marks stand still while a batch is running",
+            model.isDeleting && model.marks == [aRef, mRef]
+                && !model.canMarkSelection,
+            "marked \(model.marks.map(\.name).sorted()), "
+                + "deleting \(model.isDeleting)"
+        )
         pumpUntilDeleteSettles(model)
         check(
             "moving the marks to the Trash removes them and nothing else",
@@ -3363,25 +3387,32 @@ enum SelfTest {
             dir.totalFiles = files
             dir.totalDirs = dirs
         }
-        // big/x.dat fills most of the map; small/y.dat and z.dat share the rest.
+        // big/x.dat fills most of the map; small/ holds y.dat, z.dat and a
+        // folder of its own, nested/w.dat, and takes the rest.
         let root = DirNode(name: "/wizzzee-selftest-marked", parent: nil)
         let big = DirNode(name: "big", parent: root)
         big.files = [entry("x.dat", 8_000)]
         total(big, 8_000, files: 1, dirs: 0)
         let small = DirNode(name: "small", parent: root)
         small.files = [entry("y.dat", 1_200), entry("z.dat", 800)]
-        total(small, 2_000, files: 2, dirs: 0)
+        let nested = DirNode(name: "nested", parent: small)
+        nested.files = [entry("w.dat", 500)]
+        total(nested, 500, files: 1, dirs: 0)
+        small.subdirs = [nested]
+        total(small, 2_500, files: 3, dirs: 1)
         root.subdirs = [big, small]
-        total(root, 10_000, files: 3, dirs: 2)
+        total(root, 10_500, files: 4, dirs: 3)
 
         let queue = DispatchQueue(label: "com.wizzzee.selftest.marked")
         var picked: [NodeRef] = []
         var marked: [NodeRef] = []
+        var zoomed: [DirNode] = []
         let view = TreemapNSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         view.layoutQueue = queue
         view.liveRevision = { 0 }
         view.onSelect = { picked.append($0) }
         view.onMark = { marked.append($0) }
+        view.onZoom = { zoomed.append($0) }
         // The layout lands on the main queue, behind whatever the checks
         // before this one left there, so one turn of the loop may not reach it.
         func settle() {
@@ -3424,12 +3455,14 @@ enum SelfTest {
             "\(view.markedRects.count) rects covering \(area(view.markedRects))"
         )
 
-        // Zoomed inside a marked folder, all that is on show is going.
+        // Zoomed to a folder inside a marked one, all that is on show is
+        // going and none of it is the thing that was marked: the marked
+        // folder is above the map's root, and has no tile or group here.
         view.marks = [NodeRef(small)]
-        view.apply(root: small, metric: .allocated, revision: 0)
+        view.apply(root: nested, metric: .allocated, revision: 0)
         settle()
         check(
-            "zoomed inside a marked folder, the whole map is hatched",
+            "zoomed to somewhere inside a marked folder, the whole map is hatched",
             view.markedRects.count == 1
                 && abs(area(view.markedRects) - whole) < 1,
             "\(view.markedRects.count) rects covering \(area(view.markedRects))"
@@ -3438,7 +3471,7 @@ enum SelfTest {
         view.marks = []
         view.apply(root: root, metric: .allocated, revision: 0)
         settle()
-        func click(command: Bool) {
+        func click(command: Bool, count: Int = 1) {
             guard
                 let event = NSEvent.mouseEvent(
                     with: .leftMouseDown,
@@ -3448,7 +3481,7 @@ enum SelfTest {
                     windowNumber: 0,
                     context: nil,
                     eventNumber: 0,
-                    clickCount: 1,
+                    clickCount: count,
                     pressure: 1
                 )
             else { return }
@@ -3460,11 +3493,25 @@ enum SelfTest {
             marked == [x] && picked.isEmpty,
             "marked \(marked.map(\.name)), picked \(picked.map(\.name))"
         )
+        // The second of two quick ⌘-clicks arrives as a double-click. Taken
+        // for one, it zoomed and left the mark the first had put on.
+        click(command: true, count: 2)
+        check(
+            "a second ⌘-click straight after is another one, not a zoom",
+            marked == [x, x] && zoomed.isEmpty && picked.isEmpty,
+            "asked to mark \(marked.count) times, zoomed \(zoomed.count)"
+        )
         click(command: false)
         check(
             "a plain click still selects, and marks nothing",
-            marked == [x] && picked == [x],
+            marked == [x, x] && picked == [x],
             "marked \(marked.map(\.name)), picked \(picked.map(\.name))"
+        )
+        click(command: false, count: 2)
+        check(
+            "and a plain double-click still zooms",
+            zoomed.count == 1 && marked == [x, x],
+            "zoomed \(zoomed.count) times"
         )
     }
 

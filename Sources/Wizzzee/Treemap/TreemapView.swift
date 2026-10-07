@@ -599,6 +599,15 @@ final class TreemapNSView: NSView {
         guard showsCurrentTree else { return }
         let point = convert(event.locationInWindow, from: nil)
 
+        // ⌘-click marks, as it adds to a selection in a table: the tile is
+        // put among the marks, or taken out, and what is selected is left be.
+        // Ahead of the double-click, so that two of them in quick succession
+        // are two of them — on and off again — and not a mark and then a zoom.
+        if event.modifierFlags.contains(.command) {
+            if let cell = model.cell(at: point) { onMark?(cell.ref) }
+            return
+        }
+
         if event.clickCount >= 2 {
             // A folder drawn as a single tile — too small or too deep to
             // subdivide — has no frame of its own, so asking for the innermost
@@ -616,13 +625,6 @@ final class TreemapNSView: NSView {
                 return
             }
             if let cell = model.cell(at: point) { onZoom?(cell.ref.dir) }
-            return
-        }
-
-        // ⌘-click marks, as it adds to a selection in a table: the tile is
-        // put among the marks, or taken out, and what is selected is left be.
-        if event.modifierFlags.contains(.command) {
-            if let cell = model.cell(at: point) { onMark?(cell.ref) }
             return
         }
 

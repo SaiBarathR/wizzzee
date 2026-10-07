@@ -31,10 +31,18 @@ struct MarkBox: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                // The marks stand still while a batch runs.
+                .disabled(model.isDeleting)
                 .help(Self.help(for: state))
                 .accessibilityLabel(
                     (state == .marked ? "Unmark " : "Mark ") + ref.name
                 )
+            } else if state == .partial {
+                // A scan's root can't be marked, and is the one row that is
+                // above everything that can: it still says something is.
+                Image(systemName: Self.symbol(for: state))
+                    .foregroundStyle(.secondary)
+                    .help("Something inside is marked. This can’t be marked itself.")
             } else {
                 // Nothing to click, and the reason on hand: a scan's root,
                 // or something on the sealed system volume.
@@ -126,9 +134,9 @@ struct MarksDrawer: View {
                 .font(.system(size: 11).monospacedDigit())
                 .foregroundStyle(.secondary)
                 .help(
-                    "What removing all of these gives back. A folder is "
-                        + "counted once, and a hard link whose data has another "
-                        + "name on disk counts for nothing."
+                    "The space on disk that removing all of these gives back. "
+                        + "A hard link whose data has another name on disk "
+                        + "counts for nothing."
                 )
 
             Spacer()
@@ -146,13 +154,11 @@ struct MarksDrawer: View {
         .background(.bar)
     }
 
-    /// The figure is the same one the status bar gives, named for what it is
-    /// when the measure on show is the one it is a statement about.
+    /// The figure the status bar gives, named here for what it is: space on
+    /// disk, whichever measure the rows below are showing.
     private var total: String {
-        let count = ByteFormat.counted(model.marks.count, "item")
-        let bytes = ByteFormat.decimal(model.markedBytes)
-        return model.sizeMetric == .allocated
-            ? "\(count)  •  \(bytes) on disk" : "\(count)  •  \(bytes)"
+        ByteFormat.counted(model.marks.count, "item") + "  •  "
+            + ByteFormat.decimal(model.markedBytes) + " on disk"
     }
 }
 
@@ -169,6 +175,7 @@ private struct MarkedRow: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .disabled(model.isDeleting)
             .help("Take the mark off. Nothing is removed.")
             .accessibilityLabel("Unmark " + ref.name)
 

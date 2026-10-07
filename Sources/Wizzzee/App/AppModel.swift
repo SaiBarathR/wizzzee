@@ -585,7 +585,7 @@ final class AppModel: ObservableObject {
         // A delete still awaiting confirmation names items in the tree being
         // thrown away, so it goes with the selection. So do the marks.
         permanentDeleteTargets = []
-        clearMarks()
+        setMarks([])
         sharedStorageCache = [:]
         capacityAfterDelete = nil
         treemapRoot = nil
@@ -1012,7 +1012,12 @@ final class AppModel: ObservableObject {
     /// that is being marked are dropped, and a folder given together with its
     /// own contents is marked once — which keeps the marks from ever nesting,
     /// and the list of them from counting anything twice.
+    ///
+    /// Not while a batch runs. One started from the marks took them as they
+    /// stood, and a mark taken off after that would leave the list one short
+    /// of what is being removed.
     func setMarked(_ refs: Set<NodeRef>, _ marked: Bool) {
+        guard !isDeleting else { return }
         var next = marks
         if marked {
             for ref in distinctTargets(refs)
@@ -1028,12 +1033,16 @@ final class AppModel: ObservableObject {
         setMarks(next)
     }
 
-    func clearMarks() { setMarks([]) }
+    /// Takes every mark off — again, not while a batch runs.
+    func clearMarks() {
+        guard !isDeleting else { return }
+        setMarks([])
+    }
 
     /// Whether Space and the menu have anything to mark: what is selected and
     /// on show, as for the delete keys, less whatever can't carry a mark.
     var canMarkSelection: Bool {
-        guard !isEditingFilter else { return false }
+        guard !isEditingFilter, !isDeleting else { return false }
         let onShow = isOnShow
         // Cheapest first: `canMark` builds a path, and this is asked on
         // every publish.
@@ -1104,10 +1113,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// What removing every mark would give back, in the measure on show: the
-    /// same figure a selection of them is quoted, with a hard link's bytes
-    /// left out where another name would keep them on disk.
-    var markedBytes: UInt64 { reclaimableSize(marks) }
+    /// What removing every mark would give back: space on disk, whatever
+    /// measure is on show, with a hard link's bytes left out where another
+    /// name would keep them there.
+    ///
+    /// The same figure the delete confirmation gives, and for the same
+    /// reason. It sits beside a button that removes without asking again, and
+    /// in lengths it would promise back the whole of a sparse image that
+    /// occupies a fraction of it.
+    var markedBytes: UInt64 { reclaimableSpace(marks) }
 
     /// The status bar's line for the marks.
     var marksSummary: String {

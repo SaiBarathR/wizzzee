@@ -75,7 +75,7 @@ struct ItemContextMenu: View {
         ) {
             model.toggleMarks(refs)
         }
-        .disabled(open.isEmpty)
+        .disabled(open.isEmpty || model.isDeleting)
     }
 
     /// Reveal, Open and Zoom all describe one item and have no sensible reading
