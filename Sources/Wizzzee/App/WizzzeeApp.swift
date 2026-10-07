@@ -30,6 +30,12 @@ struct WizzzeeApp: App {
             // out is enough — a key that matches a disabled item goes on to
             // whatever has the keyboard.
             CommandGroup(replacing: .newItem) {
+                // The header's Folder… button, on the key every app opens
+                // something with.
+                Button("Scan Folder…") { model.chooseFolder() }
+                    .keyboardShortcut("o", modifiers: .command)
+                    .disabled(!model.canChooseFolder)
+                Divider()
                 // Space does the same on a row. That one is the table's own,
                 // so it can't be shown here; this is the one that can.
                 Button(model.selectionIsMarked ? "Unmark" : "Mark for Removal") {
@@ -54,6 +60,15 @@ struct WizzzeeApp: App {
                 .disabled(!model.canUseDeleteKeys)
             }
             CommandGroup(after: .toolbar) {
+                // The tab strip, which only ever answered a click.
+                ForEach(MainTab.allCases, id: \.self) { tab in
+                    Button(tab.rawValue) { model.show(tab) }
+                        .keyboardShortcut(
+                            KeyEquivalent(tab.key),
+                            modifiers: .command
+                        )
+                }
+                Divider()
                 // Disabled rather than silently ignored: `startScan` refuses
                 // while a scan or a delete is running, so ⌘R then looked like a
                 // broken shortcut or a wedged app.

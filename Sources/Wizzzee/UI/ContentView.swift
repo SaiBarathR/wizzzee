@@ -115,10 +115,7 @@ struct ContentView: View {
         HStack(spacing: 2) {
             ForEach(MainTab.allCases, id: \.self) { tab in
                 Button {
-                    model.tab = tab
-                    if tab == .files && model.fileRows.isEmpty {
-                        model.refreshFileRows(immediately: true)
-                    }
+                    model.show(tab)
                 } label: {
                     Text(tab.rawValue)
                         .font(.system(size: 11, weight: model.tab == tab ? .semibold : .regular))
@@ -134,6 +131,7 @@ struct ContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .help("\(tab.rawValue) (⌘\(tab.key))")
             }
             Spacer()
         }

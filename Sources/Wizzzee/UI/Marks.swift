@@ -210,7 +210,7 @@ private struct MarkedRow: View {
         // Where it is, on a click: the row in the tree, with the folders
         // above it opened.
         .onTapGesture {
-            model.tab = .tree
+            model.show(.tree)
             model.revealInTree(ref)
         }
         .leaving(ref, in: model)

@@ -18,7 +18,7 @@ struct TreemapPane: View {
                 revision: model.treeRevision,
                 liveRevision: { model.treeRevision },
                 layoutQueue: model.treemapQueue,
-                onSelect: { ref in model.selection = [ref] },
+                onSelect: { ref in model.select(fromMap: ref) },
                 onZoom: { dir in model.zoom(into: dir) },
                 onHover: { ref in model.hoveredRef = ref },
                 onOutline: { ref in model.treemapOutline = ref },
@@ -57,11 +57,7 @@ struct TreemapPane: View {
             .disabled(!model.canZoomOut)
             .help("Back to the scan root")
 
-            Text(model.treemapRoot?.path ?? "—")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.head)
+            ZoomTrail(model: model)
 
             Spacer(minLength: 4)
 
@@ -84,6 +80,119 @@ struct TreemapPane: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(.bar)
+    }
+}
+
+/// The path of the folder the map is zoomed to, each folder in it a button
+/// that zooms back out to there.
+///
+/// It was one line of text. Getting from five levels down to two levels down
+/// was three clicks on the up arrow, or back to the root and in again.
+struct ZoomTrail: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        let trail = model.zoomTrail
+        if trail.isEmpty {
+            Text("—")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        } else {
+            // The whole of it where there is room, and otherwise the root and
+            // as many of the nearest folders as fit: the far end is the one
+            // that says where the map is.
+            //
+            // Every one of these is something to show: an empty candidate
+            // always fits, and would be chosen over a path that does not.
+            ViewThatFits(in: .horizontal) {
+                steps(trail, keeping: trail.count)
+                steps(trail, keeping: 3)
+                steps(trail, keeping: 2)
+                steps(trail, keeping: 1)
+                whereItIs(trail)
+            }
+            .font(.system(size: 10))
+        }
+    }
+
+    /// The root, then the last `tail` folders, with a gap marked between
+    /// them where some are left out.
+    private func steps(_ trail: [DirNode], keeping tail: Int) -> some View {
+        let last = trail.count - 1
+        let kept = max(1, last - tail + 1)..<trail.count
+        return HStack(spacing: 3) {
+            step(trail[0], isCurrent: last == 0)
+            if kept.lowerBound > 1 {
+                separator
+                Text("…").foregroundStyle(.tertiary)
+            }
+            ForEach(kept, id: \.self) { index in
+                separator
+                step(trail[index], isCurrent: index == last)
+            }
+        }
+        .lineLimit(1)
+        .fixedSize()
+    }
+
+    /// What is left when not even the root and one folder fit: the folder
+    /// the map is on, cut short in the middle if it has to be.
+    private func whereItIs(_ trail: [DirNode]) -> some View {
+        HStack(spacing: 3) {
+            if trail.count > 1 {
+                Text("…").foregroundStyle(.tertiary)
+                separator
+            }
+            Text(Self.label(for: trail[trail.count - 1]))
+                .foregroundStyle(.primary)
+                .truncationMode(.middle)
+                .help(trail[trail.count - 1].path)
+        }
+        .lineLimit(1)
+    }
+
+    private var separator: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 7, weight: .semibold))
+            .foregroundStyle(.tertiary)
+    }
+
+    /// What a folder is called in the path. A scan's root is named by the
+    /// whole path it was scanned at, which is its name everywhere else and
+    /// here would be wider than the strip: every way of showing the path
+    /// that still had buttons in it then failed to fit, and what was left
+    /// was the last folder's name with nothing to click.
+    static func label(for dir: DirNode) -> String {
+        guard dir.isRoot else { return dir.name }
+        let last = (dir.name as NSString).lastPathComponent
+        return last.isEmpty ? dir.name : last
+    }
+
+    /// The most room one folder's name is given before it is cut short.
+    private static let widest: CGFloat = 180
+
+    @ViewBuilder
+    private func step(_ dir: DirNode, isCurrent: Bool) -> some View {
+        if isCurrent {
+            // Where the map is. Nothing to zoom to, so nothing to click.
+            Text(Self.label(for: dir))
+                .foregroundStyle(.primary)
+                .truncationMode(.middle)
+                .frame(maxWidth: Self.widest)
+                .help(dir.path)
+        } else {
+            Button {
+                model.zoom(into: dir)
+            } label: {
+                Text(Self.label(for: dir))
+                    .foregroundStyle(.secondary)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: Self.widest)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Zoom out to \(dir.path)")
+        }
     }
 }
 

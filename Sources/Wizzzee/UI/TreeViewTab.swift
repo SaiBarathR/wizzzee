@@ -32,6 +32,35 @@ struct TreeTable: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
+        ScrollViewReader { proxy in
+            table
+                // After the rows have been handed over, which is when the
+                // one asked for is there to be scrolled to. And on being put
+                // on screen, for a row asked for from another tab.
+                .onChange(of: model.revealCount) { scrollIfAsked(proxy) }
+                .onAppear { scrollIfAsked(proxy, isNewTable: true) }
+        }
+    }
+
+    private func scrollIfAsked(_ proxy: ScrollViewProxy, isNewTable: Bool = false) {
+        guard let target = model.takeRevealTarget() else { return }
+        proxy.scrollTo(target, anchor: .center)
+        guard isNewTable else { return }
+        // A table that has only just been put on screen may have no rows
+        // laid out yet for that to land on, so it is asked again as it
+        // settles — but only for as long as this is still the row that was
+        // asked for and is still selected. A click on something else in the
+        // meantime is where the table should stay, and a scroll arriving
+        // after it would carry the new selection off the screen.
+        for delay in [0.1, 0.3, 0.8] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard model.isStillRevealing(target) else { return }
+                proxy.scrollTo(target, anchor: .center)
+            }
+        }
+    }
+
+    private var table: some View {
         // A Set binding is what turns on macOS's native ⌘-click toggle,
         // ⇧-click range and ⇧-arrow extend — none of it needs a key handler.
         Table(
@@ -115,6 +144,8 @@ struct TreeTable: View {
         .tableStyle(.inset(alternatesRowBackgrounds: true))
         .onChange(of: model.treeSort) { model.rebuildTreeRows() }
         .onKeyPress(.space) { model.markSelection() ? .handled : .ignored }
+        .onKeyPress(.rightArrow) { model.expandSelection() ? .handled : .ignored }
+        .onKeyPress(.leftArrow) { model.collapseSelection() ? .handled : .ignored }
         .contextMenu(forSelectionType: NodeRef.self) { refs in
             ItemContextMenu(model: model, refs: refs)
         } primaryAction: { refs in

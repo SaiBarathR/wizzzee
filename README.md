@@ -63,12 +63,14 @@ rebuilding.
 ## Using it
 
 - **Tree View** — folder hierarchy, sorted by size. Click a column to re-sort;
-  sorting applies within each parent, so the hierarchy stays intact.
+  sorting applies within each parent, so the hierarchy stays intact. `→` opens
+  the selected folder and `←` shuts it, as in Finder's list view; pressed again
+  they step into the folder and back out of it.
 - **File View** — the 1,000 biggest files anywhere in the scan. Type in the
   filter to search by name; include a `/` to match against the full path.
 - **Treemap** — every file as a rectangle, area proportional to size, colored by
-  extension. Click to select, double-click a folder to zoom in, and use the
-  arrows in the strip above it to zoom back out. **View ▸ Hide Treemap**, or the
+  extension. Click to select, double-click a folder to zoom in, and click any
+  folder in the path above it to zoom back out to there. **View ▸ Hide Treemap**, or the
   button at the right-hand end of the status bar, gives the whole tab to the
   table; showing it again keeps the zoom you left it at, and whichever way you
   leave it is how it opens next launch.
@@ -105,11 +107,14 @@ rebuilding.
 | Shortcut | Action |
 | --- | --- |
 | `Return` | Scan |
+| `⌘O` | Choose a folder to scan |
 | `⌘.` | Stop a running scan |
 | `⌘R` | Rescan |
 | `Space` or `⇧⌘M` | Mark the selected rows for removal, or unmark them |
 | `⌘⌫` | Move the selection to the Trash |
 | `⌥⌘⌫` | Delete the selection permanently, after confirming |
+| `⌘1` `⌘2` `⌘3` | Tree View, File View, About |
+| `→` `←` | Open or shut the selected folder; again, step into it or out of it |
 | `⌘T` | Show or hide the treemap |
 | `⌘[` | Zoom the treemap out |
 | `⌘0` | Reset the treemap zoom |
