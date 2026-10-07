@@ -596,6 +596,41 @@ final class ScanResult {
         extensionStats[i].alloc -= min(extensionStats[i].alloc, file.alloc)
     }
 
+    /// Puts a file that has come back into the tree back into its type's
+    /// totals, and, if it is a second name for a hard-linked file, back into
+    /// what such names are counted as saving. The reverse of `forgetType`
+    /// and `forgetDuplicate`, for a move to the Trash that was undone.
+    func restoreType(of file: FileEntry) {
+        if file.isDuplicateLink {
+            hardLinkSavings += file.size
+            hardLinkAllocSavings += file.alloc
+        }
+        let i = Int(file.extIndex)
+        guard i >= 0, i < extensionStats.count else { return }
+        extensionStats[i].count += 1
+        guard !file.isDuplicateLink else { return }
+        extensionStats[i].size += file.size
+        extensionStats[i].alloc += file.alloc
+    }
+
+    /// Which of `inodes` have a name in the tree that their bytes are
+    /// counted under. One pass over every file, for when something
+    /// hard-linked is coming back and has to be told whether it is the name
+    /// that carries the bytes or a second one.
+    func countedNames(among inodes: Set<UInt64>) -> Set<UInt64> {
+        var counted: Set<UInt64> = []
+        guard !inodes.isEmpty else { return counted }
+        var stack: [DirNode] = [root]
+        while let dir = stack.popLast() {
+            for file in dir.files
+            where !file.isRemoved && !file.isDuplicateLink && inodes.contains(file.fileID) {
+                counted.insert(file.fileID)
+            }
+            stack.append(contentsOf: dir.subdirs)
+        }
+        return counted
+    }
+
     /// As `forgetType(of:)`, for every file under folders that are leaving.
     func forgetTypes(under removed: [DirNode]) {
         var stack: [DirNode] = removed

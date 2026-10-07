@@ -149,16 +149,139 @@ enum FileActions {
         refs.contains { isSystemProtected($0.path) }
     }
 
-    static func moveToTrash(_ path: String) throws {
+    /// What one thing on a volume is, whatever it is called and wherever it
+    /// has been moved to: its volume and its number on it.
+    struct FileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+
+        /// Of what is at `path` itself, a link there included; nil when
+        /// nothing is.
+        init?(atPath path: String) {
+            var info = stat()
+            guard lstat(path, &info) == 0 else { return nil }
+            self.init(info)
+        }
+
+        init(_ info: stat) {
+            device = info.st_dev
+            inode = info.st_ino
+        }
+    }
+
+    /// What it takes to bring something back out of the Trash, taken down
+    /// as it goes in.
+    ///
+    /// A place in the Trash is a name, and names there are used again:
+    /// empty the Trash of `notes.txt`, throw another `notes.txt` away, and
+    /// it is given the first one's place. So the thing itself is taken down,
+    /// and the folder it came out of, and neither is gone by its path alone.
+    struct TrashReceipt {
+        /// Where in the Trash it went, which is not always under the name it
+        /// had: the Trash renames what it already has one of.
+        let inTrash: String
+        /// The thing that was put there.
+        let item: FileIdentity
+        /// The folder it was taken out of.
+        let folder: FileIdentity
+
+        /// Whether it is still where it was put, and still it.
+        var isStillInTrash: Bool { FileIdentity(atPath: inTrash) == item }
+    }
+
+    /// Moves the item at `path` to the Trash, and says where in the Trash it
+    /// went and what it was — or nil, when there is nothing to bring it back
+    /// by. A volume with no Trash of its own removes the item outright and
+    /// has nowhere to say it went.
+    ///
+    /// That was thrown away, and with it any way of bringing the item back:
+    /// ⌘⌫ asks nothing, on the understanding that the Trash is not the end,
+    /// and from here it was.
+    @discardableResult
+    static func moveToTrash(_ path: String) throws -> TrashReceipt? {
         if isUndeletableRoot(path) { throw ActionError.undeletableRoot(path) }
         if isSystemProtected(path) { throw ActionError.systemProtected(path) }
+        // Taken before it goes: where it ends up is then known to hold the
+        // thing that went, and not something that was already there.
+        let item = FileIdentity(atPath: path)
+        let folder = FileIdentity(atPath: (path as NSString).deletingLastPathComponent)
         do {
+            var answer: NSURL?
             try FileManager.default.trashItem(
                 at: URL(fileURLWithPath: path),
-                resultingItemURL: nil
+                resultingItemURL: &answer
             )
+            guard let inTrash = (answer as URL?)?.path, !inTrash.isEmpty,
+                let item, let folder, FileIdentity(atPath: inTrash) == item
+            else { return nil }
+            return TrashReceipt(inTrash: inTrash, item: item, folder: folder)
         } catch {
             throw ActionError.failed(path, error.localizedDescription)
+        }
+    }
+
+    /// Why something could not be brought back out of the Trash.
+    enum PutBackError: LocalizedError {
+        case notInTrash
+        case nameTaken(String)
+        case folderGone(String)
+        case failed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notInTrash:
+                return "It is no longer in the Trash."
+            case .nameTaken(let path):
+                return "Something else is at “\(path)” now."
+            case .folderGone(let path):
+                return "The folder it was in, “\(path)”, is no longer there."
+            case .failed(let reason):
+                return reason
+            }
+        }
+    }
+
+    /// `RENAME_EXCL` (sys/stdio.h): fail if the destination exists.
+    private static let renameWithoutReplacing: UInt32 = 0x0000_0004
+
+    /// Moves what `receipt` is for back to `path`.
+    ///
+    /// Only the thing that was put in the Trash, only into the folder it
+    /// came out of, and never over anything:
+    ///
+    /// - What is at its place in the Trash now has to be it. Something else
+    ///   that has since been given that place is not moved.
+    /// - The folder at the other end has to be the one it left, and a folder:
+    ///   one that has been replaced, by another or by a link to somewhere
+    ///   else, is not written into.
+    /// - The move is one that fails if anything is there. Looking first and
+    ///   then moving would replace whatever arrived in between, and what
+    ///   moves a file replaces a file, an empty folder, or a link that leads
+    ///   nowhere without a word.
+    ///
+    /// It is a rename and nothing else. The Trash is on the volume the item
+    /// came from, so there is never a copy to fall back on.
+    static func putBack(_ receipt: TrashReceipt, to path: String) throws {
+        guard receipt.isStillInTrash else { throw PutBackError.notInTrash }
+        let folder = (path as NSString).deletingLastPathComponent
+        var info = stat()
+        guard lstat(folder, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+            FileIdentity(info) == receipt.folder
+        else { throw PutBackError.folderGone(folder) }
+
+        if renamex_np(receipt.inTrash, path, renameWithoutReplacing) == 0 { return }
+        switch errno {
+        case EEXIST:
+            throw PutBackError.nameTaken(path)
+        case ENOTSUP:
+            // A volume that can't be asked not to replace. Looked at and
+            // then moved, which is the best there is on one of those.
+            guard lstat(path, &info) != 0 else { throw PutBackError.nameTaken(path) }
+            guard rename(receipt.inTrash, path) == 0 else {
+                throw PutBackError.failed(String(cString: strerror(errno)))
+            }
+        default:
+            throw PutBackError.failed(String(cString: strerror(errno)))
         }
     }
 

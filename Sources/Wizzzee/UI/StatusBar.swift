@@ -17,6 +17,7 @@ struct StatusBar: View {
                 deleting(progress)
             } else {
                 contents
+                trashLine
             }
             treemapToggle
         }
@@ -50,6 +51,37 @@ struct StatusBar: View {
                 ? "\(title) (⌘T)" : "The treemap is part of Tree View"
         )
         .accessibilityLabel(title)
+    }
+
+    /// What has been moved to the Trash and is still there, and the way to
+    /// bring the last of it back.
+    ///
+    /// At the end of the totals it accounts for: this much has left them and
+    /// has not left the disk.
+    @ViewBuilder
+    private var trashLine: some View {
+        if model.bytesInTrash > 0 || model.canUndoTrash {
+            HStack(spacing: 6) {
+                if model.bytesInTrash > 0 {
+                    Label {
+                        Text(model.trashLine)
+                    } icon: {
+                        Image(systemName: "trash")
+                    }
+                    .labelStyle(.titleAndIcon)
+                    .help(
+                        "Moved to the Trash from here since Wizzzee was opened. "
+                            + "It has left the totals and is still on the disk: "
+                            + "emptying the Trash is what frees it."
+                    )
+                }
+                if model.canUndoTrash {
+                    Button("Undo") { model.undoTrash() }
+                        .controlSize(.small)
+                        .help("Put back what was last moved to the Trash (⌘Z)")
+                }
+            }
+        }
     }
 
     private func deleting(_ progress: AppModel.DeleteProgress) -> some View {

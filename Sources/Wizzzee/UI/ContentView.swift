@@ -3,6 +3,8 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    /// The window's, which is what Edit ▸ Undo and ⌘Z act on.
+    @Environment(\.undoManager) private var undoManager
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,6 +44,8 @@ struct ContentView: View {
         // columns instead of compressing them, so this is the real floor.
         // Enforced as the window minimum via .windowResizability(.contentMinSize).
         .frame(minWidth: 1160, minHeight: 660)
+        .onAppear { model.undoManager = undoManager }
+        .onChange(of: undoManager) { model.undoManager = undoManager }
         .quickLookPreview($model.previewURL)
         .alert(
             model.actionError ?? "Something went wrong",

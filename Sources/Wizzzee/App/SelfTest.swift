@@ -121,6 +121,10 @@ enum SelfTest {
         testThePathAboveTheMapZoomsOut()
         testTabsAnswerTheirKeys()
         testARescanKeepsYourPlace()
+        testAMoveToTheTrashCanBeUndone()
+        testWhatCannotBePutBackStaysInTheTrash()
+        testPuttingBackMovesOnlyWhatWasPutThere()
+        testUndoingATrashPutsHardLinksRight()
         testChoicesOutlastALaunch()
         testQuickLookShowsWhatIsSelected()
         testASearchIsReadFromWhatWasTyped()
@@ -6883,6 +6887,654 @@ enum SelfTest {
             model.marks.isEmpty && model.marksLostToRescan == 0,
             "marked \(model.marks.count), \(model.marksLostToRescan) lost"
         )
+    }
+
+    // MARK: - Undoing a move to the Trash
+
+    /// Every folder's totals by where it is, for holding one tree to another.
+    private static func ledger(_ root: DirNode) -> [String: [UInt64]] {
+        var table: [String: [UInt64]] = [:]
+        var stack: [(dir: DirNode, path: String)] = [(root, "")]
+        while let (dir, path) = stack.popLast() {
+            table[path] = [
+                dir.totalSize, dir.totalAlloc, UInt64(dir.totalFiles), UInt64(dir.totalDirs),
+            ]
+            for sub in dir.subdirs { stack.append((sub, path + "/" + sub.name)) }
+        }
+        return table
+    }
+
+    /// The first folder whose totals are not the sum of what is in it, or nil
+    /// when every one of them adds up.
+    private static func firstThatDoesNotAddUp(_ root: DirNode) -> String? {
+        var stack: [DirNode] = [root]
+        while let dir = stack.popLast() {
+            var size: UInt64 = 0
+            var alloc: UInt64 = 0
+            var files = 0
+            var dirs = 0
+            for file in dir.files where !file.isRemoved {
+                files += 1
+                if !file.isDuplicateLink {
+                    size += file.size
+                    alloc += file.alloc
+                }
+            }
+            for sub in dir.subdirs {
+                size += sub.totalSize
+                alloc += sub.totalAlloc
+                files += sub.totalFiles
+                dirs += sub.totalDirs + 1
+            }
+            if size != dir.totalSize || alloc != dir.totalAlloc
+                || files != dir.totalFiles || dirs != dir.totalDirs
+            {
+                return "\(dir.name): holds \(size)/\(alloc) in \(files) files and "
+                    + "\(dirs) folders, says \(dir.totalSize)/\(dir.totalAlloc) in "
+                    + "\(dir.totalFiles) and \(dir.totalDirs)"
+            }
+            stack.append(contentsOf: dir.subdirs)
+        }
+        return nil
+    }
+
+    /// Whether `model`'s tree is what a fresh scan of `base` finds: the same
+    /// totals at the root, the same count of every type and the same bytes
+    /// over all of them, the same saving from hard links — and every folder
+    /// the sum of its parts. Which name of a hard-linked file carries its
+    /// bytes is the scan's to choose, so nothing here hangs on that.
+    @MainActor
+    private static func agreesWithAFreshScan(_ model: AppModel, _ base: URL) -> String? {
+        guard let result = model.result else { return "no scan" }
+        let fresh = scan(base)
+        func totals(_ root: DirNode) -> [UInt64] {
+            [root.totalSize, root.totalAlloc, UInt64(root.totalFiles), UInt64(root.totalDirs)]
+        }
+        if totals(result.root) != totals(fresh.root) {
+            return "root \(totals(result.root)), a fresh scan \(totals(fresh.root))"
+        }
+        func types(_ scan: ScanResult) -> [String: Int] {
+            var table: [String: Int] = [:]
+            for stat in scan.extensionStats where stat.count > 0 {
+                table[stat.ext] = stat.count
+            }
+            return table
+        }
+        if types(result) != types(fresh) {
+            return "types \(types(result)), a fresh scan \(types(fresh))"
+        }
+        func bytes(_ scan: ScanResult) -> [UInt64] {
+            [
+                scan.extensionStats.reduce(0) { $0 + $1.size },
+                scan.extensionStats.reduce(0) { $0 + $1.alloc },
+            ]
+        }
+        if bytes(result) != bytes(fresh) {
+            return "type bytes \(bytes(result)), a fresh scan \(bytes(fresh))"
+        }
+        let saved = [result.hardLinkSavings(using: .logical), result.hardLinkSavings(using: .allocated)]
+        let freshSaved = [fresh.hardLinkSavings(using: .logical), fresh.hardLinkSavings(using: .allocated)]
+        if saved != freshSaved {
+            return "hard links save \(saved), a fresh scan \(freshSaved)"
+        }
+        return firstThatDoesNotAddUp(result.root)
+    }
+
+    /// ⌘⌫ asks nothing, on the understanding that the Trash is not the end.
+    /// From here it was: nothing could bring an item back. A move to the
+    /// Trash can now be undone, on disk and in the tree, and what is still in
+    /// the Trash is said, since it has left the totals and not the disk.
+    @MainActor
+    private static func testAMoveToTheTrashCanBeUndone() {
+        let model = AppModel()
+        guard let (base, result) = loadWalkabout("undo", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = result.root.subdir(named: "a"),
+            let b = a.subdir(named: "b"),
+            let c = result.root.subdir(named: "c"),
+            let y = a.files.firstIndex(where: { $0.name == "y.dat" }),
+            let z = c.files.firstIndex(where: { $0.name == "z.dat" })
+        else {
+            check("the undo fixture scanned", false, "missing folders")
+            return
+        }
+        func onDisk(_ path: String) -> Bool {
+            FileManager.default.fileExists(atPath: base.appendingPathComponent(path).path)
+        }
+        let before = ledger(result.root)
+        let yRef = NodeRef(dir: a, fileIndex: y)
+        let zRef = NodeRef(dir: c, fileIndex: z)
+        let yOnDisk = yRef.alloc
+        model.setExpanded(a, true)
+
+        check("with nothing moved to the Trash there is nothing to undo",
+            !model.canUndoTrash && model.bytesInTrash == 0, "")
+        model.undoTrash()
+
+        // A file.
+        trash(model, [yRef])
+        check(
+            "a move to the Trash can be undone, and the Trash is said to hold it",
+            model.canUndoTrash && model.bytesInTrash == yOnDisk && !onDisk("a/y.dat")
+                && yRef.isStale,
+            "can undo \(model.canUndoTrash), \(model.bytesInTrash) bytes in the Trash"
+        )
+        model.undoTrash()
+        check(
+            "undoing it puts the file back where it was on disk",
+            onDisk("a/y.dat"),
+            "a/y.dat is not there"
+        )
+        check(
+            "and back in the tree, in the slot it left, with every total as it was",
+            !yRef.isStale && yRef.name == "y.dat" && ledger(result.root) == before
+                && agreesWithAFreshScan(model, base) == nil,
+            agreesWithAFreshScan(model, base) ?? "the ledger differs from before"
+        )
+        check(
+            "it is what is selected, so it can be seen to be back",
+            model.selection == [yRef] && model.treeRows.contains { $0.ref == yRef },
+            "selected \(model.selection.map(\.name))"
+        )
+        check(
+            "once undone there is nothing left to undo, and nothing in the Trash",
+            !model.canUndoTrash && model.bytesInTrash == 0,
+            "can undo \(model.canUndoTrash), \(model.bytesInTrash) bytes in the Trash"
+        )
+        model.undoTrash()
+        check("undoing again does nothing", onDisk("a/y.dat") && ledger(result.root) == before, "")
+
+        // A folder, removed from the list of marks.
+        model.setMarked([NodeRef(a)], true)
+        model.trashMarked()
+        pumpUntilDeleteSettles(model)
+        check(
+            "a marked folder goes to the Trash, and its mark with it",
+            !onDisk("a") && model.marks.isEmpty && NodeRef(a).isStale && NodeRef(b).isStale,
+            "marked \(model.marks.map(\.name))"
+        )
+        model.undoTrash()
+        check(
+            "undoing brings the folder back with everything in it",
+            onDisk("a/b/x.dat") && onDisk("a/y.dat") && onDisk("a/empty"),
+            "a is not all there"
+        )
+        check(
+            "the tree has it where it was, and what was inside is live again",
+            a.parent === result.root && !NodeRef(a).isStale && !NodeRef(b).isStale
+                && !yRef.isStale && ledger(result.root) == before
+                && agreesWithAFreshScan(model, base) == nil,
+            agreesWithAFreshScan(model, base) ?? "the ledger differs from before"
+        )
+        check(
+            "and it comes back marked, as it left",
+            model.marks == [NodeRef(a)] && model.selection == [NodeRef(a)],
+            "marked \(model.marks.map(\.name)), selected \(model.selection.map(\.name))"
+        )
+        model.clearMarks()
+
+        // Two things from different folders in one move.
+        trash(model, [yRef, NodeRef(c)])
+        check("a file and a folder go together", !onDisk("a/y.dat") && !onDisk("c"), "")
+        model.undoTrash()
+        check(
+            "and come back together",
+            onDisk("a/y.dat") && onDisk("c/z.dat") && ledger(result.root) == before
+                && agreesWithAFreshScan(model, base) == nil
+                && model.selection == [yRef, NodeRef(c)],
+            agreesWithAFreshScan(model, base) ?? "selected \(model.selection.map(\.name))"
+        )
+
+        // Only the last move, and only until something else is removed: the
+        // tree it would be put back into is not the one it left.
+        trash(model, [yRef])
+        deletePermanently(model, [zRef])
+        check(
+            "removing something else puts the move before it beyond undoing",
+            !model.canUndoTrash,
+            "can undo \(model.canUndoTrash)"
+        )
+        model.undoTrash()
+        check(
+            "so it stays in the Trash, and the Trash is still said to hold it",
+            !onDisk("a/y.dat") && model.bytesInTrash == yOnDisk,
+            "\(model.bytesInTrash) bytes in the Trash"
+        )
+
+        // The Trash is emptied from Finder, not from here, and with nothing
+        // to tell the app that it has been: the line is kept up to date by
+        // looking, for as long as it has anything to say.
+        for url in model.trashedLocations { try? FileManager.default.removeItem(at: url) }
+        let noticed = Date().addingTimeInterval(10)
+        while model.bytesInTrash != 0 && Date() < noticed {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        check(
+            "what has been emptied out of the Trash stops being said to be in it",
+            model.bytesInTrash == 0 && model.trashedLocations.isEmpty,
+            "\(model.bytesInTrash) bytes in the Trash"
+        )
+
+        trash(model, [NodeRef(b)])
+        check("a later move is the one that can be undone", model.canUndoTrash, "")
+        model.startScan()
+        check(
+            "a rescan puts it beyond undoing too",
+            !model.canUndoTrash,
+            "can undo \(model.canUndoTrash)"
+        )
+        pumpUntilSettled(model)
+        model.undoTrash()
+        check("and it stays where it is", !onDisk("a/b"), "a/b came back")
+    }
+
+    /// Each item goes back on its own. One whose place has been taken stays
+    /// in the Trash, and is named; nothing is ever put back over something.
+    @MainActor
+    private static func testWhatCannotBePutBackStaysInTheTrash() {
+        let model = AppModel()
+        guard let (base, result) = loadWalkabout("undo-refused", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = result.root.subdir(named: "a"),
+            let c = result.root.subdir(named: "c"),
+            let y = a.files.firstIndex(where: { $0.name == "y.dat" }),
+            let z = c.files.firstIndex(where: { $0.name == "z.dat" })
+        else {
+            check("the undo-refused fixture scanned", false, "missing folders")
+            return
+        }
+        let yRef = NodeRef(dir: a, fileIndex: y)
+        let zRef = NodeRef(dir: c, fileIndex: z)
+        let yPath = base.appendingPathComponent("a/y.dat")
+        let yOnDisk = yRef.alloc
+        let before = ledger(result.root)
+
+        trash(model, [yRef, zRef])
+        // Something else is put where y.dat was, behind the app's back.
+        try? Data("in its place".utf8).write(to: yPath)
+        model.undoTrash()
+        check(
+            "what can go back goes back",
+            FileManager.default.fileExists(atPath: base.appendingPathComponent("c/z.dat").path)
+                && !zRef.isStale,
+            "c/z.dat is not back"
+        )
+        check(
+            "what can't is named, and why",
+            model.actionError == "Couldn’t put back “y.dat”"
+                && model.actionErrorDetail?.contains("Something else is at") == true,
+            "\(model.actionError ?? "no error"): \(model.actionErrorDetail ?? "")"
+        )
+        check(
+            "nothing is put back over what has taken its place",
+            (try? Data(contentsOf: yPath)) == Data("in its place".utf8) && yRef.isStale,
+            "the file at a/y.dat was replaced"
+        )
+        check(
+            "it is still counted as in the Trash, and the one that went back is not",
+            model.bytesInTrash == yOnDisk && yOnDisk > 0,
+            "\(model.bytesInTrash) bytes in the Trash, y.dat takes \(yOnDisk)"
+        )
+        check(
+            "the tree is as it was before, less the one that stayed",
+            ledger(result.root)[""]?[2] == (before[""]?[2] ?? 0) - 1
+                && firstThatDoesNotAddUp(result.root) == nil,
+            firstThatDoesNotAddUp(result.root) ?? "\(ledger(result.root)[""] ?? [])"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+
+        // A move that removed nothing leaves the one before it as it was.
+        // It used to be let go of as the next batch began, whatever came of
+        // that batch.
+        trash(model, [zRef])
+        check("z.dat is in the Trash, to be brought back", model.canUndoTrash, "")
+        guard let b = a.subdir(named: "b"),
+            let x = b.files.firstIndex(where: { $0.name == "x.dat" })
+        else { return }
+        // Gone from the disk behind the app's back, so the move fails.
+        try? FileManager.default.removeItem(at: base.appendingPathComponent("a/b/x.dat"))
+        trash(model, [NodeRef(dir: b, fileIndex: x)])
+        check(
+            "a move that fails, and so removes nothing, leaves the last one undoable",
+            model.actionError != nil && model.canUndoTrash,
+            "error \(model.actionError ?? "none"), can undo \(model.canUndoTrash)"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+        model.undoTrash()
+        check(
+            "and it is undone",
+            FileManager.default.fileExists(atPath: base.appendingPathComponent("c/z.dat").path)
+                && !zRef.isStale,
+            "c/z.dat is not back"
+        )
+    }
+
+    /// Bringing something back is the one place this app moves a file to
+    /// somewhere it chose. Each thing it has to be sure of first is held to
+    /// the disk here, with a folder standing in for the Trash: the thing in
+    /// the Trash is the thing that was put there, the folder at the other
+    /// end is the folder it left, and nothing is where it is going.
+    private static func testPuttingBackMovesOnlyWhatWasPutThere() {
+        let base = scratch("put-back")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = FileManager.default
+        let home = base.appendingPathComponent("home")
+        let bin = base.appendingPathComponent("bin")
+        let elsewhere = base.appendingPathComponent("elsewhere")
+        for folder in [home, bin, elsewhere] {
+            try? manager.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        let original = home.appendingPathComponent("notes.txt").path
+        let binned = bin.appendingPathComponent("notes.txt").path
+
+        /// Writes notes.txt in `home`, moves it to the stand-in Trash as a
+        /// move to the Trash would, and gives the receipt for it.
+        func throwAway(_ text: String = "the first") -> FileActions.TrashReceipt? {
+            try? manager.removeItem(atPath: binned)
+            try? manager.removeItem(atPath: original)
+            try? Data(text.utf8).write(to: URL(fileURLWithPath: original))
+            guard let item = FileActions.FileIdentity(atPath: original),
+                let folder = FileActions.FileIdentity(atPath: home.path),
+                (try? manager.moveItem(atPath: original, toPath: binned)) != nil
+            else { return nil }
+            return FileActions.TrashReceipt(inTrash: binned, item: item, folder: folder)
+        }
+        func outcome(_ receipt: FileActions.TrashReceipt, to path: String) -> String {
+            do {
+                try FileActions.putBack(receipt, to: path)
+                return "put back"
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        func text(_ path: String) -> String {
+            (try? String(contentsOfFile: path, encoding: .utf8)) ?? "nothing"
+        }
+
+        guard let plain = throwAway() else {
+            check("the put-back fixture can be built", false, "")
+            return
+        }
+        check(
+            "something in the Trash is known to be there",
+            plain.isStillInTrash,
+            ""
+        )
+        check(
+            "and goes back where it was",
+            outcome(plain, to: original) == "put back" && text(original) == "the first"
+                && !manager.fileExists(atPath: binned) && !plain.isStillInTrash,
+            text(original)
+        )
+
+        // Emptied out, and another file of the same name thrown away since:
+        // it is given the first one's place in the Trash.
+        guard let emptied = throwAway() else { return }
+        try? manager.removeItem(atPath: binned)
+        check(
+            "what has been emptied out of the Trash is not there to bring back",
+            !emptied.isStillInTrash
+                && outcome(emptied, to: original) == "It is no longer in the Trash.",
+            outcome(emptied, to: original)
+        )
+        try? Data("somebody else's".utf8).write(to: URL(fileURLWithPath: binned))
+        check(
+            "nor is something else that has been given its place there",
+            !emptied.isStillInTrash
+                && outcome(emptied, to: original) == "It is no longer in the Trash."
+                && text(binned) == "somebody else's" && !manager.fileExists(atPath: original),
+            "\(outcome(emptied, to: original)); the Trash holds “\(text(binned))”"
+        )
+
+        // Something has arrived where it was. Whatever it is, it stays.
+        func refusedOver(_ what: String, _ put: () -> Void) {
+            guard let receipt = throwAway() else { return }
+            put()
+            let there = FileActions.FileIdentity(atPath: original)
+            let said = outcome(receipt, to: original)
+            check(
+                "it is not put back over \(what), which is left as it was",
+                said.hasPrefix("Something else is at") && receipt.isStillInTrash
+                    && there != nil && FileActions.FileIdentity(atPath: original) == there,
+                said
+            )
+            try? manager.removeItem(atPath: original)
+        }
+        refusedOver("a file") {
+            try? Data("in its place".utf8).write(to: URL(fileURLWithPath: original))
+        }
+        refusedOver("an empty folder") {
+            try? manager.createDirectory(atPath: original, withIntermediateDirectories: false)
+        }
+        refusedOver("a link that leads nowhere") {
+            try? manager.createSymbolicLink(
+                atPath: original,
+                withDestinationPath: base.path + "/no-such-thing"
+            )
+        }
+
+        // The folder it came out of has gone, or is not that folder.
+        guard let orphan = throwAway() else { return }
+        try? manager.removeItem(at: home)
+        check(
+            "it is not put back into a folder that has gone",
+            outcome(orphan, to: original).contains("is no longer there")
+                && orphan.isStillInTrash,
+            outcome(orphan, to: original)
+        )
+        try? manager.createSymbolicLink(at: home, withDestinationURL: elsewhere)
+        check(
+            "nor through a link that has taken the folder's place, into somewhere else",
+            outcome(orphan, to: original).contains("is no longer there")
+                && orphan.isStillInTrash
+                && (try? manager.contentsOfDirectory(atPath: elsewhere.path)) == [],
+            outcome(orphan, to: original) + "; elsewhere holds "
+                + "\((try? manager.contentsOfDirectory(atPath: elsewhere.path)) ?? [])"
+        )
+        try? manager.removeItem(at: home)
+        try? manager.createDirectory(at: home, withIntermediateDirectories: true)
+        check(
+            "nor into a new folder of the same name, which is not the one it left",
+            outcome(orphan, to: original).contains("is no longer there")
+                && orphan.isStillInTrash,
+            outcome(orphan, to: original)
+        )
+    }
+
+    /// Taking one name of a hard-linked file out of the tree can hand its
+    /// bytes to another name. Coming back, it has to be told which of them it
+    /// now is, or the bytes are in the tree twice or not at all. Each way a
+    /// pair can be parted by a move to the Trash is undone here and held to
+    /// a fresh scan.
+    @MainActor
+    private static func testUndoingATrashPutsHardLinksRight() {
+        let base = scratch("undo-links")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            for folder in ["a", "b", "c"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            // One file with a name in each of two folders, one with both its
+            // names in the same folder, and a plain file beside each.
+            try write(base.appendingPathComponent("a/film.dat"), bytes: 9_000)
+            try FileManager.default.linkItem(
+                at: base.appendingPathComponent("a/film.dat"),
+                to: base.appendingPathComponent("b/film.lnk")
+            )
+            try write(base.appendingPathComponent("a/plain.dat"), bytes: 2_000)
+            try write(base.appendingPathComponent("b/plain.log"), bytes: 3_000)
+            try write(base.appendingPathComponent("c/twin.dat"), bytes: 5_000)
+            try FileManager.default.linkItem(
+                at: base.appendingPathComponent("c/twin.dat"),
+                to: base.appendingPathComponent("c/twin.bak")
+            )
+        } catch {
+            check("the undo-links fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+
+        /// Scans afresh, removes what `pick` chooses, undoes it, and holds
+        /// the tree to a fresh scan both times.
+        func round(
+            _ what: String,
+            _ pick: (_ counted: DirNode, _ duplicate: DirNode, _ root: DirNode) -> Set<NodeRef>
+        ) {
+            guard let result = loadSynchronously(into: model),
+                let a = result.root.subdir(named: "a"),
+                let b = result.root.subdir(named: "b"),
+                let (counted, duplicate) = roles(a, b)
+            else {
+                check("the undo-links fixture scanned as a linked pair", false, what)
+                return
+            }
+            let targets = pick(counted, duplicate, result.root)
+            // Taken while they are still there to have one.
+            let paths = targets.map(\.path)
+            trash(model, targets)
+            check(
+                "\(what): gone, the tree is what is left on disk",
+                agreesWithAFreshScan(model, base) == nil,
+                agreesWithAFreshScan(model, base) ?? ""
+            )
+            model.undoTrash()
+            check(
+                "\(what): undone, the tree is what is on disk again",
+                agreesWithAFreshScan(model, base) == nil && model.actionError == nil,
+                agreesWithAFreshScan(model, base) ?? (model.actionError ?? "")
+            )
+            // A tree and a disk that are both still without it agree as well.
+            check(
+                "\(what): and what went is back, on disk and in the tree",
+                !targets.isEmpty && targets.allSatisfy { !$0.isStale }
+                    && paths.allSatisfy { FileManager.default.fileExists(atPath: $0) },
+                "\(targets.filter(\.isStale).map(\.name)) not in the tree"
+            )
+            let names = [a, b].flatMap { dir in
+                dir.files.filter { !$0.isRemoved && $0.name.hasPrefix("film") }
+            }
+            check(
+                "\(what): and exactly one of the film's two names carries its bytes",
+                names.count == 2 && names.filter(\.isDuplicateLink).count == 1,
+                "\(names.map { "\($0.name) duplicate=\($0.isDuplicateLink)" })"
+            )
+        }
+        func film(_ dir: DirNode) -> NodeRef {
+            let index = dir.files.firstIndex { $0.name.hasPrefix("film") } ?? 0
+            return NodeRef(dir: dir, fileIndex: index)
+        }
+
+        round("the name that carries the bytes") { counted, _, _ in [film(counted)] }
+        round("the second name") { _, duplicate, _ in [film(duplicate)] }
+        round("the folder of the name that carries the bytes") { counted, _, _ in
+            [NodeRef(counted)]
+        }
+        round("the folder of the second name") { _, duplicate, _ in [NodeRef(duplicate)] }
+        round("both names at once") { counted, duplicate, _ in
+            [film(counted), film(duplicate)]
+        }
+        round("both their folders at once") { counted, duplicate, _ in
+            [NodeRef(counted), NodeRef(duplicate)]
+        }
+        round("a folder holding both names of another file") { _, _, root in
+            root.subdir(named: "c").map { [NodeRef($0)] } ?? []
+        }
+        round("one name of a pair in the same folder") { _, _, root in
+            guard let c = root.subdir(named: "c"),
+                let index = c.files.firstIndex(where: { !$0.isDuplicateLink })
+            else { return [] }
+            return [NodeRef(dir: c, fileIndex: index)]
+        }
+
+        // What the Trash is said to hold is what left the totals. Asked of
+        // each name on its own it came to nothing for both names of a file:
+        // each is a name that frees nothing, and between them were all of it.
+        if let result = loadSynchronously(into: model),
+            let a = result.root.subdir(named: "a"),
+            let b = result.root.subdir(named: "b"),
+            let (counted, duplicate) = roles(a, b)
+        {
+            let whole = film(counted).alloc
+            let before = model.bytesInTrash
+            trash(model, [film(counted), film(duplicate)])
+            check(
+                "both names moved together are all of it, once",
+                model.bytesInTrash - before == whole,
+                "\(model.bytesInTrash - before) more bytes in the Trash, the file takes \(whole)"
+            )
+            model.undoTrash()
+        } else {
+            check("the fixture is a linked pair for both names at once", false, "the pair did not scan as a pair")
+        }
+
+        // Both names go, and only one can come back: it is then the only
+        // name in the tree, and has to be the one that carries the bytes.
+        guard let result = loadSynchronously(into: model),
+            let a = result.root.subdir(named: "a"),
+            let b = result.root.subdir(named: "b"),
+            let (counted, duplicate) = roles(a, b)
+        else {
+            check("the fixture is a linked pair for one name coming back", false, "")
+            return
+        }
+        let stays = film(counted)
+        let returns = film(duplicate)
+        let blocked = URL(fileURLWithPath: stays.path)
+        trash(model, [stays, returns])
+        try? Data("in its place".utf8).write(to: blocked)
+        model.undoTrash()
+        check(
+            "and the name left in the Trash holds nothing that is missing from the totals",
+            model.bytesInTrash == 0,
+            "\(model.bytesInTrash) bytes in the Trash"
+        )
+        check(
+            "a second name that comes back alone carries the bytes itself",
+            returns.file?.isDuplicateLink == false && stays.isStale
+                && firstThatDoesNotAddUp(result.root) == nil
+                && result.hardLinkSavings(using: .logical) == 5_000,
+            "duplicate \(String(describing: returns.file?.isDuplicateLink)), "
+                + "saving \(result.hardLinkSavings(using: .logical)); "
+                + (firstThatDoesNotAddUp(result.root) ?? "adds up")
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+
+        // The name that stayed in the Trash is given back to the file under
+        // its old name, so there is a pair again for one last round — which
+        // comes last because it leaves a name in the Trash for good.
+        try? FileManager.default.removeItem(at: blocked)
+        try? FileManager.default.linkItem(atPath: returns.path, toPath: blocked.path)
+        if let result = loadSynchronously(into: model),
+            let a = result.root.subdir(named: "a"),
+            let b = result.root.subdir(named: "b"),
+            let (counted, duplicate) = roles(a, b)
+        {
+            let whole = film(counted).alloc
+            let held = model.bytesInTrash
+            trash(model, [film(duplicate)])
+            check(
+                "a second name in the Trash holds nothing there that is not still here",
+                model.bytesInTrash == held,
+                "\(model.bytesInTrash - held) more bytes in the Trash"
+            )
+            trash(model, [film(counted)])
+            check(
+                "once the last name has gone too, the Trash holds the file",
+                model.bytesInTrash - held == whole && whole > 0,
+                "\(model.bytesInTrash - held) more bytes in the Trash, the file takes \(whole)"
+            )
+            model.undoTrash()
+        } else {
+            check("the fixture is a linked pair for one name after the other", false, "the pair did not scan as a pair")
+        }
     }
 
     /// The measure on show and what was last scanned started over at every
