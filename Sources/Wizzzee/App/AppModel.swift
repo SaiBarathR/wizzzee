@@ -648,7 +648,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Whether the folder picker can be put up: not during a scan or a
+    /// delete, not over a question that is waiting for an answer, and not
+    /// while it is already up.
+    ///
+    /// It has a key now, and a key reaches the menu from under a panel. A
+    /// second ⌘O put a second panel over the first, and cancelling that one
+    /// took the guard below off while the first was still up — which is what
+    /// keeps ⌘⌫ in the panel from trashing the selection behind it.
+    var canChooseFolder: Bool {
+        canStartScan && !isChoosingFolder && permanentDeleteTargets.isEmpty
+            && actionError == nil
+    }
+
     func chooseFolder() {
+        guard canChooseFolder else { return }
         // The panel has a ⌘⌫ of its own, for the file selected in it.
         isChoosingFolder = true
         defer { isChoosingFolder = false }
@@ -818,6 +832,14 @@ final class AppModel: ObservableObject {
         revealTarget = ref
         revealIsWaiting = true
         revealCount += 1
+    }
+
+    /// Whether `ref` is still the row last asked for, and still what is
+    /// selected: the test a scroll that was put off has to pass when its
+    /// time comes. A rescan, a delete of the row, another reveal or a click
+    /// elsewhere all fail it.
+    func isStillRevealing(_ ref: NodeRef) -> Bool {
+        revealTarget == ref && selection == [ref] && !ref.isStale
     }
 
     /// The row waiting to be scrolled to, if one is. Asking is answering: it

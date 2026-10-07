@@ -34,7 +34,7 @@ struct WizzzeeApp: App {
                 // something with.
                 Button("Scan Folder…") { model.chooseFolder() }
                     .keyboardShortcut("o", modifiers: .command)
-                    .disabled(!model.canStartScan)
+                    .disabled(!model.canChooseFolder)
                 Divider()
                 // Space does the same on a row. That one is the table's own,
                 // so it can't be shown here; this is the one that can.

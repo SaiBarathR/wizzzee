@@ -38,17 +38,25 @@ struct TreeTable: View {
                 // one asked for is there to be scrolled to. And on being put
                 // on screen, for a row asked for from another tab.
                 .onChange(of: model.revealCount) { scrollIfAsked(proxy) }
-                .onAppear { scrollIfAsked(proxy) }
+                .onAppear { scrollIfAsked(proxy, isNewTable: true) }
         }
     }
 
-    private func scrollIfAsked(_ proxy: ScrollViewProxy) {
+    private func scrollIfAsked(_ proxy: ScrollViewProxy, isNewTable: Bool = false) {
         guard let target = model.takeRevealTarget() else { return }
         proxy.scrollTo(target, anchor: .center)
-        // Again once the table has settled. One that has only just been put
-        // on screen has no rows laid out yet for the first to land on.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            proxy.scrollTo(target, anchor: .center)
+        guard isNewTable else { return }
+        // A table that has only just been put on screen may have no rows
+        // laid out yet for that to land on, so it is asked again as it
+        // settles — but only for as long as this is still the row that was
+        // asked for and is still selected. A click on something else in the
+        // meantime is where the table should stay, and a scroll arriving
+        // after it would carry the new selection off the screen.
+        for delay in [0.1, 0.3, 0.8] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard model.isStillRevealing(target) else { return }
+                proxy.scrollTo(target, anchor: .center)
+            }
         }
     }
 

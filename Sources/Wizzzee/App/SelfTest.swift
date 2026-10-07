@@ -5556,6 +5556,24 @@ enum SelfTest {
         return found
     }
 
+    /// Runs the main run loop until `condition` holds, and says whether it
+    /// came to. For anything on screen: how long a table takes to lay out
+    /// and scroll is the machine's business, and a fixed wait that is ample
+    /// here is not on a loaded runner.
+    @MainActor
+    @discardableResult
+    private static func pumpUntil(
+        _ timeout: TimeInterval = 10,
+        _ condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline { return false }
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        return true
+    }
+
     /// Runs the main run loop for `seconds`.
     @MainActor
     private static func pump(_ seconds: TimeInterval) {
@@ -6596,6 +6614,26 @@ enum SelfTest {
             model.treemapRoot === result.root && !model.canZoomOut,
             "map at \(model.treemapRoot?.name ?? "nil")"
         )
+
+        // A scan's root is named by the whole path it was scanned at. In the
+        // path above the map that was wider than the strip, and pushed out
+        // every way of showing it that had buttons in.
+        check(
+            "the root is shown by its own name, not the path that leads to it",
+            ZoomTrail.label(for: result.root) == base.lastPathComponent
+                && result.root.name.count > base.lastPathComponent.count,
+            "“\(ZoomTrail.label(for: result.root))” for \(result.root.name)"
+        )
+        check(
+            "a folder below it by the name it has",
+            ZoomTrail.label(for: a) == "a",
+            ZoomTrail.label(for: a)
+        )
+        check(
+            "and a whole volume by the one name it has",
+            ZoomTrail.label(for: DirNode(name: "/", parent: nil)) == "/",
+            ZoomTrail.label(for: DirNode(name: "/", parent: nil))
+        )
     }
 
     /// The tabs only ever answered a click.
@@ -6624,6 +6662,31 @@ enum SelfTest {
             model.tab == .tree,
             "tab \(model.tab)"
         )
+
+        // The folder picker has a key, and a key reaches the menu from under
+        // a panel or a question. It is off wherever a scan could not start,
+        // and wherever something is waiting for an answer.
+        check(
+            "the folder picker can be put up over a finished scan",
+            model.canChooseFolder,
+            ""
+        )
+        if let root = model.result?.root {
+            model.permanentDeleteTargets = [NodeRef(root)]
+            check(
+                "but not over a delete that is waiting to be confirmed",
+                !model.canChooseFolder,
+                ""
+            )
+            model.permanentDeleteTargets = []
+        }
+        model.actionError = "something to read first"
+        check("nor over an alert", !model.canChooseFolder, "")
+        model.actionError = nil
+        model.startScan()
+        check("nor during a scan", !model.canChooseFolder, "")
+        pumpUntilSettled(model)
+        check("and can again once it is over", model.canChooseFolder, "")
     }
 
     /// A row picked from somewhere other than the table — a tile on the map,
@@ -6672,7 +6735,10 @@ enum SelfTest {
         // one size: f399 sorts after f398, four hundred rows down.
         model.treeSort = [TreeSort(.name, order: .forward)]
         model.setExpanded(many, true)
-        pump(0.6)
+        // Until the table has the rows, which is what the rest asks it about.
+        pumpUntil {
+            tables(under: hosting).contains { $0.numberOfRows == model.treeRows.count }
+        }
 
         guard let last = many.files.firstIndex(where: { $0.name == "f399.dat" })
         else {
@@ -6704,27 +6770,42 @@ enum SelfTest {
             showing()
         )
         model.revealInTree(target)
-        pump(0.8)
+        pumpUntil { table.rows(in: table.visibleRect).contains(row) }
         check(
             "revealing a row far down the tree scrolls it into view",
             table.rows(in: table.visibleRect).contains(row),
             showing()
         )
+        check(
+            "and it is the row a scroll that was put off would still go to",
+            model.isStillRevealing(target),
+            "selected \(model.selection.map(\.name))"
+        )
+        // A click somewhere else in the meantime: a scroll arriving after it
+        // would carry what is now selected off the screen.
+        model.selection = [NodeRef(result.root)]
+        check(
+            "until something else is selected",
+            !model.isStillRevealing(target),
+            "selected \(model.selection.map(\.name))"
+        )
 
         // Asked for from another tab, as "Show in Tree" in the File View's
         // menu does it. The tree's table is not on screen to be told, and is
         // a new table when it comes back.
-        model.selection = [NodeRef(result.root)]
         model.show(.files)
-        pump(0.5)
+        // Until the tree's table has gone, so that the one found below is
+        // the new one and not the one that was just scrolled.
+        pumpUntil {
+            !tables(under: hosting).contains { $0.numberOfRows == model.treeRows.count }
+        }
         model.show(.tree)
         model.revealInTree(target)
-        pump(1.0)
-        guard
-            let again = tables(under: hosting).first(where: {
-                $0.numberOfRows == model.treeRows.count
-            })
-        else {
+        func treeTable() -> NSTableView? {
+            tables(under: hosting).first { $0.numberOfRows == model.treeRows.count }
+        }
+        pumpUntil { treeTable().map { $0.rows(in: $0.visibleRect).contains(row) } == true }
+        guard let again = treeTable() else {
             check("the tree's table is back after a change of tab", false, "")
             return
         }
@@ -6735,6 +6816,21 @@ enum SelfTest {
             "row \(row); showing \(visible.location)–"
                 + "\(visible.location + visible.length - 1)"
         )
+
+        deletePermanently(model, [target])
+        check(
+            "a row that has been deleted is not one to scroll to",
+            !model.isStillRevealing(target),
+            ""
+        )
+        model.revealInTree(NodeRef(many))
+        model.startScan()
+        check(
+            "nor is anything in a scan that is being replaced",
+            !model.isStillRevealing(NodeRef(many)) && model.takeRevealTarget() == nil,
+            ""
+        )
+        pumpUntilSettled(model)
     }
 
     /// Runs the main run loop until the File View's background walk has delivered

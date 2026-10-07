@@ -143,7 +143,7 @@ struct ZoomTrail: View {
                 Text("…").foregroundStyle(.tertiary)
                 separator
             }
-            Text(trail[trail.count - 1].name)
+            Text(Self.label(for: trail[trail.count - 1]))
                 .foregroundStyle(.primary)
                 .truncationMode(.middle)
                 .help(trail[trail.count - 1].path)
@@ -157,19 +157,37 @@ struct ZoomTrail: View {
             .foregroundStyle(.tertiary)
     }
 
+    /// What a folder is called in the path. A scan's root is named by the
+    /// whole path it was scanned at, which is its name everywhere else and
+    /// here would be wider than the strip: every way of showing the path
+    /// that still had buttons in it then failed to fit, and what was left
+    /// was the last folder's name with nothing to click.
+    static func label(for dir: DirNode) -> String {
+        guard dir.isRoot else { return dir.name }
+        let last = (dir.name as NSString).lastPathComponent
+        return last.isEmpty ? dir.name : last
+    }
+
+    /// The most room one folder's name is given before it is cut short.
+    private static let widest: CGFloat = 180
+
     @ViewBuilder
     private func step(_ dir: DirNode, isCurrent: Bool) -> some View {
         if isCurrent {
             // Where the map is. Nothing to zoom to, so nothing to click.
-            Text(dir.name)
+            Text(Self.label(for: dir))
                 .foregroundStyle(.primary)
+                .truncationMode(.middle)
+                .frame(maxWidth: Self.widest)
                 .help(dir.path)
         } else {
             Button {
                 model.zoom(into: dir)
             } label: {
-                Text(dir.name)
+                Text(Self.label(for: dir))
                     .foregroundStyle(.secondary)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: Self.widest)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
