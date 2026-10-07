@@ -22,25 +22,28 @@ struct WizzzeeApp: App {
         .commands {
             // In place of New Window, which a single scan has no use for, and
             // where Finder keeps the same two on the same keys.
+            //
+            // The keys stay on the items whatever is going on. Taking them
+            // off while the filter was being typed in left them off: a menu
+            // item is only given a changed key when its menu is next opened,
+            // so ⌘⌫ did nothing on a row picked straight afterwards. Greyed
+            // out is enough — a key that matches a disabled item goes on to
+            // whatever has the keyboard.
             CommandGroup(replacing: .newItem) {
-                // The key comes off as well as the item going grey while the
-                // filter is being typed in: ⌘⌫ there belongs to the text.
-                Button("Move to Trash") { model.trashSelection() }
-                    .keyboardShortcut(
-                        model.isEditingFilter
-                            ? nil : KeyboardShortcut(.delete, modifiers: .command)
-                    )
-                    .disabled(!model.canUseDeleteKeys)
-                Button("Delete Permanently…") { model.confirmDeletingSelection() }
-                    .keyboardShortcut(
-                        model.isEditingFilter
-                            ? nil
-                            : KeyboardShortcut(
-                                .delete,
-                                modifiers: [.command, .option]
-                            )
-                    )
-                    .disabled(!model.canUseDeleteKeys)
+                Button("Move to Trash") {
+                    if TextEntry.isUnderWay {
+                        TextEntry.deleteToBeginningOfLine()
+                    } else {
+                        model.trashSelection()
+                    }
+                }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(!model.canUseDeleteKeys)
+                Button("Delete Permanently…") {
+                    if !TextEntry.isUnderWay { model.confirmDeletingSelection() }
+                }
+                .keyboardShortcut(.delete, modifiers: [.command, .option])
+                .disabled(!model.canUseDeleteKeys)
             }
             CommandGroup(after: .toolbar) {
                 // Disabled rather than silently ignored: `startScan` refuses
@@ -64,6 +67,31 @@ struct WizzzeeApp: App {
                     .disabled(!model.showsTreemap)
             }
         }
+    }
+}
+
+/// Whether the keyboard is in a text field, asked of AppKit at the moment a
+/// delete key lands.
+///
+/// The model already keeps the keys off while the filter has focus, from what
+/// SwiftUI reports. That report is the only thing between ⌘⌫ in a text field
+/// and the selection going to the Trash unasked, so it is not taken on trust:
+/// if a field is being edited when the action arrives, the key is given back
+/// to it.
+enum TextEntry {
+    @MainActor
+    static var isUnderWay: Bool {
+        NSApp.keyWindow?.firstResponder is NSTextView
+    }
+
+    /// What ⌘⌫ means to a text field.
+    @MainActor
+    static func deleteToBeginningOfLine() {
+        NSApp.sendAction(
+            #selector(NSResponder.deleteToBeginningOfLine(_:)),
+            to: nil,
+            from: nil
+        )
     }
 }
 

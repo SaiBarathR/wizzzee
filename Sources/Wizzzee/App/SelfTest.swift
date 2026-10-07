@@ -1836,9 +1836,10 @@ enum SelfTest {
     /// front has on show, and on nothing while something else holds the
     /// keyboard or a sheet is waiting.
     //
-    // shown/a.dat        3,000 bytes
-    // shown/b.dat        4,000
-    // deep/inner/c.dat   5,000
+    // shown/a.dat            3,000 bytes
+    // shown/b.dat            4,000
+    // deep/inner/c.dat       5,000
+    // deep/inner/empty.dat   nothing, so the treemap has no tile for it
     @MainActor
     private static func testTheDeleteKeysActOnWhatIsOnShow() {
         let base = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -1854,6 +1855,7 @@ enum SelfTest {
             try write(base.appendingPathComponent("shown/a.dat"), bytes: 3_000)
             try write(base.appendingPathComponent("shown/b.dat"), bytes: 4_000)
             try write(base.appendingPathComponent("deep/inner/c.dat"), bytes: 5_000)
+            try write(base.appendingPathComponent("deep/inner/empty.dat"), bytes: 0)
         } catch {
             check("the delete-key fixture can be built", false, "\(error)")
             return
@@ -1872,14 +1874,16 @@ enum SelfTest {
             let inner = deep.subdir(named: "inner"),
             let a = shown.files.firstIndex(where: { $0.name == "a.dat" }),
             let b = shown.files.firstIndex(where: { $0.name == "b.dat" }),
-            inner.files.count == 1
+            let c = inner.files.firstIndex(where: { $0.name == "c.dat" }),
+            let empty = inner.files.firstIndex(where: { $0.name == "empty.dat" })
         else {
             check("the delete-key fixture scanned", false, "missing entries")
             return
         }
         let aRef = NodeRef(dir: shown, fileIndex: a)
         let bRef = NodeRef(dir: shown, fileIndex: b)
-        let cRef = NodeRef(dir: inner, fileIndex: 0)
+        let cRef = NodeRef(dir: inner, fileIndex: c)
+        let emptyRef = NodeRef(dir: inner, fileIndex: empty)
         // The treemap counts as on show for one clicked tile, so it is put
         // away until the checks that are about it.
         model.showsTreemap = false
@@ -1942,7 +1946,10 @@ enum SelfTest {
             "it was acted on"
         )
 
-        // A tile clicked on the map is selected without being given a row.
+        // A tile clicked on the map is selected without being given a row, so
+        // the map is asked what it is outlining. Being selected somewhere
+        // under the map's root is not that: plenty under there is never
+        // drawn, and ⌘⌫ went on reaching it.
         model.selection = [cRef]
         check(
             "with the treemap hidden, a file in a closed folder is not on show",
@@ -1951,23 +1958,75 @@ enum SelfTest {
         )
         model.showsTreemap = true
         check(
-            "with it showing, the one outlined tile is",
-            model.selectionOnShow == [cRef] && model.canUseDeleteKeys,
+            "nor with it showing, until the map says it has outlined it",
+            model.selectionOnShow.isEmpty && !model.canUseDeleteKeys,
             "on show: \(model.selectionOnShow.map(\.name))"
         )
-        model.zoom(into: shown)
+
+        // A map wired to the model as `TreemapPane` wires it, and handed what
+        // `TreemapCanvas` would hand it.
+        let layouts = DispatchQueue(label: "com.wizzzee.selftest.outline")
+        let map = TreemapNSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        map.layoutQueue = layouts
+        map.liveRevision = { model.treeRevision }
+        map.onOutline = { model.treemapOutline = $0 }
+        func redraw() {
+            map.selection = model.primarySelection
+            map.apply(
+                root: model.treemapRoot,
+                metric: model.sizeMetric,
+                revision: model.treeRevision
+            )
+            // The layout lands on the main queue and the outline is reported
+            // on the turn after that.
+            layouts.sync {}
+            for _ in 0..<3 {
+                RunLoop.main.run(
+                    mode: .default,
+                    before: Date().addingTimeInterval(0.05)
+                )
+            }
+        }
+        redraw()
         check(
-            "unless the map is zoomed somewhere that leaves it out",
-            model.selectionOnShow.isEmpty,
-            "on show: \(model.selectionOnShow.map(\.name))"
+            "once the map has drawn it, the one outlined tile is on show",
+            model.treemapOutline == cRef && model.selectionOnShow == [cRef]
+                && model.canUseDeleteKeys,
+            "outlined \(model.treemapOutline?.name ?? "nothing"), "
+                + "on show: \(model.selectionOnShow.map(\.name))"
+        )
+        model.selection = [emptyRef]
+        redraw()
+        model.trashSelection()
+        check(
+            "a file the map has no tile for is selected and left alone",
+            model.treemapOutline == nil && !model.canUseDeleteKeys
+                && !model.isDeleting && onDisk("deep/inner/empty.dat"),
+            "outlined \(model.treemapOutline?.name ?? "nothing"), "
+                + "deleting \(model.isDeleting)"
+        )
+        model.selection = [cRef]
+        redraw()
+        model.zoom(into: shown)
+        redraw()
+        check(
+            "so is one the map is zoomed away from",
+            model.treemapOutline == nil && model.selectionOnShow.isEmpty,
+            "outlined \(model.treemapOutline?.name ?? "nothing")"
         )
         model.resetZoom()
+        redraw()
         model.showsTreemap = false
+        check(
+            "and an outline counts for nothing once the map is put away",
+            model.treemapOutline == cRef && model.selectionOnShow.isEmpty,
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
 
         // File View lists files only, so a folder picked in the tree has no
         // row there however selected it still is.
         model.tab = .files
-        pumpUntilFileRowsSettle(model, expecting: 3)
+        pumpUntilFileRowsSettle(model, expecting: 4)
         model.selection = [NodeRef(shown)]
         check(
             "a folder selected in the tree is not on show in File View",

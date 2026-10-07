@@ -223,6 +223,9 @@ final class AppModel: ObservableObject {
     @Published var showsTreemap = Preferences.showsTreemap
     @Published var treemapRoot: DirNode?
     @Published var hoveredRef: NodeRef?
+    /// The item the treemap is drawing its selection outline round, as the
+    /// map last reported it. See `TreemapNSView.onOutline`.
+    @Published var treemapOutline: NodeRef?
     /// Incremented whenever the tree is structurally changed, so the treemap
     /// knows to lay out again even though its root object is unchanged.
     @Published var treeRevision = 0
@@ -535,6 +538,7 @@ final class AppModel: ObservableObject {
         sharedStorageCache = [:]
         capacityAfterDelete = nil
         treemapRoot = nil
+        treemapOutline = nil
         expanded = []
         progress = ScanEngine.Progress()
         phase = .scanning
@@ -858,9 +862,11 @@ final class AppModel: ObservableObject {
     private var isOnShow: (NodeRef) -> Bool {
         switch tab {
         case .tree:
+            // Staleness last: it walks to the root, and for a selection a
+            // collapsed folder has hidden the first test fails one step up.
             return { ref in
-                !ref.isStale
-                    && (self.isTreeRow(ref) || self.isOutlinedInTreemap(ref))
+                (self.isTreeRow(ref) || self.isOutlinedInTreemap(ref))
+                    && !ref.isStale
             }
         case .files:
             let rows = Set(fileRows.lazy.map(\.ref))
@@ -886,15 +892,12 @@ final class AppModel: ObservableObject {
 
     /// Whether the treemap is showing and `ref` is the one item it outlines.
     /// A tile clicked on the map is selected without being given a row.
+    ///
+    /// Asked of the map, not worked out from where `ref` sits under the map's
+    /// root: plenty under there is never drawn, and stays selected all the
+    /// same.
     private func isOutlinedInTreemap(_ ref: NodeRef) -> Bool {
-        guard showsTreemap, primarySelection == ref, let root = treemapRoot
-        else { return false }
-        var within: DirNode? = ref.dir
-        while let step = within {
-            if step === root { return true }
-            within = step.parent
-        }
-        return false
+        showsTreemap && treemapOutline == ref && primarySelection == ref
     }
 
     /// False when the delete keys have nothing to act on or something is in

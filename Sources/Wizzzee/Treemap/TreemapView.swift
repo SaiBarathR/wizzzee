@@ -18,6 +18,7 @@ struct TreemapCanvas: NSViewRepresentable {
     let onSelect: (NodeRef) -> Void
     let onZoom: (DirNode) -> Void
     let onHover: (NodeRef?) -> Void
+    let onOutline: (NodeRef?) -> Void
 
     func makeNSView(context: Context) -> TreemapNSView {
         let view = TreemapNSView()
@@ -26,6 +27,7 @@ struct TreemapCanvas: NSViewRepresentable {
         view.onSelect = onSelect
         view.onZoom = onZoom
         view.onHover = onHover
+        view.onOutline = onOutline
         return view
     }
 
@@ -35,6 +37,7 @@ struct TreemapCanvas: NSViewRepresentable {
         view.onSelect = onSelect
         view.onZoom = onZoom
         view.onHover = onHover
+        view.onOutline = onOutline
         view.selection = selection
         view.apply(root: root, metric: metric, revision: revision)
     }
@@ -44,12 +47,27 @@ final class TreemapNSView: NSView {
     var onSelect: ((NodeRef) -> Void)?
     var onZoom: ((DirNode) -> Void)?
     var onHover: ((NodeRef?) -> Void)?
+    /// Told which item the map is drawing its selection outline round, and
+    /// nil when it is drawing none.
+    ///
+    /// Being selected is not being outlined. A file inside a folder drawn as
+    /// one tile has no tile of its own, nor has an empty file or a second
+    /// name for a hard link, and a tile clicked at one zoom can be too small
+    /// to draw at another. ⌘⌫ acts on what can be seen, so it has to be told
+    /// which of those this is.
+    var onOutline: ((NodeRef?) -> Void)?
     /// Asks the model for the tree's revision as it is this instant.
     var liveRevision: (() -> Int)?
 
     var selection: NodeRef? {
-        didSet { if selection != oldValue { needsDisplay = true } }
+        didSet {
+            guard selection != oldValue else { return }
+            needsDisplay = true
+            reportOutline()
+        }
     }
+    /// What `onOutline` was last told, so it only hears of a change.
+    private var reportedOutline: NodeRef?
 
     private var root: DirNode?
     /// `root`'s parent chain, held for as long as `root` is.
@@ -132,11 +150,29 @@ final class TreemapNSView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
     }
 
+    /// Works out whether the selection has an outline and passes on a change.
+    private func reportOutline() {
+        let outlined =
+            showsCurrentTree
+            ? selection.flatMap { rect(for: $0) == nil ? nil : $0 } : nil
+        guard outlined != reportedOutline else { return }
+        reportedOutline = outlined
+        // On the next turn of the run loop, as with hover: this is reachable
+        // from `updateNSView`, and the model can't be published to from there.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.reportedOutline == outlined else { return }
+            self.onOutline?(outlined)
+        }
+    }
+
     private func rebuild() {
         renderToken += 1
         let token = renderToken
         let size = bounds.size
         layoutSize = size
+        // A layout of the tree before a delete outlines nothing that can be
+        // acted on, from the moment the tree moves on.
+        reportOutline()
 
         // Cleared here rather than in `apply`, which the resize path doesn't go
         // through: dragging the splitter with the pointer over the map re-laid
@@ -159,6 +195,7 @@ final class TreemapNSView: NSView {
             model = TreemapModel()
             image = nil
             needsDisplay = true
+            reportOutline()
             return
         }
 
@@ -198,6 +235,7 @@ final class TreemapNSView: NSView {
                 self.modelRevision = revision
                 self.image = rendered.map { NSImage(cgImage: $0, size: size) }
                 self.needsDisplay = true
+                self.reportOutline()
             }
         }
     }
