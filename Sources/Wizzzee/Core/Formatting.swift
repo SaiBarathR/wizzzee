@@ -43,6 +43,13 @@ enum ByteFormat {
         countFormatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 
+    /// A count with the thing counted, singular when there is exactly one:
+    /// "1 item", "2,760 items". A folder with one file in it otherwise reads
+    /// "1 items inside it" in the dialog that asks whether to delete it.
+    static func counted(_ value: Int, _ noun: String) -> String {
+        "\(count(value)) \(noun)\(value == 1 ? "" : "s")"
+    }
+
     private static let countFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal

@@ -110,7 +110,7 @@ struct HeaderBar: View {
                         + ByteFormat.duration(model.result?.elapsed ?? 0)
                 )
                 if let denied = model.result?.deniedCount, denied > 0 {
-                    Text("• \(ByteFormat.count(denied)) folders unreadable")
+                    Text("• \(ByteFormat.counted(denied, "folder")) unreadable")
                         .foregroundStyle(.orange)
                 }
             }
@@ -158,7 +158,7 @@ struct HeaderBar: View {
                 if let result = model.result {
                     Text(
                         "\(ByteFormat.decimal(result.root.totalSize))  "
-                            + "(\(ByteFormat.count(result.root.totalFiles)) files)"
+                            + "(\(ByteFormat.counted(result.root.totalFiles, "file")))"
                     )
                     .fontWeight(.medium)
                 } else {

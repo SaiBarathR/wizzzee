@@ -58,7 +58,7 @@ struct FileViewTab: View {
         let total = model.fileRows.reduce(UInt64(0)) {
             $0 + (logical ? $1.size : $1.alloc)
         }
-        let cap = shown >= 1000 ? "largest 1,000" : "\(ByteFormat.count(shown)) files"
+        let cap = shown >= 1000 ? "largest 1,000" : ByteFormat.counted(shown, "file")
         return "\(cap) • \(ByteFormat.decimal(total))"
     }
 

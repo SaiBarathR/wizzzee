@@ -75,8 +75,8 @@ struct StatusBar: View {
 
             if let result = model.result {
                 Text(
-                    "\(ByteFormat.count(result.root.totalFiles)) files, "
-                        + "\(ByteFormat.count(result.root.totalDirs)) folders"
+                    "\(ByteFormat.counted(result.root.totalFiles, "file")), "
+                        + ByteFormat.counted(result.root.totalDirs, "folder")
                 )
                 Text("Total \(ByteFormat.decimal(result.root.totalSize))")
                 Text("On disk \(ByteFormat.decimal(result.root.totalAlloc))")
@@ -102,7 +102,7 @@ struct StatusBar: View {
     private func selectionSummary(_ ref: NodeRef) -> String {
         var parts = [ref.path, ByteFormat.decimal(ref.size)]
         if ref.isDirectory {
-            parts.append("\(ByteFormat.count(ref.dir.totalItems)) items")
+            parts.append(ByteFormat.counted(ref.dir.totalItems, "item"))
         }
         return parts.joined(separator: "  •  ")
     }
@@ -135,7 +135,7 @@ struct AboutTab: View {
                             ByteFormat.decimal(result.hardLinkSavings)
                         )
                         row("Unreadable folders", ByteFormat.count(result.deniedCount))
-                        row("File types", ByteFormat.count(result.extensionStats.count))
+                        row("File types", ByteFormat.count(result.typeCount))
                     }
                     .font(.system(size: 11))
                 }

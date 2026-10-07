@@ -349,7 +349,7 @@ final class TreemapNSView: NSView {
         let detail =
             "\(ByteFormat.decimal(ref.size))  •  on disk \(ByteFormat.decimal(ref.alloc))"
                 + (ref.isDirectory
-                    ? "  •  \(ByteFormat.count(ref.dir.totalItems)) items" : "")
+                    ? "  •  \(ByteFormat.counted(ref.dir.totalItems, "item"))" : "")
 
         let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .medium),

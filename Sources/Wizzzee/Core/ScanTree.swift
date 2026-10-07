@@ -81,18 +81,22 @@ final class DirNode {
     }
 
     let name: String
-    /// Unowned because the root retains the whole tree top-down; making this
+    /// Weak because the root retains the whole tree top-down; making this
     /// strong would create a reference cycle and leak the tree on rescan.
     ///
-    /// Unchecked, so anything holding a node has to keep its ancestors alive
-    /// too — a delete unlinks a subtree, and the folders above a node that
-    /// outlived it are freed while it is still being read. Two places hold
-    /// nodes across a delete and both pin the chain deliberately: `NodeRef`s
-    /// captured in a delete batch always include the topmost target, whose
-    /// `subdirs` keep the rest of the subtree alive, and `TreemapModel` stores
-    /// its root's ancestors for exactly this reason. Derived rows that can't
-    /// promise it — the File View's — are dropped in `AppModel.detach`.
-    unowned(unsafe) var parent: DirNode?
+    /// It was `unowned(unsafe)`, on the understanding that anything holding a
+    /// node would keep its ancestors alive too. Too much holds a node without
+    /// being able to promise that: SwiftUI keeps a closed context menu's
+    /// references and re-runs its body on every publish, long after a rescan
+    /// or a delete has freed the folders above them. Each one of those was a
+    /// read of freed memory waiting for the allocator to reuse it, and three
+    /// separate crashes came from it. A parent that has gone now reads as nil.
+    ///
+    /// The cost is a side table per folder that has subfolders, and it does
+    /// not show up in scan time. The places that pin the chain on purpose —
+    /// `TreemapModel.ancestors`, the delete batch's own targets — still do, so
+    /// they go on seeing full paths rather than truncated ones.
+    weak var parent: DirNode?
 
     var subdirs: [DirNode] = []
     var files: [FileEntry] = []
@@ -119,6 +123,12 @@ final class DirNode {
 
     /// Absolute filesystem path, rebuilt by walking up to the root (whose
     /// `name` holds the full path the scan started from).
+    ///
+    /// Empty when the walk doesn't end at a scan root — a node kept from a
+    /// scan that has been replaced, whose folders above it are gone. What is
+    /// left of the chain would otherwise come out as a relative path, and a
+    /// delete handed one of those resolves it against the working directory.
+    /// Only a root's name is absolute, so that is how a broken chain is told.
     var path: String {
         var parts: [String] = []
         var node: DirNode? = self
@@ -126,6 +136,7 @@ final class DirNode {
             parts.append(current.name)
             node = current.parent
         }
+        guard parts[parts.count - 1].hasPrefix("/") else { return "" }
         var result = parts.removeLast()
         while let part = parts.popLast() {
             if !result.hasSuffix("/") { result += "/" }
@@ -134,8 +145,17 @@ final class DirNode {
         return result
     }
 
+    /// True when the walk up from here no longer ends at a scan root: this
+    /// folder outlived the scan it came from, and what was above it is gone.
+    var isCutOff: Bool {
+        var top = self
+        while let above = top.parent { top = above }
+        return !top.name.hasPrefix("/")
+    }
+
     func path(ofFileAt index: Int) -> String {
         let base = path
+        guard !base.isEmpty else { return "" }
         return base.hasSuffix("/")
             ? base + files[index].name : base + "/" + files[index].name
     }
@@ -171,7 +191,8 @@ struct NodeRef: Hashable, Identifiable {
 
     var isDirectory: Bool { fileIndex < 0 }
 
-    /// True when this points at a file index its folder no longer has.
+    /// True when this points at a file index its folder no longer has, or into
+    /// a scan that has been replaced.
     ///
     /// Deleting a file renumbers every sibling after it, which invalidates any
     /// reference captured beforehand. Derived rows are rebuilt after a delete,
@@ -179,7 +200,13 @@ struct NodeRef: Hashable, Identifiable {
     /// the sheet closes — by then the tree has already changed under it. Every
     /// accessor below therefore degrades to an empty value instead of trapping,
     /// and anything that acts on a reference checks this first.
-    var isStale: Bool { fileIndex >= 0 && Int(fileIndex) >= dir.files.count }
+    ///
+    /// The same menu outlives a rescan too, holding references whose folder is
+    /// still alive and whose scan is not. Those name nothing that is on show.
+    var isStale: Bool {
+        if fileIndex >= 0 && Int(fileIndex) >= dir.files.count { return true }
+        return dir.isCutOff
+    }
 
     var file: FileEntry? {
         guard fileIndex >= 0, Int(fileIndex) < dir.files.count else { return nil }
@@ -282,13 +309,24 @@ struct ExtensionStat: Identifiable, Hashable {
 final class ScanResult {
     let root: DirNode
     let rootPath: String
-    /// Sorted by total size, descending.
-    let extensionStats: [ExtensionStat]
-    /// The same table ranked by space on disk, capped at what the legend shows.
-    /// Derived once here because the legend's ranking cannot change for a given
-    /// scan, and recomputing it per SwiftUI body evaluation meant sorting every
-    /// extension on the disk each time anything at all was published.
-    let topByAllocated: [ExtensionStat]
+    /// Sorted by total size, descending, as the scan found them.
+    ///
+    /// A delete lowers entries in place and never reorders them: a file's
+    /// `extIndex` is its type's position in this array. A type whose last file
+    /// has gone stays here with a count of zero, so anything listing types
+    /// wants `topBySize`, `topByAllocated` or `typeCount` instead.
+    private(set) var extensionStats: [ExtensionStat]
+    /// The types that still have files, ranked by logical size and by space on
+    /// disk, each capped at what the legend shows.
+    ///
+    /// Kept rather than computed, because the legend's body runs for anything
+    /// the model publishes — hovering the treemap included — and ranking meant
+    /// sorting every extension on the disk each time. They can only change
+    /// when the tree does, so a delete re-ranks them once.
+    private(set) var topBySize: [ExtensionStat] = []
+    private(set) var topByAllocated: [ExtensionStat] = []
+    /// How many types still have at least one file.
+    private(set) var typeCount = 0
     private let extensionIndex: [String: Int]
 
     let elapsed: TimeInterval
@@ -319,9 +357,6 @@ final class ScanResult {
         self.root = root
         self.rootPath = rootPath
         self.extensionStats = extensionStats
-        self.topByAllocated = Array(
-            extensionStats.sorted { $0.alloc > $1.alloc }.prefix(40)
-        )
         self.elapsed = elapsed
         self.deniedCount = deniedCount
         self.hardLinkSavings = hardLinkSavings
@@ -334,6 +369,46 @@ final class ScanResult {
         index.reserveCapacity(extensionStats.count)
         for (i, stat) in extensionStats.enumerated() { index[stat.ext] = i }
         self.extensionIndex = index
+        rankTypes()
+    }
+
+    /// Works the legend's two rankings out again from the per-type totals.
+    func rankTypes() {
+        let present = extensionStats.filter { $0.count > 0 }
+        typeCount = present.count
+        topBySize = Array(present.sorted { $0.size > $1.size }.prefix(40))
+        topByAllocated = Array(present.sorted { $0.alloc > $1.alloc }.prefix(40))
+    }
+
+    /// Takes a file that has left the tree out of its type's totals.
+    ///
+    /// A duplicate hard link only ever added to its type's count: its bytes
+    /// are under the name they were counted for, which may be another type.
+    func forgetType(of file: FileEntry) {
+        let i = Int(file.extIndex)
+        guard i >= 0, i < extensionStats.count else { return }
+        extensionStats[i].count = max(0, extensionStats[i].count - 1)
+        guard !file.isDuplicateLink else { return }
+        extensionStats[i].size -= min(extensionStats[i].size, file.size)
+        extensionStats[i].alloc -= min(extensionStats[i].alloc, file.alloc)
+    }
+
+    /// As `forgetType(of:)`, for every file under folders that are leaving.
+    func forgetTypes(under removed: [DirNode]) {
+        var stack: [DirNode] = removed
+        while let dir = stack.popLast() {
+            for i in dir.files.indices { forgetType(of: dir.files[i]) }
+            stack.append(contentsOf: dir.subdirs)
+        }
+    }
+
+    /// Gives a type the bytes of a name that has just been promoted to carry
+    /// them. The name was already in its type's count, at no size.
+    private func creditType(of file: FileEntry) {
+        let i = Int(file.extIndex)
+        guard i >= 0, i < extensionStats.count else { return }
+        extensionStats[i].size += file.size
+        extensionStats[i].alloc += file.alloc
     }
 
     func stat(for ext: String) -> ExtensionStat? {
@@ -472,6 +547,7 @@ final class ScanResult {
                     dir.files[i].isDuplicateLink = false
                     promoted = (dir, dir.files[i].size, dir.files[i].alloc)
                     hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                    creditType(of: dir.files[i])
                 }
             }
             stack.append(contentsOf: dir.subdirs)
@@ -547,6 +623,7 @@ final class ScanResult {
                     dir.files[i].isDuplicateLink = false
                     promoted.append((dir, dir.files[i].size, dir.files[i].alloc))
                     hardLinkSavings -= min(hardLinkSavings, dir.files[i].size)
+                    creditType(of: dir.files[i])
                     // Only the first survivor takes the bytes over.
                     leaving[dir.files[i].fileID]?.counted = false
                 }
