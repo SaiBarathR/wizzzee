@@ -5488,12 +5488,15 @@ enum SelfTest {
     /// The rest are kept ranked too, so the list can be asked for all of them.
     private static func testTheLegendCanListEveryType() {
         let count = ScanResult.legendLength + 5
-        let stats = (0..<count).map { i in
-            ExtensionStat(
-                ext: "t\(i)",
-                size: UInt64(count - i) * 1_000,
-                alloc: UInt64(i + 1) * 1_000,
-                count: i == 3 ? 0 : 1
+        // Built in a loop, a line at a time: as one expression inside a
+        // closure it is more than the release toolchain will type-check.
+        var stats: [ExtensionStat] = []
+        for i in 0..<count {
+            let size = UInt64(count - i) * 1_000
+            let alloc = UInt64(i + 1) * 1_000
+            let files = i == 3 ? 0 : 1
+            stats.append(
+                ExtensionStat(ext: "t\(i)", size: size, alloc: alloc, count: files)
             )
         }
         let result = ScanResult(
