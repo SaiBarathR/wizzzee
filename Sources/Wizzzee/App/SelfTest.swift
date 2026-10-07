@@ -106,6 +106,10 @@ enum SelfTest {
         testVolumeFreeSpaceFollowsADelete()
         testTheVolumeListFollowsMountsAndUnmounts()
         testNativeWindowTabbingIsOff()
+        testArrowKeysOpenAndShutFolders()
+        testThePathAboveTheMapZoomsOut()
+        testTabsAnswerTheirKeys()
+        testARevealedRowIsScrolledIntoView()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
 
@@ -6395,6 +6399,341 @@ enum SelfTest {
             "choosing the default value still counts as stored",
             shown.contains("showsTreemap: true (stored)"),
             shown
+        )
+    }
+
+    // MARK: - Getting about
+
+    /// a/b/x.dat, a/y.dat, a/empty/ and c/z.dat, scanned into `model`.
+    @MainActor
+    private static func loadWalkabout(
+        _ name: String,
+        into model: AppModel
+    ) -> (base: URL, result: ScanResult)? {
+        let base = scratch(name)
+        do {
+            for folder in ["a/b", "a/empty", "c"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            try write(base.appendingPathComponent("a/b/x.dat"), bytes: 30_000)
+            try write(base.appendingPathComponent("a/y.dat"), bytes: 10_000)
+            try write(base.appendingPathComponent("c/z.dat"), bytes: 5_000)
+        } catch {
+            check("the \(name) fixture can be built", false, "\(error)")
+            return nil
+        }
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return nil }
+        return (base, result)
+    }
+
+    /// → and ← on the tree, as an outline answers them: → opens a folder
+    /// and then steps into it, ← shuts one and then steps out of it. The
+    /// table is a flat list of rows, so neither did anything.
+    @MainActor
+    private static func testArrowKeysOpenAndShutFolders() {
+        let model = AppModel()
+        guard let (base, result) = loadWalkabout("arrows", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = result.root.subdir(named: "a"),
+            let b = a.subdir(named: "b"),
+            let c = result.root.subdir(named: "c"),
+            let empty = a.subdir(named: "empty"),
+            let y = a.files.firstIndex(where: { $0.name == "y.dat" })
+        else {
+            check("the arrows fixture scanned", false, "missing folders")
+            return
+        }
+        func rows() -> [String] { model.treeRows.map(\.ref.name) }
+        func selected() -> [String] { model.selection.map(\.name).sorted() }
+
+        model.selection = [NodeRef(a)]
+        check(
+            "→ on a shut folder opens it and stays on it",
+            model.expandSelection() && model.isExpanded(a)
+                && model.selection == [NodeRef(a)] && rows().contains("b"),
+            "open \(model.isExpanded(a)), selected \(selected()), rows \(rows())"
+        )
+        let scrolls = model.revealCount
+        check(
+            "→ again steps down to the first thing in it, and brings it into view",
+            model.expandSelection() && model.selection == [NodeRef(b)]
+                && model.revealTarget == NodeRef(b)
+                && model.revealCount == scrolls + 1,
+            "selected \(selected()), asked to show "
+                + "\(model.revealTarget?.name ?? "nothing")"
+        )
+
+        model.selection = [NodeRef(dir: a, fileIndex: y)]
+        check(
+            "→ on a file does nothing, so the key can go on to the table",
+            !model.expandSelection()
+                && model.selection == [NodeRef(dir: a, fileIndex: y)],
+            "selected \(selected())"
+        )
+        check(
+            "← on a file steps out to the folder it is in",
+            model.collapseSelection() && model.selection == [NodeRef(a)]
+                && model.revealTarget == NodeRef(a),
+            "selected \(selected())"
+        )
+        check(
+            "← on an open folder shuts it and stays on it",
+            model.collapseSelection() && !model.isExpanded(a)
+                && model.selection == [NodeRef(a)] && !rows().contains("b"),
+            "open \(model.isExpanded(a)), selected \(selected())"
+        )
+        check(
+            "← again steps out to the folder above",
+            model.collapseSelection()
+                && model.selection == [NodeRef(result.root)],
+            "selected \(selected())"
+        )
+        check(
+            "← on the open root shuts it, and after that has nowhere to go",
+            model.collapseSelection() && !model.isExpanded(result.root)
+                && !model.collapseSelection()
+                && model.selection == [NodeRef(result.root)],
+            "root open \(model.isExpanded(result.root)), selected \(selected())"
+        )
+        _ = model.expandSelection()
+
+        model.selection = [NodeRef(a), NodeRef(c)]
+        check(
+            "→ opens every selected folder that is shut",
+            model.expandSelection() && model.isExpanded(a) && model.isExpanded(c)
+                && model.selection == [NodeRef(a), NodeRef(c)],
+            "a \(model.isExpanded(a)), c \(model.isExpanded(c))"
+        )
+        check(
+            "with several open folders selected, → has no one of them to step into",
+            !model.expandSelection()
+                && model.selection == [NodeRef(a), NodeRef(c)],
+            "selected \(selected())"
+        )
+        check(
+            "and ← shuts them all",
+            model.collapseSelection() && !model.isExpanded(a)
+                && !model.isExpanded(c),
+            "a \(model.isExpanded(a)), c \(model.isExpanded(c))"
+        )
+
+        // b is inside a, which is shut: selected, and not on show.
+        model.selection = [NodeRef(b)]
+        check(
+            "a selected row that a shut folder hides is left alone",
+            !model.expandSelection() && !model.collapseSelection()
+                && !model.isExpanded(b) && model.selection == [NodeRef(b)],
+            "b open \(model.isExpanded(b)), selected \(selected())"
+        )
+
+        model.setExpanded(a, true)
+        model.selection = [NodeRef(empty)]
+        check(
+            "→ on an empty folder has nothing to open",
+            !model.expandSelection() && !model.isExpanded(empty),
+            "open \(model.isExpanded(empty))"
+        )
+
+        // A tile clicked on the map is selected whether or not it has a
+        // row, and only brought into view when it has.
+        model.setExpanded(a, false)
+        let before = model.revealCount
+        model.select(fromMap: NodeRef(b))
+        check(
+            "a tile picked on the map opens no folders to show its row",
+            model.selection == [NodeRef(b)] && !model.isExpanded(a)
+                && model.revealCount == before,
+            "a open \(model.isExpanded(a)), asked to scroll "
+                + "\(model.revealCount - before) times"
+        )
+        model.select(fromMap: NodeRef(c))
+        check(
+            "one whose row is already there is brought into view",
+            model.selection == [NodeRef(c)] && model.revealTarget == NodeRef(c)
+                && model.revealCount == before + 1,
+            "asked to show \(model.revealTarget?.name ?? "nothing")"
+        )
+    }
+
+    /// The path above the map was one line of text. Each folder in it is now
+    /// somewhere the map can be zoomed back out to.
+    @MainActor
+    private static func testThePathAboveTheMapZoomsOut() {
+        let model = AppModel()
+        guard let (base, result) = loadWalkabout("trail", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = result.root.subdir(named: "a"), let b = a.subdir(named: "b")
+        else {
+            check("the trail fixture scanned", false, "missing folders")
+            return
+        }
+        check(
+            "at the root the path is the root alone",
+            model.zoomTrail.count == 1 && model.zoomTrail.first === result.root,
+            "\(model.zoomTrail.map(\.name))"
+        )
+        model.zoom(into: b)
+        let trail = model.zoomTrail
+        check(
+            "zoomed in, it runs from the scan's root down to where the map is",
+            trail.count == 3 && trail[0] === result.root && trail[1] === a
+                && trail[2] === b,
+            "\(trail.map(\.name))"
+        )
+        model.zoom(into: trail[1])
+        check(
+            "and a folder part-way along it is somewhere to zoom back out to",
+            model.treemapRoot === a && model.zoomTrail.count == 2,
+            "map at \(model.treemapRoot?.name ?? "nil")"
+        )
+        model.zoom(into: trail[0])
+        check(
+            "as is the root",
+            model.treemapRoot === result.root && !model.canZoomOut,
+            "map at \(model.treemapRoot?.name ?? "nil")"
+        )
+    }
+
+    /// The tabs only ever answered a click.
+    @MainActor
+    private static func testTabsAnswerTheirKeys() {
+        let model = AppModel()
+        guard let (base, _) = loadWalkabout("tabs", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        check(
+            "each tab has a key of its own, in the order they are shown",
+            MainTab.allCases.map(\.key) == ["1", "2", "3"],
+            "\(MainTab.allCases.map(\.key))"
+        )
+        // The scan's own walk, so the list is known to be settled.
+        pumpUntilFileRowsSettle(model, expecting: 3)
+        model.show(.files)
+        check(
+            "showing a tab brings it to the front",
+            model.tab == .files && model.fileRows.count == 3,
+            "tab \(model.tab), \(model.fileRows.count) rows"
+        )
+        model.show(.about)
+        model.show(.tree)
+        check(
+            "and back again",
+            model.tab == .tree,
+            "tab \(model.tab)"
+        )
+    }
+
+    /// A row picked from somewhere other than the table — a tile on the map,
+    /// a line in the list of marks, an arrow key stepping out to the folder
+    /// above — is selected in a table that may be showing rows nowhere near
+    /// it. Selected and out of sight is not found.
+    @MainActor
+    private static func testARevealedRowIsScrolledIntoView() {
+        let base = scratch("reveal")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("many"),
+                withIntermediateDirectories: true
+            )
+            for i in 0..<400 {
+                try write(base.appendingPathComponent("many/f\(i).dat"), bytes: 10)
+            }
+        } catch {
+            check("the reveal fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        model.dismissedAccessPrompt = true
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        guard let result = loadSynchronously(into: model),
+            let many = result.root.subdir(named: "many")
+        else { return }
+        // By name, so which row is last doesn't hang on four hundred files of
+        // one size: f399 sorts after f398, four hundred rows down.
+        model.treeSort = [TreeSort(.name, order: .forward)]
+        model.setExpanded(many, true)
+        pump(0.6)
+
+        guard let last = many.files.firstIndex(where: { $0.name == "f399.dat" })
+        else {
+            check("the reveal fixture scanned", false, "no f399.dat")
+            return
+        }
+        let target = NodeRef(dir: many, fileIndex: last)
+        guard let row = model.treeRows.firstIndex(where: { $0.ref == target }),
+            let table = tables(under: hosting).first(where: {
+                $0.numberOfRows == model.treeRows.count
+            })
+        else {
+            check(
+                "the tree's table can be found to ask what it is showing",
+                false,
+                "\(tables(under: hosting).map(\.numberOfRows)) rows in the tables "
+                    + "found, \(model.treeRows.count) in the model"
+            )
+            return
+        }
+        func showing() -> String {
+            let visible = table.rows(in: table.visibleRect)
+            return "row \(row) of \(model.treeRows.count); showing "
+                + "\(visible.location)–\(visible.location + visible.length - 1)"
+        }
+        check(
+            "the last of four hundred rows starts out of sight",
+            !table.rows(in: table.visibleRect).contains(row),
+            showing()
+        )
+        model.revealInTree(target)
+        pump(0.8)
+        check(
+            "revealing a row far down the tree scrolls it into view",
+            table.rows(in: table.visibleRect).contains(row),
+            showing()
+        )
+
+        // Asked for from another tab, as "Show in Tree" in the File View's
+        // menu does it. The tree's table is not on screen to be told, and is
+        // a new table when it comes back.
+        model.selection = [NodeRef(result.root)]
+        model.show(.files)
+        pump(0.5)
+        model.show(.tree)
+        model.revealInTree(target)
+        pump(1.0)
+        guard
+            let again = tables(under: hosting).first(where: {
+                $0.numberOfRows == model.treeRows.count
+            })
+        else {
+            check("the tree's table is back after a change of tab", false, "")
+            return
+        }
+        let visible = again.rows(in: again.visibleRect)
+        check(
+            "a row asked for from another tab is in view when the tree comes back",
+            model.tab == .tree && visible.contains(row),
+            "row \(row); showing \(visible.location)–"
+                + "\(visible.location + visible.length - 1)"
         )
     }
 

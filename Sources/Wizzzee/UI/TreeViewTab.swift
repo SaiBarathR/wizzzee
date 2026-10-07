@@ -32,6 +32,27 @@ struct TreeTable: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
+        ScrollViewReader { proxy in
+            table
+                // After the rows have been handed over, which is when the
+                // one asked for is there to be scrolled to. And on being put
+                // on screen, for a row asked for from another tab.
+                .onChange(of: model.revealCount) { scrollIfAsked(proxy) }
+                .onAppear { scrollIfAsked(proxy) }
+        }
+    }
+
+    private func scrollIfAsked(_ proxy: ScrollViewProxy) {
+        guard let target = model.takeRevealTarget() else { return }
+        proxy.scrollTo(target, anchor: .center)
+        // Again once the table has settled. One that has only just been put
+        // on screen has no rows laid out yet for the first to land on.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            proxy.scrollTo(target, anchor: .center)
+        }
+    }
+
+    private var table: some View {
         // A Set binding is what turns on macOS's native ⌘-click toggle,
         // ⇧-click range and ⇧-arrow extend — none of it needs a key handler.
         Table(
@@ -115,6 +136,8 @@ struct TreeTable: View {
         .tableStyle(.inset(alternatesRowBackgrounds: true))
         .onChange(of: model.treeSort) { model.rebuildTreeRows() }
         .onKeyPress(.space) { model.markSelection() ? .handled : .ignored }
+        .onKeyPress(.rightArrow) { model.expandSelection() ? .handled : .ignored }
+        .onKeyPress(.leftArrow) { model.collapseSelection() ? .handled : .ignored }
         .contextMenu(forSelectionType: NodeRef.self) { refs in
             ItemContextMenu(model: model, refs: refs)
         } primaryAction: { refs in

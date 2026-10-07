@@ -125,6 +125,15 @@ enum MainTab: String, CaseIterable {
     case files = "File View"
     case about = "About"
 
+    /// The digit that, with ⌘, brings this tab to the front.
+    var key: Character {
+        switch self {
+        case .tree: return "1"
+        case .files: return "2"
+        case .about: return "3"
+        }
+    }
+
     /// The name `--tab` accepts. The display titles make poor flag values —
     /// prefix-matching "File View" means the obvious `--tab files` misses and
     /// silently falls back to the tree.
@@ -202,6 +211,21 @@ final class AppModel: ObservableObject {
     /// object's address and can be handed to a different node once a delete has
     /// freed the one it belonged to.
     private var expanded: Set<UInt64> = []
+    /// The row the Tree View was last asked to bring into view, and a count
+    /// that goes up with each asking, so that asking for the same row twice
+    /// is still two requests.
+    ///
+    /// Selecting a row does not scroll a table to it. A row picked from
+    /// somewhere else — "Show in Tree", the list of marks, an arrow key
+    /// stepping out to the folder above — was selected wherever it sat, which
+    /// in a long folder is nowhere near what the table was showing.
+    @Published private(set) var revealTarget: NodeRef?
+    @Published private(set) var revealCount = 0
+    /// True from a row being asked for until the Tree View has scrolled to
+    /// it. The asking can come while another tab is in front — "Show in
+    /// Tree" is in the File View's menu — and the table is then not there to
+    /// be told; it finds this waiting when it is next put on screen.
+    private var revealIsWaiting = false
 
     // File View
     @Published private(set) var fileRows: [FileRow] = []
@@ -519,6 +543,16 @@ final class AppModel: ObservableObject {
         rebuildTreeRows()
     }
 
+    // MARK: - Tabs
+
+    /// Brings `tab` to the front, from the tab strip or from its key.
+    func show(_ tab: MainTab) {
+        self.tab = tab
+        if tab == .files && fileRows.isEmpty {
+            refreshFileRows(immediately: true)
+        }
+    }
+
     // MARK: - File type in focus
 
     /// `focusedType` as the number a file of that type carries, which is what
@@ -667,6 +701,8 @@ final class AppModel: ObservableObject {
         capacityAfterDelete = nil
         treemapRoot = nil
         treemapOutline = nil
+        revealTarget = nil
+        revealIsWaiting = false
         expanded = []
         progress = ScanEngine.Progress()
         phase = .scanning
@@ -774,6 +810,88 @@ final class AppModel: ObservableObject {
         for dir in chain { expanded.insert(dir.id) }
         selection = [ref]
         rebuildTreeRows()
+        scrollTree(to: ref)
+    }
+
+    /// Asks the Tree View to bring `ref`'s row into view.
+    private func scrollTree(to ref: NodeRef) {
+        revealTarget = ref
+        revealIsWaiting = true
+        revealCount += 1
+    }
+
+    /// The row waiting to be scrolled to, if one is. Asking is answering: it
+    /// stops waiting.
+    func takeRevealTarget() -> NodeRef? {
+        guard revealIsWaiting else { return nil }
+        revealIsWaiting = false
+        return revealTarget
+    }
+
+    /// Selects a tile clicked on the treemap, and brings its row into view
+    /// when it has one.
+    ///
+    /// Folders are not opened to give it one: a click on the map is a look
+    /// at something, and a tree that unfolded a level with every look would
+    /// soon be all unfolded.
+    func select(fromMap ref: NodeRef) {
+        selection = [ref]
+        if isTreeRow(ref) { scrollTree(to: ref) }
+    }
+
+    // MARK: - Tree keys
+    //
+    // → and ←, as an outline answers them everywhere else on the Mac. The
+    // tree is a flat table of rows with a chevron drawn in each, so a folder
+    // opened only to a click on that chevron or a double-click on its row,
+    // and someone working down the list with ↑ and ↓ had to reach for the
+    // mouse at every folder.
+
+    /// The selected rows the Tree View has on show.
+    private var selectedTreeRows: [NodeRef] {
+        selection.filter { !$0.isStale && isTreeRow($0) }
+    }
+
+    /// →: opens every selected folder that is shut. With one folder selected
+    /// and already open, steps down to the first thing in it. False when
+    /// there was nothing to do, so the key can go on to whatever wants it.
+    @discardableResult
+    func expandSelection() -> Bool {
+        let rows = selectedTreeRows
+        let shut = rows.filter {
+            $0.isDirectory && !$0.dir.isEmpty && !expanded.contains($0.dir.id)
+        }
+        if !shut.isEmpty {
+            for ref in shut { expanded.insert(ref.dir.id) }
+            rebuildTreeRows()
+            return true
+        }
+        guard rows.count == 1, let only = rows.first, only.isDirectory,
+            let at = treeRows.firstIndex(where: { $0.ref == only }),
+            at + 1 < treeRows.count, treeRows[at + 1].depth > treeRows[at].depth
+        else { return false }
+        let first = treeRows[at + 1].ref
+        selection = [first]
+        scrollTree(to: first)
+        return true
+    }
+
+    /// ←: shuts every selected folder that is open. With one row selected
+    /// that is not an open folder, steps out to the folder it is in.
+    @discardableResult
+    func collapseSelection() -> Bool {
+        let rows = selectedTreeRows
+        let open = rows.filter { $0.isDirectory && expanded.contains($0.dir.id) }
+        if !open.isEmpty {
+            for ref in open { expanded.remove(ref.dir.id) }
+            rebuildTreeRows()
+            return true
+        }
+        guard rows.count == 1, let only = rows.first, let parent = rowParent(only)
+        else { return false }
+        selection = [NodeRef(parent)]
+        scrollTree(to: NodeRef(parent))
+        return true
     }
 
     func rebuildTreeRows() {
@@ -966,6 +1084,18 @@ final class AppModel: ObservableObject {
     // MARK: - Treemap zoom
 
     var canZoomOut: Bool { treemapRoot?.parent != nil }
+
+    /// The folders from the scan's root down to the one the map is zoomed
+    /// to, for the path above the map: each is somewhere to zoom back out to.
+    var zoomTrail: [DirNode] {
+        var chain: [DirNode] = []
+        var node = treemapRoot
+        while let current = node {
+            chain.append(current)
+            node = current.parent
+        }
+        return chain.reversed()
+    }
 
     func zoom(into dir: DirNode) {
         guard !dir.isEmpty else { return }
