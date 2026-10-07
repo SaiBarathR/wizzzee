@@ -98,18 +98,25 @@ struct FileViewTab: View {
 
     private var summary: String {
         guard model.result != nil else { return "" }
-        // Something was asked for, so everything that matched was counted:
+        // Something was asked for, so everything that matched is counted:
         // the rows are the largest of it, and the figure is for all of it.
-        if let tally = model.fileTally, !model.isFilteringFiles {
+        if !model.fileSearch.isEmpty {
+            // Nothing is said until the count is in. Adding up the rows on
+            // show in the meantime gave a figure for some of what matched,
+            // with a folder and the things listed inside it added twice.
+            guard let tally = model.fileTally, !model.isFilteringFiles else {
+                return "counting…"
+            }
             if tally.matches == 0 { return "nothing found" }
-            let rows = model.fileRows
+            // Called by what all of it is, not by what the largest are.
             let noun =
-                rows.allSatisfy { !$0.ref.isDirectory }
-                ? "file" : (rows.allSatisfy(\.ref.isDirectory) ? "folder" : "item")
+                tally.folders == 0
+                ? "file" : (tally.folders == tally.matches ? "folder" : "item")
             let found = ByteFormat.counted(tally.matches, noun)
+            let shown = model.fileRows.count
             let count =
-                tally.matches > rows.count
-                ? "largest \(ByteFormat.count(rows.count)) of \(found)" : found
+                tally.matches > shown
+                ? "largest \(ByteFormat.count(shown)) of \(found)" : found
             return "\(count) • \(ByteFormat.decimal(tally.bytes))"
         }
         let shown = model.fileRows.count

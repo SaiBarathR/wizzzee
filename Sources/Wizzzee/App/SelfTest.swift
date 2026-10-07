@@ -7035,6 +7035,83 @@ enum SelfTest {
             read("café").foldsNames && !read("cafe").foldsNames,
             ""
         )
+        // Typed as one letter, and stored on disk as a letter and a mark
+        // after it, which is how most of macOS writes it.
+        check(
+            "and meets them, however the accent is spelled and in either case",
+            read("café").matches(name: "cafe\u{0301} menu.txt")
+                && read("café").matches(name: "CAFÉ.TXT")
+                && !read("café").matches(name: "cafe.txt"),
+            ""
+        )
+
+        // A second filter of a kind is one more to meet, as a second word
+        // is. The last one used to win, and what the first had ruled out
+        // came back without a word.
+        let twice = read(">10gb >1mb <1tb <500gb")
+        check(
+            "two sizes the same way round keep the tighter of the two",
+            twice.above == 10_000_000_000 && twice.below == 500_000_000_000,
+            "above \(String(describing: twice.above)), below "
+                + "\(String(describing: twice.below))"
+        )
+        let ageTwice = read("older:30d older:2y newer:1y newer:30d")
+        check(
+            "and two ages likewise",
+            ageTwice.modifiedBefore == now.timeIntervalSince1970 - 730 * day
+                && ageTwice.modifiedAfter == now.timeIntervalSince1970 - 30 * day,
+            "before \(String(describing: ageTwice.modifiedBefore)), after "
+                + "\(String(describing: ageTwice.modifiedAfter))"
+        )
+        check(
+            "two types, or files and folders, are something nothing can be both of",
+            read("ext:dmg ext:pdf").isImpossible && read("kind:file kind:folder").isImpossible
+                && !read("ext:dmg ext:.DMG").isImpossible
+                && !read("kind:file kind:files").isImpossible,
+            ""
+        )
+        check(
+            "an extension that is all dots is not the files with none",
+            read("ext:.").unreadable == ["ext:."] && read("ext:...").ext == nil
+                && read("ext:none").ext == "",
+            "unreadable \(read("ext:.").unreadable)"
+        )
+
+        // Where a word asked of the path can be, worked out once for a
+        // folder: all of it in the folder's own path, or its last slash on
+        // the slash between the folder and the name.
+        let under = read("proj1/node")
+        check(
+            "in the folder the word ends in, a name has to start with the rest of it",
+            under.pathScope(inFolder: "/x/proj1") == .namesStarting(["node"])
+                && under.pathScope(inFolder: "/x/PROJ1") == .namesStarting(["node"]),
+            "\(under.pathScope(inFolder: "/x/proj1"))"
+        )
+        check(
+            "below that folder everything has it, and elsewhere nothing can",
+            under.pathScope(inFolder: "/x/proj1/node_modules") == .everything
+                && under.pathScope(inFolder: "/x/proj12") == .nothing
+                && under.pathScope(inFolder: "/x") == .nothing,
+            "\(under.pathScope(inFolder: "/x/proj1/node_modules"))"
+        )
+        check(
+            "a word ending in a slash is only ever in the folder's part",
+            read("proj1/").pathScope(inFolder: "/x/proj1") == .everything
+                && read("proj1/").pathScope(inFolder: "/x") == .nothing,
+            "\(read("proj1/").pathScope(inFolder: "/x"))"
+        )
+        check(
+            "at the top of a volume the folder's part is the slash alone",
+            read("/us").pathScope(inFolder: "/") == .namesStarting(["us"])
+                && read("/").pathScope(inFolder: "/") == .everything,
+            "\(read("/us").pathScope(inFolder: "/"))"
+        )
+        check(
+            "a word with an accent has the whole path put together to look in",
+            read("café/x").pathScope(inFolder: "/x") == .wholePath
+                && read("word").pathScope(inFolder: "/x") == .everything,
+            "\(read("café/x").pathScope(inFolder: "/x"))"
+        )
     }
 
     /// proj1/node_modules/a.js (4,000), proj1/node_modules/pkg/node_modules/
@@ -7197,6 +7274,67 @@ enum SelfTest {
             unread.rows.isEmpty && unread.matches == 0,
             said(unread)
         )
+        check(
+            "nor do two filters that nothing can meet both of",
+            find("ext:log ext:bin").matches == 0 && find("ext:log ext:bin").rows.isEmpty
+                && find("js kind:file kind:folder").matches == 0,
+            said(find("ext:log ext:bin"))
+        )
+        check(
+            "a second size narrows the first, where it used to replace it",
+            names(find(">7kb >1kb")) == ["big.bin", "old.log"],
+            said(find(">7kb >1kb"))
+        )
+        check(
+            "what was found is known to be folders, files, or some of each",
+            modules.folders == 3 && scripts.folders == 0 && under.folders == 4,
+            "\(modules.folders), \(scripts.folders), \(under.folders)"
+        )
+
+        // The path is never put together for a file: where a word can be in
+        // it is worked out from the folder's part and the name's. Held to
+        // doing it the plain way, for words that fall in the folder's part,
+        // across the join, and nowhere.
+        var everything: [(path: String, ref: NodeRef)] = []
+        var pending: [DirNode] = [result.root]
+        while let dir = pending.popLast() {
+            for index in dir.files.indices
+            where !dir.files[index].isRemoved && !dir.files[index].isDuplicateLink {
+                let ref = NodeRef(dir: dir, fileIndex: index)
+                everything.append((ref.path, ref))
+            }
+            for sub in dir.subdirs {
+                everything.append((sub.path, NodeRef(sub)))
+                pending.append(sub)
+            }
+        }
+        let rootName = (result.root.path as NSString).lastPathComponent
+        let words = [
+            "proj1/", "proj1/node", "node_modules/a", "modules/pkg", "PKG/NODE_MODULES/B",
+            "/proj", "src/main.js", "j/s", "/big", "\(rootName)/big", "\(rootName)/",
+            "oj1/src/m", "node_modules/pkg/node_modules/", "/", "proj1/node_modules/a.js",
+            "x/y/z",
+        ]
+        var wrong: [String] = []
+        for word in words {
+            let plain = Set(
+                everything.filter { $0.path.lowercased().contains(word.lowercased()) }
+                    .map(\.ref)
+            )
+            let found = find(word, limit: 1_000)
+            if Set(found.rows) != plain || found.matches != plain.count {
+                wrong.append(
+                    "“\(word)”: \(found.rows.count) rows and "
+                        + "\(String(describing: found.matches)) counted, "
+                        + "\(plain.count) have it in their path"
+                )
+            }
+        }
+        check(
+            "a word in the path finds exactly what has it in its path",
+            wrong.isEmpty,
+            wrong.joined(separator: "; ")
+        )
 
         let plain = find("")
         check(
@@ -7209,8 +7347,16 @@ enum SelfTest {
         check(
             "the largest-files list never has a folder in it, whatever is typed",
             result.largestFiles(matching: "node_modules").isEmpty
-                && result.largestFiles(matching: "proj1/").count == 3,
-            "\(result.largestFiles(matching: "proj1/").map(\.name))"
+                && result.largestFiles(matching: "proj1/").count == 3
+                && result.largestFiles(matching: "kind:folder").count == 7
+                && result.largestFiles(matching: "kind:folder")
+                    .allSatisfy { !$0.isDirectory },
+            "\(result.largestFiles(matching: "kind:folder").map(\.name))"
+        )
+        check(
+            "and with nothing typed it is the same list it always was",
+            result.largestFiles(limit: 100, metric: .logical).map(\.name) == names(plain),
+            "\(result.largestFiles(limit: 100, metric: .logical).map(\.name))"
         )
     }
 
@@ -7262,7 +7408,7 @@ enum SelfTest {
         )
         check(
             "and says how many it found and what they take up, counted once",
-            model.fileTally == SearchTally(matches: 3, bytes: onDisk),
+            model.fileTally == SearchTally(matches: 3, folders: 3, bytes: onDisk),
             "tally \(String(describing: model.fileTally)), expected 3 and \(onDisk)"
         )
 
@@ -7288,6 +7434,46 @@ enum SelfTest {
                     + "/proj1/node_modules/pkg/node_modules"),
             "\(model.fileRows.count) rows, tally \(String(describing: model.fileTally))"
         )
+        // The folder it was inside is a row as well, and has less in it now.
+        let outer = model.fileRows.first { $0.directory.hasSuffix("/proj1") }
+        check(
+            "and the row of the folder it was in shows what that folder holds now",
+            outer != nil && outer?.alloc == outer?.ref.alloc
+                && (outer?.alloc ?? 0) < (found.first?.alloc ?? 0),
+            "row \(outer?.alloc ?? 0), folder \(outer?.ref.alloc ?? 0), was "
+                + "\(found.first?.alloc ?? 0)"
+        )
+
+        // A search lists a folder and things inside it as rows of their own.
+        // Sorted so that one of those comes above its folder, removing the
+        // folder used to put the selection where that row had been.
+        model.fileQuery = "kind:folder"
+        model.fileSort = [KeyPathComparator(\FileRow.name)]
+        model.refreshFileRows(immediately: true)
+        pumpUntilFileRowsSettle(model, expecting: 6)
+        let byName = model.fileRows.map(\.name)
+        guard let proj1 = model.fileRows.first(where: { $0.name == "proj1" })?.ref,
+            let proj2 = model.fileRows.first(where: { $0.name == "proj2" })?.ref
+        else {
+            check("the folders are listed by name", false, "\(byName)")
+            return
+        }
+        check(
+            "by name, folders inside proj1 are listed above it",
+            byName == ["node_modules", "node_modules", "pkg", "proj1", "proj2", "src"],
+            "\(byName)"
+        )
+        model.selection = [proj1]
+        model.trashSelection()
+        pumpUntilDeleteSettles(model)
+        pumpUntilFileRowsSettle(model, expecting: 2)
+        check(
+            "removing it leaves the selection on the row that took its place",
+            model.selection == [proj2]
+                && model.fileRows.map(\.name) == ["node_modules", "proj2"],
+            "selected \(model.selection.map(\.name)), rows \(model.fileRows.map(\.name))"
+        )
+        model.fileSort = [KeyPathComparator(\FileRow.alloc, order: .reverse)]
 
         model.fileQuery = "js >zz"
         model.refreshFileRows(immediately: true)
@@ -7300,11 +7486,11 @@ enum SelfTest {
         )
 
         model.clearSearch()
-        pumpUntilFileRowsSettle(model, expecting: 6)
+        pumpUntilFileRowsSettle(model, expecting: 4)
         check(
             "clearing the filter goes back to the largest files, uncounted",
             model.fileQuery.isEmpty && model.fileTally == nil
-                && model.fileRows.count == 6
+                && model.fileRows.count == 4
                 && model.fileRows.allSatisfy { !$0.ref.isDirectory },
             "\(model.fileRows.count) rows, tally \(String(describing: model.fileTally))"
         )

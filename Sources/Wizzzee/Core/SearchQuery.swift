@@ -43,6 +43,9 @@ struct SearchQuery: Equatable {
     /// any of these finds nothing: a filter dropped without a word would show
     /// everything, as though it had been met.
     private(set) var unreadable: [String] = []
+    /// True when two filters were given that nothing can meet both of: two
+    /// different types, or files and folders. Such a query finds nothing.
+    private(set) var isImpossible = false
 
     init(_ text: String = "", now: Date = Date()) {
         for word in Self.words(of: text) {
@@ -111,8 +114,66 @@ struct SearchQuery: Equatable {
         return true
     }
 
-    /// True when a path has to be put together for each thing looked at.
+    /// True when where a thing is has to be looked at as well as its name.
     var needsPaths: Bool { !paths.isEmpty }
+
+    /// What the words asked of the path come to for the things directly
+    /// inside one folder.
+    enum PathScope: Equatable {
+        /// The folder's own path has every one of them in it, so everything
+        /// in the folder does.
+        case everything
+        /// One of them can't be in the path of anything in here.
+        case nothing
+        /// The path has them if the name starts with each of these.
+        case namesStarting([String])
+        /// It can't be told from the parts: put the path together and look.
+        case wholePath
+    }
+
+    /// Works that out, once per folder.
+    ///
+    /// The path of a thing is the folder's path, a slash, and its name, and
+    /// a word with a slash in it can only be found there in two ways: all of
+    /// it in the folder's part, or its last slash on the slash that joins
+    /// the two — the rest of it then being the end of the folder's path and
+    /// the start of the name. A name has no slash of its own.
+    ///
+    /// So the path never has to be put together for a file. It was, once per
+    /// file in the scan, for every file a search had to count.
+    func pathScope(inFolder folder: String) -> PathScope {
+        guard !paths.isEmpty else { return .everything }
+        // Folding a name to compare it is not something that can be done
+        // to the two halves of a path separately.
+        guard !foldsNames else { return .wholePath }
+        let withSlash = folder.hasSuffix("/") ? folder : folder + "/"
+        var starts: [String] = []
+        for needle in paths {
+            if withSlash.containsCaseInsensitive(needle) { continue }
+            guard let slash = needle.lastIndex(of: "/") else { return .nothing }
+            let start = String(needle[needle.index(after: slash)...])
+            // Ending in the slash, it could only have been in the folder's
+            // part, and it was not.
+            guard !start.isEmpty,
+                withSlash.dropLast().hasSuffixIgnoringCase(needle[..<slash])
+            else { return .nothing }
+            starts.append(start)
+        }
+        return starts.isEmpty ? .everything : .namesStarting(starts)
+    }
+
+    /// Whether something called `name`, in a folder `scope` was worked out
+    /// for, is where the words asked of the path say. `path` is only built
+    /// if it has to be.
+    func isInScope(_ scope: PathScope, name: String, path: () -> String) -> Bool {
+        switch scope {
+        case .everything: return true
+        case .nothing: return false
+        case .namesStarting(let starts):
+            return starts.allSatisfy { name.hasPrefixIgnoringCase($0) }
+        case .wholePath: return matches(path: path())
+        }
+    }
 
     // MARK: - Reading
 
@@ -139,25 +200,41 @@ struct SearchQuery: Equatable {
                 unreadable.append(word)
                 return true
             }
-            if lowered.hasPrefix(">") { above = bytes } else { below = bytes }
+            // A second filter of a kind is one more to meet, as a second
+            // word is, and not a correction of the first: the tighter of the
+            // two is what meets both.
+            if lowered.hasPrefix(">") {
+                above = max(above ?? bytes, bytes)
+            } else {
+                below = min(below ?? bytes, bytes)
+            }
             return true
         }
         guard let colon = lowered.firstIndex(of: ":") else { return false }
         let value = lowered[lowered.index(after: colon)...]
         switch lowered[..<colon] {
         case "kind":
+            let asked: Kind
             switch value {
-            case "folder", "folders", "dir": kind = .folder
-            case "file", "files": kind = .file
-            default: unreadable.append(word)
+            case "folder", "folders", "dir": asked = .folder
+            case "file", "files": asked = .file
+            default:
+                unreadable.append(word)
+                return true
             }
+            if let kind, kind != asked { isImpossible = true }
+            kind = asked
         case "ext":
             let name = value.drop(while: { $0 == "." })
-            if value.isEmpty {
+            // Nothing after the dots is not the files with no extension:
+            // those are asked for by name, with `none`.
+            guard !name.isEmpty else {
                 unreadable.append(word)
-            } else {
-                ext = name == "none" ? "" : String(name)
+                return true
             }
+            let asked = name == "none" ? "" : String(name)
+            if let ext, ext != asked { isImpossible = true }
+            ext = asked
         case "older", "newer":
             guard let seconds = Self.seconds(value) else {
                 unreadable.append(word)
@@ -165,9 +242,9 @@ struct SearchQuery: Equatable {
             }
             let cutoff = now.timeIntervalSince1970 - seconds
             if lowered.hasPrefix("older") {
-                modifiedBefore = cutoff
+                modifiedBefore = min(modifiedBefore ?? cutoff, cutoff)
             } else {
-                modifiedAfter = cutoff
+                modifiedAfter = max(modifiedAfter ?? cutoff, cutoff)
             }
         default:
             // A name with a colon in it, which is a word like any other.
@@ -234,10 +311,41 @@ struct SearchQuery: Equatable {
     }
 }
 
+extension StringProtocol {
+    /// Whether this ends with `lowered`, which is expected to be lowercase
+    /// already, taking A–Z and a–z as the same. Read as bytes, in place.
+    func hasSuffixIgnoringCase<S: StringProtocol>(_ lowered: S) -> Bool {
+        var mine = utf8.reversed().makeIterator()
+        for wanted in lowered.utf8.reversed() {
+            guard let byte = mine.next(), Self.lowered(byte) == wanted else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// As `hasSuffixIgnoringCase`, for the start.
+    func hasPrefixIgnoringCase<S: StringProtocol>(_ lowered: S) -> Bool {
+        var mine = utf8.makeIterator()
+        for wanted in lowered.utf8 {
+            guard let byte = mine.next(), Self.lowered(byte) == wanted else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func lowered(_ byte: UInt8) -> UInt8 {
+        (byte >= 65 && byte <= 90) ? byte + 32 : byte
+    }
+}
+
 /// What a search of a scan came back with.
 struct SearchResult {
     /// The largest of what matched, largest first.
     var rows: [NodeRef] = []
+    /// How many of what matched are folders, listed or not.
+    var folders = 0
     /// How many things matched, listed or not. Nil when nothing was asked
     /// for and nothing was counted: the list is then just the largest files.
     var matches: Int?

@@ -640,7 +640,10 @@ final class ScanResult {
         token: WalkToken? = nil
     ) -> [NodeRef] {
         var files = SearchQuery(query)
-        if files.kind == nil { files.kind = .file }
+        // Files, whatever is typed — `kind:folder` included. But not by
+        // giving a query that asked for nothing a kind to ask for: that is
+        // then a search, and counts every file in the scan to list a few.
+        if !files.isEmpty { files.kind = .file }
         return search(
             files,
             ofType: typeIndex,
@@ -676,7 +679,9 @@ final class ScanResult {
     ) -> SearchResult {
         // A filter that could not be read finds nothing. Left out, it would
         // list everything, as though whatever it was meant to say had been met.
-        guard query.unreadable.isEmpty else { return SearchResult(matches: 0) }
+        guard query.unreadable.isEmpty, !query.isImpossible else {
+            return SearchResult(matches: 0)
+        }
 
         var wantedType = typeIndex.map { Int32($0) }
         if let ext = query.ext {
@@ -695,6 +700,7 @@ final class ScanResult {
 
         var heap = SizeHeap(limit: limit)
         var matches = 0
+        var folders = 0
         var bytes: UInt64 = 0
         // Checked per directory rather than per file — the flag is behind a
         // lock, and a directory is a short enough unit to keep the wait small.
@@ -718,7 +724,10 @@ final class ScanResult {
                 sinceCheck = 0
                 if token.isCancelled { return SearchResult() }
             }
-            if wantsFiles {
+            // What the words asked of the path come to in this folder, worked
+            // out once for everything in it.
+            let scope = query.pathScope(inFolder: dirPath)
+            if wantsFiles, !(counts && scope == .nothing) {
                 for i in dir.files.indices {
                     let file = dir.files[i]
                     if file.isDuplicateLink || file.isRemoved { continue }
@@ -727,12 +736,15 @@ final class ScanResult {
                     if counts {
                         guard query.admits(bytes: weight, mtime: file.mtime),
                             query.matches(name: file.name),
-                            !needsPaths
-                                || query.matches(
-                                    path: dirPath.hasSuffix("/")
+                            query.isInScope(
+                                scope,
+                                name: file.name,
+                                path: {
+                                    dirPath.hasSuffix("/")
                                         ? dirPath + file.name
                                         : dirPath + "/" + file.name
-                                )
+                                }
+                            )
                         else { continue }
                         matches += 1
                         if !covered { bytes += weight }
@@ -753,10 +765,11 @@ final class ScanResult {
                     let weight = sub.bytes(using: metric)
                     if query.admits(bytes: weight, mtime: sub.mtime),
                         query.matches(name: sub.name),
-                        !needsPaths || query.matches(path: subPath)
+                        query.isInScope(scope, name: sub.name, path: { subPath })
                     {
                         found = true
                         matches += 1
+                        folders += 1
                         if !covered { bytes += weight }
                         heap.insert(NodeRef(sub), size: weight)
                     }
@@ -766,6 +779,7 @@ final class ScanResult {
         }
         return SearchResult(
             rows: heap.sortedDescending(),
+            folders: folders,
             matches: counts ? matches : nil,
             bytes: bytes
         )

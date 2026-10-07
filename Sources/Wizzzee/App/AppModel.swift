@@ -138,6 +138,9 @@ struct FileRow: Identifiable, Hashable {
 /// How many things a search found, and what they come to.
 struct SearchTally: Equatable {
     var matches: Int
+    /// How many of them are folders: what they are called depends on it,
+    /// and the rows on show are only the largest of them.
+    var folders: Int = 0
     var bytes: UInt64
 }
 
@@ -1217,7 +1220,7 @@ final class AppModel: ObservableObject {
                 FileRow($0, metric: metric, rootTotal: rootTotal)
             }
             let tally = found.matches.map {
-                SearchTally(matches: $0, bytes: found.bytes)
+                SearchTally(matches: $0, folders: found.folders, bytes: found.bytes)
             }
             DispatchQueue.main.async {
                 // Only the newest walk delivers. One that had finished its pass
@@ -2190,6 +2193,17 @@ final class AppModel: ObservableObject {
         // Now, not when the walk below returns: a row for a file that has
         // gone would otherwise sit in the list until it did.
         fileRows.removeAll { $0.ref.isStale }
+        // A folder a search listed holds what it holds now. Its row keeps
+        // its own copy of the figures, and went on showing what the folder
+        // had been before something inside it was removed, for as long as
+        // the walk below took to come back.
+        if let result, fileRows.contains(where: { $0.ref.isDirectory }) {
+            let total = result.root.bytes(using: sizeMetric)
+            fileRows = fileRows.map { row in
+                row.ref.isDirectory
+                    ? FileRow(row.ref, metric: sizeMetric, rootTotal: total) : row
+            }
+        }
         rebuildTreeRows()
         if selection.isEmpty, let anchor, let next = row(at: anchor) {
             selection = [next]
@@ -2232,7 +2246,15 @@ final class AppModel: ObservableObject {
 
         switch tab {
         case .files:
-            return fileRows.firstIndex { isLeaving($0.ref) }.map { .fileRow($0) }
+            // Where the first row being removed sits among the rows that
+            // are staying. A search lists a folder and things inside it as
+            // rows of their own, and those go with it: counted from the
+            // first row that is going at all, one of them sorted above its
+            // folder put the selection back at its place and not the
+            // folder's, rows away from what had been selected.
+            guard let first = fileRows.firstIndex(where: { leaving.contains($0.ref) })
+            else { return nil }
+            return .fileRow(fileRows[..<first].filter { !isLeaving($0.ref) }.count)
         case .tree:
             guard let first = treeRows.firstIndex(where: { leaving.contains($0.ref) }),
                 selection.contains(where: { isTreeRow($0) }),

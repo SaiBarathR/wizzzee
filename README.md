@@ -80,7 +80,8 @@ rebuilding.
   | `ext:dmg` | one file type; `ext:none` for files with no extension |
   | `kind:folder` `kind:file` | folders only, or files only |
 
-  The line at the right says how many things matched, listed or not, and what
+  A second filter of a kind narrows the first, as a second word does. The
+  line at the right says how many things matched, listed or not, and what
   they take up; a match inside a folder that also matched is counted and adds
   nothing to the size. `Esc` empties the filter.
 - **Treemap** — every file as a rectangle, area proportional to size, colored by
