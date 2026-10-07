@@ -112,6 +112,9 @@ including the key it was asked about.
 $ Wizzzee.app/Contents/MacOS/Wizzzee --prefs
 domain: com.wizzzee.diskanalyzer
 showsTreemap: false (stored)
+sizeMetric: disk (default)
+lastFolder: none
+lastVolume: /
 ```
 
 `stored` means someone chose it; `default` means nothing was ever written and the

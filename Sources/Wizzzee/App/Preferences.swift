@@ -26,6 +26,60 @@ enum Preferences {
         store.object(forKey: showsTreemapKey) != nil
     }
 
+    private static let sizeMetricKey = "sizeMetric"
+
+    /// The measure the window shows: space on disk until something else is
+    /// chosen. Stored under the names `--metric` takes, so the value can be
+    /// read and set from a script without knowing the app's own.
+    static var sizeMetric: SizeMetric {
+        get {
+            store.string(forKey: sizeMetricKey).flatMap(CLI.metric(named:))
+                ?? .allocated
+        }
+        set {
+            store.set(newValue == .logical ? "size" : "disk", forKey: sizeMetricKey)
+        }
+    }
+
+    static var sizeMetricIsStored: Bool { store.object(forKey: sizeMetricKey) != nil }
+
+    private static let lastFolderKey = "lastFolder"
+    private static let lastVolumeKey = "lastVolume"
+
+    /// The folder last chosen with Folder…, when that and not a volume was
+    /// the last thing scanned.
+    static var lastFolder: String? {
+        get { store.string(forKey: lastFolderKey) }
+        set { set(newValue, forKey: lastFolderKey) }
+    }
+
+    /// The volume last picked in the Select list.
+    static var lastVolume: String? {
+        get { store.string(forKey: lastVolumeKey) }
+        set { set(newValue, forKey: lastVolumeKey) }
+    }
+
+    /// Follows a volume to its new mount point, which is what renaming one
+    /// in Finder moves: the volume remembered, and a folder remembered on it.
+    static func volumeMoved(from old: String, to new: String) {
+        if lastVolume == old { lastVolume = new }
+        if let folder = lastFolder {
+            if folder == old {
+                lastFolder = new
+            } else if folder.hasPrefix(old + "/") {
+                lastFolder = new + folder.dropFirst(old.count)
+            }
+        }
+    }
+
+    private static func set(_ value: String?, forKey key: String) {
+        if let value {
+            store.set(value, forKey: key)
+        } else {
+            store.removeObject(forKey: key)
+        }
+    }
+
     /// What `--prefs` prints. Returned rather than printed so it can be checked
     /// without capturing stdout, and reads nothing it doesn't report — a
     /// diagnostic that created the key it was asked about would be worse than
@@ -41,6 +95,10 @@ enum Preferences {
         return """
             domain: \(domain)
             showsTreemap: \(showsTreemap) (\(showsTreemapIsStored ? "stored" : "default"))
+            sizeMetric: \(sizeMetric == .logical ? "size" : "disk") \
+            (\(sizeMetricIsStored ? "stored" : "default"))
+            lastFolder: \(lastFolder ?? "none")
+            lastVolume: \(lastVolume ?? "none")
             """
     }
 }

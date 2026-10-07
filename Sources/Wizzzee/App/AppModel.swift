@@ -239,7 +239,32 @@ final class AppModel: ObservableObject {
     /// Keyed on `DirNode.id` rather than `ObjectIdentifier`, which is the
     /// object's address and can be handed to a different node once a delete has
     /// freed the one it belonged to.
-    private var expanded: Set<UInt64> = []
+    ///
+    /// Each is held with the folder it is the id of, weakly, so that where
+    /// the open folders are can be said without looking for them: a rescan
+    /// asks, and going by ids alone it had to walk every folder in the scan
+    /// to find the few that were open — all of them, whenever one of those
+    /// had since been deleted and was not there to be found.
+    private var expanded = OpenFolders()
+
+    private struct OpenFolders {
+        private struct Entry {
+            weak var dir: DirNode?
+        }
+        private var entries: [UInt64: Entry] = [:]
+
+        func contains(_ dir: DirNode) -> Bool { entries[dir.id] != nil }
+        mutating func insert(_ dir: DirNode) { entries[dir.id] = Entry(dir: dir) }
+        mutating func remove(_ dir: DirNode) { entries[dir.id] = nil }
+        mutating func removeAll() { entries.removeAll() }
+
+        /// Where each of them is, for those still in the tree.
+        var paths: [String] {
+            entries.values.compactMap { entry in
+                entry.dir.flatMap { $0.isCutOff ? nil : $0.path }
+            }
+        }
+    }
     /// The row the Tree View was last asked to bring into view, and a count
     /// that goes up with each asking, so that asking for the same row twice
     /// is still two requests.
@@ -428,6 +453,47 @@ final class AppModel: ObservableObject {
     /// goes on to the panel, which is where ⌘⌫ was aimed.
     @Published private(set) var isChoosingFolder = false
 
+    /// Something in the tree by where it is on disk, which is all of it that
+    /// outlasts the scan it was found in.
+    private struct Spot {
+        let path: String
+        let isDirectory: Bool
+
+        init(_ ref: NodeRef) {
+            path = ref.path
+            isDirectory = ref.isDirectory
+        }
+
+        func find(in scan: ScanResult) -> NodeRef? {
+            isDirectory ? scan.directory(at: path).map { NodeRef($0) } : scan.file(at: path)
+        }
+    }
+
+    /// How the window stood when a folder was scanned again.
+    ///
+    /// A scan throws the tree away, and with it went everything that pointed
+    /// into the tree: which folders were open, where the map was zoomed to,
+    /// what was selected, and every mark. ⌘R is one keypress, and it emptied
+    /// a list of marks that had taken ten minutes to gather, without asking.
+    private struct Place {
+        let rootPath: String
+        var open: [String] = []
+        var zoom: String?
+        var selection: [Spot] = []
+        var marks: [Spot] = []
+        var focusedType: String?
+        var showsMarks = false
+    }
+
+    /// Where things stood before the scan in hand, when it is a scan of the
+    /// folder that was already on show. Put back when it lands.
+    private var placeToRestore: Place?
+
+    /// How many marks the last rescan could not put back: what they were on
+    /// has gone, or can no longer be removed. Said beside "Scan complete",
+    /// so a shorter list of marks is not taken for the whole of it.
+    @Published private(set) var marksLostToRescan = 0
+
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?
     /// Asks the removal in hand to stop at its next entry.
@@ -473,6 +539,24 @@ final class AppModel: ObservableObject {
         selectedVolumePath = volumes.first?.path ?? "/"
         hasFullDiskAccess = FullDiskAccess.isGranted()
 
+        // What was chosen last time. Each launch started over at space on
+        // disk and the boot volume, whatever had been picked the launch
+        // before; a folder or a disk that has since gone is not picked again.
+        sizeMetric = Preferences.sizeMetric
+        treeSort = [TreeSort(sizeMetric.sortKey)]
+        fileSort = [KeyPathComparator(sizeMetric.fileRowKeyPath, order: .reverse)]
+        var isFolder: ObjCBool = false
+        if let folder = Preferences.lastFolder,
+            FileManager.default.fileExists(atPath: folder, isDirectory: &isFolder),
+            isFolder.boolValue
+        {
+            customFolder = folder
+        } else if let volume = Preferences.lastVolume,
+            volumes.contains(where: { $0.path == volume })
+        {
+            selectedVolumePath = volume
+        }
+
         // The list above is only what was mounted at launch. `refreshVolumes`
         // existed to bring it up to date and nothing ever called it, so a disk
         // plugged in later never reached the picker and an ejected one never
@@ -490,6 +574,15 @@ final class AppModel: ObservableObject {
                     self.selectedVolumePath,
                     following: note
                 )
+                // What is remembered for the next launch moves with it, or
+                // that launch looks for the disk where it no longer is and
+                // falls back to the boot volume.
+                if note.name == NSWorkspace.didRenameVolumeNotification,
+                    let old = note.userInfo?[NSWorkspace.oldVolumeURLUserInfoKey] as? URL,
+                    let new = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL
+                {
+                    Preferences.volumeMoved(from: old.path, to: new.path)
+                }
                 self.refreshVolumes()
             }
     }
@@ -788,6 +881,27 @@ final class AppModel: ObservableObject {
         refreshFileRows(immediately: true)
     }
 
+    // MARK: - Choices that outlast a launch
+    //
+    // Recorded by these and not by assigning the properties, as with the
+    // treemap: the headless renderer sets a measure and a folder for one
+    // picture, and that must not rewrite what was chosen in the app.
+
+    /// The Size / On Disk control.
+    func chooseMetric(_ metric: SizeMetric) {
+        sizeMetric = metric
+        Preferences.sizeMetric = metric
+    }
+
+    /// A volume picked in the Select list, in place of whatever folder was
+    /// being scanned.
+    func chooseVolume(_ path: String) {
+        customFolder = nil
+        selectedVolumePath = path
+        Preferences.lastVolume = path
+        Preferences.lastFolder = nil
+    }
+
     // MARK: - Scan target
 
     var scanTargetPath: String { customFolder ?? selectedVolumePath }
@@ -849,7 +963,14 @@ final class AppModel: ObservableObject {
         panel.prompt = "Scan"
         panel.message = "Choose a folder to analyze"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        customFolder = url.path
+        scanFolder(url.path)
+    }
+
+    /// Makes `path` the folder to scan, remembers it for the next launch,
+    /// and scans it: what choosing one in the panel comes to.
+    func scanFolder(_ path: String) {
+        customFolder = path
+        Preferences.lastFolder = path
         startScan()
     }
 
@@ -867,6 +988,10 @@ final class AppModel: ObservableObject {
     func startScan() {
         guard canStartScan else { return }
         let path = scanTargetPath
+
+        // Taken before anything below lets go of the tree it describes.
+        placeToRestore = place(forScanOf: path)
+        marksLostToRescan = 0
 
         result = nil
         treeRows = []
@@ -895,7 +1020,7 @@ final class AppModel: ObservableObject {
         treemapOutline = nil
         revealTarget = nil
         revealIsWaiting = false
-        expanded = []
+        expanded.removeAll()
         progress = ScanEngine.Progress()
         phase = .scanning
         hasFullDiskAccess = FullDiskAccess.isGranted()
@@ -930,6 +1055,10 @@ final class AppModel: ObservableObject {
         // `progress` outside `.scanning` describing a scan that has ended.
         progress = ScanEngine.Progress()
 
+        // Whatever the outcome, the place was for this scan and no other.
+        let place = placeToRestore
+        placeToRestore = nil
+
         let scanned: ScanResult
         switch outcome {
         case .completed(let result):
@@ -950,9 +1079,52 @@ final class AppModel: ObservableObject {
         treemapRoot = scanned.root
         selection = [NodeRef(scanned.root)]
         // Open the root so the biggest folders are visible immediately.
-        expanded = [scanned.root.id]
+        expanded.removeAll()
+        expanded.insert(scanned.root)
+        if let place, place.rootPath == scanned.rootPath {
+            restore(place, in: scanned)
+        }
         rebuildTreeRows()
         refreshFileRows(immediately: true)
+    }
+
+    /// How the window stands now, if `path` is the folder already on show.
+    /// Nil for a scan of anywhere else, which starts afresh.
+    private func place(forScanOf path: String) -> Place? {
+        guard let result, result.rootPath == ScanEngine.normalize(path) else {
+            return nil
+        }
+        var place = Place(rootPath: result.rootPath)
+        place.open = expanded.paths
+        place.zoom = treemapRoot.flatMap { $0.isCutOff ? nil : $0.path }
+        place.selection = selection.filter { !$0.isStale }.map { Spot($0) }
+        place.marks = marks.filter { !$0.isStale }.map { Spot($0) }
+        place.focusedType = focusedType
+        place.showsMarks = showsMarks
+        return place
+    }
+
+    /// Puts back what `place` holds of it that the new scan still has.
+    private func restore(_ place: Place, in scan: ScanResult) {
+        // Only what was open, the root included: one that had been shut
+        // comes back shut, and not opened for being the root of a new scan.
+        expanded.removeAll()
+        for path in place.open {
+            if let dir = scan.directory(at: path) { expanded.insert(dir) }
+        }
+        if let zoom = place.zoom, let dir = scan.directory(at: zoom), !dir.isEmpty {
+            treemapRoot = dir
+        }
+        let selected = place.selection.compactMap { $0.find(in: scan) }
+        if !selected.isEmpty { selection = Set(selected) }
+
+        // Through `setMarked`, so one whose item can no longer be removed is
+        // refused as it would be for a click.
+        setMarked(Set(place.marks.compactMap { $0.find(in: scan) }), true)
+        marksLostToRescan = place.marks.count - marks.count
+        showsMarks = place.showsMarks && !marks.isEmpty
+
+        if let type = place.focusedType, canFocus(on: type) { focusedType = type }
     }
 
     /// Says which of the three ways a root can be unreadable happened. "Couldn’t
@@ -973,20 +1145,20 @@ final class AppModel: ObservableObject {
     // MARK: - Tree View rows
 
     func isExpanded(_ dir: DirNode) -> Bool {
-        expanded.contains(dir.id)
+        expanded.contains(dir)
     }
 
     func toggleExpansion(_ dir: DirNode) {
-        if expanded.contains(dir.id) {
-            expanded.remove(dir.id)
+        if expanded.contains(dir) {
+            expanded.remove(dir)
         } else {
-            expanded.insert(dir.id)
+            expanded.insert(dir)
         }
         rebuildTreeRows()
     }
 
     func setExpanded(_ dir: DirNode, _ isOpen: Bool) {
-        if isOpen { expanded.insert(dir.id) } else { expanded.remove(dir.id) }
+        if isOpen { expanded.insert(dir) } else { expanded.remove(dir) }
         rebuildTreeRows()
     }
 
@@ -999,7 +1171,7 @@ final class AppModel: ObservableObject {
             chain.append(current)
             node = current.parent
         }
-        for dir in chain { expanded.insert(dir.id) }
+        for dir in chain { expanded.insert(dir) }
         selection = [ref]
         rebuildTreeRows()
         scrollTree(to: ref)
@@ -1059,10 +1231,10 @@ final class AppModel: ObservableObject {
     func expandSelection() -> Bool {
         let rows = selectedTreeRows
         let shut = rows.filter {
-            $0.isDirectory && !$0.dir.isEmpty && !expanded.contains($0.dir.id)
+            $0.isDirectory && !$0.dir.isEmpty && !expanded.contains($0.dir)
         }
         if !shut.isEmpty {
-            for ref in shut { expanded.insert(ref.dir.id) }
+            for ref in shut { expanded.insert(ref.dir) }
             rebuildTreeRows()
             return true
         }
@@ -1081,9 +1253,9 @@ final class AppModel: ObservableObject {
     @discardableResult
     func collapseSelection() -> Bool {
         let rows = selectedTreeRows
-        let open = rows.filter { $0.isDirectory && expanded.contains($0.dir.id) }
+        let open = rows.filter { $0.isDirectory && expanded.contains($0.dir) }
         if !open.isEmpty {
-            for ref in open { expanded.remove(ref.dir.id) }
+            for ref in open { expanded.remove(ref.dir) }
             rebuildTreeRows()
             return true
         }
@@ -1582,7 +1754,7 @@ final class AppModel: ObservableObject {
     private func isTreeRow(_ ref: NodeRef) -> Bool {
         var above: DirNode? = ref.isDirectory ? ref.dir.parent : ref.dir
         while let step = above {
-            guard expanded.contains(step.id) else { return false }
+            guard expanded.contains(step) else { return false }
             above = step.parent
         }
         return true

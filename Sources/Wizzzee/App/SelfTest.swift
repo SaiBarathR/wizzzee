@@ -15,6 +15,17 @@ enum SelfTest {
 
     @MainActor
     static func run() {
+        // A model starts from what was chosen last time. Left on the real
+        // preferences, every check here would start from whatever measure
+        // and folder the person running it last picked in the app.
+        let suite = "wizzzee-selftest-\(getpid())"
+        let scratchPreferences = UserDefaults(suiteName: suite)
+        if let scratchPreferences { Preferences.store = scratchPreferences }
+        func finish(_ status: Int32) -> Never {
+            scratchPreferences?.removePersistentDomain(forName: suite)
+            exit(status)
+        }
+
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("wizzzee-selftest-\(getpid())")
         // The batch tests need folders of their own: the checks above delete
@@ -109,6 +120,8 @@ enum SelfTest {
         testArrowKeysOpenAndShutFolders()
         testThePathAboveTheMapZoomsOut()
         testTabsAnswerTheirKeys()
+        testARescanKeepsYourPlace()
+        testChoicesOutlastALaunch()
         testQuickLookShowsWhatIsSelected()
         testASearchIsReadFromWhatWasTyped()
         testASearchFindsFoldersAndCountsWhatItFinds()
@@ -120,10 +133,10 @@ enum SelfTest {
         print("")
         if failures == 0 {
             print("all \(checks) checks passed")
-            exit(0)
+            finish(0)
         }
         print("\(failures) of \(checks) checks FAILED")
-        exit(1)
+        finish(1)
     }
 
     // MARK: - Fixture
@@ -5398,7 +5411,14 @@ enum SelfTest {
         )
         _ = loadSynchronously(into: model)
         check(
-            "a rescan starts with no type in focus",
+            "a rescan of the same folder comes back with the type still in focus",
+            model.focusedType == "bin",
+            "focus \(model.focusedType ?? "nil")"
+        )
+        model.customFolder = base.appendingPathComponent("b").path
+        _ = loadSynchronously(into: model)
+        check(
+            "a scan of somewhere else starts with none",
             model.focusedType == nil,
             "focus \(model.focusedType ?? "nil")"
         )
@@ -6703,6 +6723,280 @@ enum SelfTest {
         check("nor during a scan", !model.canChooseFolder, "")
         pumpUntilSettled(model)
         check("and can again once it is over", model.canChooseFolder, "")
+    }
+
+    /// A scan throws the tree away, and took with it which folders were
+    /// open, where the map was zoomed to, what was selected and every mark.
+    /// A scan of the folder already on show now puts back what is still
+    /// there, and says how many marks it could not.
+    @MainActor
+    private static func testARescanKeepsYourPlace() {
+        let model = AppModel()
+        guard let (base, first) = loadWalkabout("rescan-place", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = first.root.subdir(named: "a"),
+            let b = a.subdir(named: "b"),
+            let c = first.root.subdir(named: "c"),
+            let y = a.files.firstIndex(where: { $0.name == "y.dat" })
+        else {
+            check("the rescan-place fixture scanned", false, "missing folders")
+            return
+        }
+        model.setExpanded(a, true)
+        model.setExpanded(b, true)
+        model.zoom(into: b)
+        let yRef = NodeRef(dir: a, fileIndex: y)
+        model.selection = [yRef]
+        model.setMarked([NodeRef(c), yRef], true)
+        model.showsMarks = true
+        model.focusType("dat")
+
+        // Behind the app's back: c goes, and a gains a file.
+        do {
+            try FileManager.default.removeItem(at: base.appendingPathComponent("c"))
+            try write(base.appendingPathComponent("a/new.dat"), bytes: 2_000)
+        } catch {
+            check("the fixture can be changed between scans", false, "\(error)")
+            return
+        }
+
+        model.startScan()
+        check(
+            "while the scan runs there is nothing marked or selected to act on",
+            model.marks.isEmpty && model.selection.isEmpty && model.result == nil,
+            "marked \(model.marks.count), selected \(model.selection.count)"
+        )
+        pumpUntilSettled(model)
+        guard let second = model.result, second !== first,
+            let a2 = second.root.subdir(named: "a"),
+            let b2 = a2.subdir(named: "b"),
+            let y2 = a2.files.firstIndex(where: { $0.name == "y.dat" })
+        else {
+            check("the rescan landed with the folders that are still there", false, "")
+            return
+        }
+        let y2Ref = NodeRef(dir: a2, fileIndex: y2)
+        check(
+            "the scan is a new one, and sees what changed",
+            second.root.subdir(named: "c") == nil
+                && a2.files.contains { $0.name == "new.dat" },
+            "\(second.root.subdirs.map(\.name))"
+        )
+        check(
+            "the folders that were open are open",
+            model.isExpanded(second.root) && model.isExpanded(a2)
+                && model.isExpanded(b2)
+                && model.treeRows.contains { $0.ref.name == "x.dat" },
+            "rows \(model.treeRows.map(\.ref.name))"
+        )
+        check(
+            "the map is zoomed to where it was",
+            model.treemapRoot === b2,
+            "map at \(model.treemapRoot?.path ?? "nil")"
+        )
+        check(
+            "what was selected is selected, in the new tree",
+            model.selection == [y2Ref] && !y2Ref.isStale,
+            "selected \(model.selection.map(\.path))"
+        )
+        check(
+            "the mark on what is still there is back, and the list is still open",
+            model.marks == [y2Ref] && model.showsMarks,
+            "marked \(model.marks.map(\.path)), open \(model.showsMarks)"
+        )
+        check(
+            "the one on what has gone is counted as lost, not dropped in silence",
+            model.marksLostToRescan == 1,
+            "\(model.marksLostToRescan) lost"
+        )
+        check(
+            "and the type in focus is still in focus",
+            model.focusedType == "dat",
+            "focus \(model.focusedType ?? "nil")"
+        )
+        check(
+            "nothing from the scan before is left in any of it",
+            !model.isExpanded(a) && !model.marks.contains(yRef)
+                && !model.selection.contains(yRef),
+            ""
+        )
+
+        _ = loadSynchronously(into: model)
+        check(
+            "a rescan that loses nothing says nothing",
+            model.marksLostToRescan == 0 && model.marks.count == 1,
+            "\(model.marksLostToRescan) lost, \(model.marks.count) marked"
+        )
+
+        // An open folder is deleted, and the root is shut over the open
+        // folders beneath it. What is put back is what was open: not the
+        // folder that has gone, and not the root for being the root.
+        guard let again = model.result, let a3 = again.root.subdir(named: "a"),
+            let b3 = a3.subdir(named: "b")
+        else { return }
+        check("b is open before it goes", model.isExpanded(b3) && model.isExpanded(a3), "")
+        model.zoom(into: again.root)
+        deletePermanently(model, [NodeRef(b3)])
+        model.setExpanded(again.root, false)
+        check(
+            "with the root shut only its own row is on show",
+            model.treeRows.count == 1 && model.isExpanded(a3),
+            "\(model.treeRows.count) rows"
+        )
+        guard let shut = loadSynchronously(into: model),
+            let a4 = shut.root.subdir(named: "a")
+        else { return }
+        check(
+            "a root that was shut comes back shut, with what was open under it still open",
+            !model.isExpanded(shut.root) && model.isExpanded(a4)
+                && model.treeRows.count == 1,
+            "root open \(model.isExpanded(shut.root)), a open \(model.isExpanded(a4))"
+        )
+        check(
+            "and a folder deleted while it was open is simply not there to open",
+            a4.subdir(named: "b") == nil,
+            "\(a4.subdirs.map(\.name))"
+        )
+        model.setExpanded(shut.root, true)
+
+        // Somewhere else is somewhere new: nothing is carried over to it.
+        model.customFolder = base.appendingPathComponent("a").path
+        guard let third = loadSynchronously(into: model) else { return }
+        check(
+            "a scan of a different folder starts afresh",
+            model.marks.isEmpty && model.selection == [NodeRef(third.root)]
+                && model.treemapRoot === third.root && model.marksLostToRescan == 0
+                && third.root.subdir(named: "empty").map(model.isExpanded) == false
+                && model.isExpanded(third.root),
+            "marked \(model.marks.count), map at \(model.treemapRoot?.name ?? "nil")"
+        )
+
+        // A scan that is stopped has no place to put back, and the next one
+        // has nothing to take a place from.
+        model.setMarked([NodeRef(dir: third.root, fileIndex: 0)], true)
+        model.startScan()
+        model.cancelScan()
+        pumpUntilSettled(model)
+        _ = loadSynchronously(into: model)
+        check(
+            "a scan that was stopped does not hand its place on to the next",
+            model.marks.isEmpty && model.marksLostToRescan == 0,
+            "marked \(model.marks.count), \(model.marksLostToRescan) lost"
+        )
+    }
+
+    /// The measure on show and what was last scanned started over at every
+    /// launch. They are recorded when they are chosen, and only then.
+    @MainActor
+    private static func testChoicesOutlastALaunch() {
+        let suite = "wizzzee-selftest-choices-\(getpid())"
+        guard let scratchStore = UserDefaults(suiteName: suite) else {
+            check("a throwaway preference suite is available", false, suite)
+            return
+        }
+        let real = Preferences.store
+        Preferences.store = scratchStore
+        defer {
+            Preferences.store = real
+            scratchStore.removePersistentDomain(forName: suite)
+        }
+        let folder = scratch("choices")
+        try? FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let fresh = AppModel()
+        check(
+            "a first launch shows space on disk and the boot volume",
+            fresh.sizeMetric == .allocated && fresh.customFolder == nil
+                && fresh.treeSort.first?.key == .allocated,
+            "metric \(fresh.sizeMetric), folder \(fresh.customFolder ?? "none")"
+        )
+
+        fresh.chooseMetric(.logical)
+        let next = AppModel()
+        check(
+            "the measure chosen is the one the next launch starts with",
+            next.sizeMetric == .logical && next.treeSort.first?.key == .size
+                && next.fileSort.first?.keyPath == \FileRow.size,
+            "metric \(next.sizeMetric), sorted by "
+                + "\(String(describing: next.treeSort.first?.key))"
+        )
+        check(
+            "and --prefs reports it under the name --metric takes",
+            Preferences.summary().contains("sizeMetric: size (stored)"),
+            Preferences.summary()
+        )
+
+        let render = AppModel()
+        render.sizeMetric = .allocated
+        render.customFolder = "/tmp"
+        check(
+            "assigning the properties, as the headless renderer does, records nothing",
+            Preferences.sizeMetric == .logical && Preferences.lastFolder == nil,
+            "stored \(Preferences.sizeMetric), folder \(Preferences.lastFolder ?? "none")"
+        )
+
+        // What choosing a folder in the panel comes to, without the panel.
+        let chooser = AppModel()
+        chooser.scanFolder(folder.path)
+        pumpUntilSettled(chooser)
+        check(
+            "a folder that is chosen is recorded, and is what the next launch offers",
+            Preferences.lastFolder == folder.path && chooser.customFolder == folder.path
+                && chooser.phase == .complete && AppModel().customFolder == folder.path,
+            "stored \(Preferences.lastFolder ?? "none"), next launch "
+                + "\(AppModel().customFolder ?? "none")"
+        )
+        try? FileManager.default.removeItem(at: folder)
+        check(
+            "unless it has gone since",
+            AppModel().customFolder == nil,
+            "folder \(AppModel().customFolder ?? "none")"
+        )
+
+        let picker = AppModel()
+        picker.customFolder = "/tmp"
+        guard let volume = picker.volumes.last?.path else { return }
+        picker.chooseVolume(volume)
+        check(
+            "picking a volume takes the folder's place, now and next time",
+            picker.customFolder == nil && picker.selectedVolumePath == volume
+                && Preferences.lastFolder == nil && Preferences.lastVolume == volume
+                && AppModel().selectedVolumePath == volume,
+            "stored volume \(Preferences.lastVolume ?? "none")"
+        )
+        Preferences.lastVolume = "/Volumes/wizzzee-selftest-no-such-disk"
+        check(
+            "a disk that is no longer mounted is not picked again",
+            AppModel().selectedVolumePath == (picker.volumes.first?.path ?? "/"),
+            "selected \(AppModel().selectedVolumePath)"
+        )
+
+        // Renaming a volume in Finder moves its mount point. What is
+        // remembered has to move with it, or the next launch looks for the
+        // disk where it no longer is.
+        Preferences.lastVolume = "/Volumes/Backup"
+        Preferences.lastFolder = "/Volumes/Backup/Photos/2024"
+        Preferences.volumeMoved(from: "/Volumes/Backup", to: "/Volumes/Backups")
+        check(
+            "a renamed volume is remembered by its new name, and a folder on it too",
+            Preferences.lastVolume == "/Volumes/Backups"
+                && Preferences.lastFolder == "/Volumes/Backups/Photos/2024",
+            "volume \(Preferences.lastVolume ?? "none"), folder "
+                + "\(Preferences.lastFolder ?? "none")"
+        )
+        Preferences.lastFolder = "/Volumes/Backup2/Photos"
+        Preferences.volumeMoved(from: "/Volumes/Backup", to: "/Volumes/Other")
+        check(
+            "a volume whose name only starts the same is left alone",
+            Preferences.lastVolume == "/Volumes/Backups"
+                && Preferences.lastFolder == "/Volumes/Backup2/Photos",
+            "volume \(Preferences.lastVolume ?? "none"), folder "
+                + "\(Preferences.lastFolder ?? "none")"
+        )
     }
 
     /// ⌘Y opens Quick Look on the one item selected and on show, and shuts
