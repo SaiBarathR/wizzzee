@@ -441,14 +441,16 @@ final class AppModel: ObservableObject {
     private struct Trashed {
         let ref: NodeRef
         let path: String
-        let inTrash: URL
+        /// Where in the Trash it is, and what it is: see `TrashReceipt`.
+        let receipt: FileActions.TrashReceipt
         /// A file's entry as it stood. Its slot in the folder is emptied
         /// when it leaves, and is where it goes back.
         let entry: FileEntry?
         /// The folder a folder hung from. Detaching it cuts that link.
         let parent: DirNode?
-        /// What emptying the Trash of it would give back.
-        let bytes: UInt64
+        /// The space it took as the scan had it, for sharing out what the
+        /// batch took off the totals among what it moved.
+        let weight: UInt64
         let wasMarked: Bool
     }
 
@@ -456,13 +458,15 @@ final class AppModel: ObservableObject {
     /// undone: until something else is removed, or the folder is scanned
     /// again. Either changes the tree these would be put back into.
     private var lastTrash: [Trashed] = []
+    /// What that move took off the scan's total.
+    private var lastTrashTook: UInt64 = 0
 
     /// Whether there is a move to the Trash to undo.
     @Published private(set) var canUndoTrash = false
 
     /// Everything moved to the Trash since the app was opened and not
     /// brought back, and the space each would give back.
-    private var sessionTrash: [(inTrash: URL, bytes: UInt64)] = []
+    private var sessionTrash: [(receipt: FileActions.TrashReceipt, bytes: UInt64)] = []
 
     /// What of that is still in the Trash, in space on disk.
     ///
@@ -2035,8 +2039,9 @@ final class AppModel: ObservableObject {
         var gone: [NodeRef] = []
         var failure: (title: String, detail: String)?
         var tally = Removal.Tally()
-        /// Where in the Trash the target went, when that is where it went.
-        var inTrash: URL?
+        /// What it takes to bring the target back, when it went to the
+        /// Trash and the Trash said where.
+        var receipt: FileActions.TrashReceipt?
     }
 
     /// Runs a delete batch off the main actor, reporting progress as it goes.
@@ -2072,10 +2077,6 @@ final class AppModel: ObservableObject {
             return
         }
 
-        // Whatever was last moved to the Trash can no longer be put back as
-        // it was: this batch is about to change the tree around it.
-        forgetUndo()
-
         deleteBatch += 1
         let batch = deleteBatch
         let stop = Removal.Stop()
@@ -2105,7 +2106,7 @@ final class AppModel: ObservableObject {
             var gone: [NodeRef] = []
             var failures: [(title: String, detail: String)] = []
             var finished = Removal.Tally()
-            var trashed: [(target: Target, inTrash: URL)] = []
+            var trashed: [(target: Target, receipt: FileActions.TrashReceipt)] = []
 
             for (index, target) in allowed.enumerated() {
                 // Checked between items as well as inside one: a move to the
@@ -2126,7 +2127,7 @@ final class AppModel: ObservableObject {
                 }.value
 
                 gone.append(contentsOf: disposed.gone)
-                if let inTrash = disposed.inTrash { trashed.append((target, inTrash)) }
+                if let receipt = disposed.receipt { trashed.append((target, receipt)) }
                 if let failure = disposed.failure { failures.append(failure) }
                 finished.items += disposed.tally.items
                 finished.bytes += disposed.tally.bytes
@@ -2155,8 +2156,16 @@ final class AppModel: ObservableObject {
             //
             // Noted first, while the tree still holds what is leaving it.
             let moved = self.note(trashed)
+            let weight = gone.reduce(UInt64(0)) { $0 + $1.alloc }
+            let before = self.result?.root.totalAlloc ?? 0
+            // Whatever was last moved to the Trash can no longer be put back
+            // as it was once the tree around it has changed — which is now,
+            // and only if this batch removed something. One that removed
+            // nothing leaves the move before it as undoable as it was.
+            if !gone.isEmpty { self.forgetUndo() }
             self.detach(gone, unlinked: disposal.unlinks)
-            self.offerUndo(of: moved)
+            let after = self.result?.root.totalAlloc ?? 0
+            self.offerUndo(of: moved, taking: before - min(before, after), of: weight)
             self.rereadCapacity()
             self.report(
                 failures: failures,
@@ -2174,16 +2183,18 @@ final class AppModel: ObservableObject {
 
     /// Takes down what it will take to bring `trashed` back, before the tree
     /// lets go of it.
-    private func note(_ trashed: [(target: Target, inTrash: URL)]) -> [Trashed] {
+    private func note(
+        _ trashed: [(target: Target, receipt: FileActions.TrashReceipt)]
+    ) -> [Trashed] {
         trashed.map { item in
             let ref = item.target.ref
             return Trashed(
                 ref: ref,
                 path: item.target.path,
-                inTrash: item.inTrash,
+                receipt: item.receipt,
                 entry: ref.file,
                 parent: ref.isDirectory ? ref.dir.parent : nil,
-                bytes: reclaimableSpace([ref]),
+                weight: ref.alloc,
                 wasMarked: marks.contains(ref)
             )
         }
@@ -2191,26 +2202,67 @@ final class AppModel: ObservableObject {
 
     /// Makes `moved` the move that Undo undoes, and adds it to what the
     /// Trash is holding.
-    private func offerUndo(of moved: [Trashed]) {
-        // An item with nowhere in the Trash to be found was removed
-        // outright, as a volume with no Trash does it.
-        let moved = moved.filter { !$0.inTrash.path.isEmpty }
+    ///
+    /// `left` is what the batch took off the scan's total, and `weight` what
+    /// everything it removed weighed. What the Trash is said to hold is what
+    /// left the totals — worked out from the totals, and shared out among
+    /// what was moved. Asked of each item on its own it came out wrong for
+    /// hard links: both names of a file moved together are each a name that
+    /// frees nothing, and between them were all of it.
+    private func offerUndo(of moved: [Trashed], taking left: UInt64, of weight: UInt64) {
         guard !moved.isEmpty else { return }
         lastTrash = moved
+        lastTrashTook = left
         canUndoTrash = true
-        sessionTrash += moved.map { ($0.inTrash, $0.bytes) }
+        sessionTrash += Self.shares(of: left, among: moved, weighing: weight)
         refreshTrashLine()
-        if let undoManager {
-            undoManager.registerUndo(withTarget: self) { model in
-                MainActor.assumeIsolated { model.undoTrash() }
-            }
-            undoManager.setActionName("Move to Trash")
+        registerUndo()
+    }
+
+    /// `bytes` shared out among `items` by what each weighed, out of
+    /// `weight` in all — or evenly, where nothing weighed anything.
+    private static func shares(
+        of bytes: UInt64,
+        among items: [Trashed],
+        weighing weight: UInt64
+    ) -> [(receipt: FileActions.TrashReceipt, bytes: UInt64)] {
+        items.map { item in
+            let share =
+                weight > 0
+                ? Double(item.weight) / Double(weight) : 1 / Double(items.count)
+            return (item.receipt, UInt64((Double(bytes) * share).rounded()))
         }
+    }
+
+    /// Puts the move back on the window's undo stack, as "Move to Trash".
+    private func registerUndo() {
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated { model.undoFromTheMenu() }
+        }
+        undoManager.setActionName("Move to Trash")
+    }
+
+    /// Edit ▸ Undo, which takes the move off its stack as it asks. While a
+    /// scan or a removal is running the answer is not now, and the move is
+    /// put back to be asked for again — on the next turn of the loop, since
+    /// anything registered while an undo is under way is taken for a redo.
+    private func undoFromTheMenu() {
+        guard canUndoTrash else { return }
+        guard !isDeleting, phase != .scanning else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.canUndoTrash else { return }
+                self.registerUndo()
+            }
+            return
+        }
+        undoTrash()
     }
 
     /// Lets go of the move that could have been undone.
     private func forgetUndo() {
         lastTrash = []
+        lastTrashTook = 0
         if canUndoTrash { canUndoTrash = false }
         undoManager?.removeAllActions(withTarget: self)
     }
@@ -2218,8 +2270,7 @@ final class AppModel: ObservableObject {
     /// Adds up what is still where it was put in the Trash. Something that
     /// is not has been put back or emptied out, and is forgotten.
     func refreshTrashLine() {
-        var info = stat()
-        sessionTrash.removeAll { lstat($0.inTrash.path, &info) != 0 }
+        sessionTrash.removeAll { !$0.receipt.isStillInTrash }
         let total = sessionTrash.reduce(UInt64(0)) { $0 + $1.bytes }
         if total != bytesInTrash { bytesInTrash = total }
 
@@ -2234,7 +2285,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Where in the Trash each of those is, for a check to empty it from.
-    var trashedLocations: [URL] { sessionTrash.map(\.inTrash) }
+    var trashedLocations: [URL] {
+        sessionTrash.map { URL(fileURLWithPath: $0.receipt.inTrash) }
+    }
 
     /// The status bar's line for it.
     var trashLine: String { "In the Trash \(ByteFormat.decimal(bytesInTrash))" }
@@ -2248,13 +2301,14 @@ final class AppModel: ObservableObject {
     func undoTrash() {
         guard canUndoTrash, !isDeleting, phase != .scanning else { return }
         let batch = lastTrash
+        let took = lastTrashTook
         forgetUndo()
 
         var back: [Trashed] = []
         var failures: [(name: String, reason: String)] = []
         for item in batch {
             do {
-                try FileActions.putBack(item.inTrash, to: item.path)
+                try FileActions.putBack(item.receipt, to: item.path)
                 back.append(item)
             } catch {
                 failures.append(
@@ -2262,7 +2316,25 @@ final class AppModel: ObservableObject {
                 )
             }
         }
+        let before = result?.root.totalAlloc ?? 0
         reattach(back)
+        let returned = (result?.root.totalAlloc ?? 0) - min(before, result?.root.totalAlloc ?? 0)
+
+        // What stayed in the Trash holds what the move took off the totals
+        // less what has just come back onto them, shared among what stayed.
+        // Not each one's share from before: a second name for a file that
+        // has come back under its other name holds nothing that is missing.
+        let stayed = batch.filter { item in
+            !back.contains { $0.receipt.inTrash == item.receipt.inTrash }
+        }
+        sessionTrash.removeAll { entry in
+            batch.contains { $0.receipt.inTrash == entry.receipt.inTrash }
+        }
+        sessionTrash += Self.shares(
+            of: took - min(took, returned),
+            among: stayed,
+            weighing: stayed.reduce(0) { $0 + $1.weight }
+        )
         refreshTrashLine()
         rereadCapacity()
 
@@ -2465,7 +2537,7 @@ final class AppModel: ObservableObject {
         do {
             switch disposal {
             case .trash:
-                disposed.inTrash = try FileActions.moveToTrash(target.path)
+                disposed.receipt = try FileActions.moveToTrash(target.path)
                 disposed.gone = [target.ref]
                 // A move is one step, so it counts for all of it at once.
                 disposed.tally = scanned(target.ref)

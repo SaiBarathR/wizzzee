@@ -123,6 +123,7 @@ enum SelfTest {
         testARescanKeepsYourPlace()
         testAMoveToTheTrashCanBeUndone()
         testWhatCannotBePutBackStaysInTheTrash()
+        testPuttingBackMovesOnlyWhatWasPutThere()
         testUndoingATrashPutsHardLinksRight()
         testChoicesOutlastALaunch()
         testQuickLookShowsWhatIsSelected()
@@ -7183,33 +7184,162 @@ enum SelfTest {
         model.actionError = nil
         model.actionErrorDetail = nil
 
-        // The pieces, held to the disk on their own.
-        let spare = base.appendingPathComponent("spare.txt")
-        try? Data("spare".utf8).write(to: spare)
-        func refusal(_ from: URL, _ to: String) -> String {
+        // A move that removed nothing leaves the one before it as it was.
+        // It used to be let go of as the next batch began, whatever came of
+        // that batch.
+        trash(model, [zRef])
+        check("z.dat is in the Trash, to be brought back", model.canUndoTrash, "")
+        guard let b = a.subdir(named: "b"),
+            let x = b.files.firstIndex(where: { $0.name == "x.dat" })
+        else { return }
+        // Gone from the disk behind the app's back, so the move fails.
+        try? FileManager.default.removeItem(at: base.appendingPathComponent("a/b/x.dat"))
+        trash(model, [NodeRef(dir: b, fileIndex: x)])
+        check(
+            "a move that fails, and so removes nothing, leaves the last one undoable",
+            model.actionError != nil && model.canUndoTrash,
+            "error \(model.actionError ?? "none"), can undo \(model.canUndoTrash)"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+        model.undoTrash()
+        check(
+            "and it is undone",
+            FileManager.default.fileExists(atPath: base.appendingPathComponent("c/z.dat").path)
+                && !zRef.isStale,
+            "c/z.dat is not back"
+        )
+    }
+
+    /// Bringing something back is the one place this app moves a file to
+    /// somewhere it chose. Each thing it has to be sure of first is held to
+    /// the disk here, with a folder standing in for the Trash: the thing in
+    /// the Trash is the thing that was put there, the folder at the other
+    /// end is the folder it left, and nothing is where it is going.
+    private static func testPuttingBackMovesOnlyWhatWasPutThere() {
+        let base = scratch("put-back")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = FileManager.default
+        let home = base.appendingPathComponent("home")
+        let bin = base.appendingPathComponent("bin")
+        let elsewhere = base.appendingPathComponent("elsewhere")
+        for folder in [home, bin, elsewhere] {
+            try? manager.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        let original = home.appendingPathComponent("notes.txt").path
+        let binned = bin.appendingPathComponent("notes.txt").path
+
+        /// Writes notes.txt in `home`, moves it to the stand-in Trash as a
+        /// move to the Trash would, and gives the receipt for it.
+        func throwAway(_ text: String = "the first") -> FileActions.TrashReceipt? {
+            try? manager.removeItem(atPath: binned)
+            try? manager.removeItem(atPath: original)
+            try? Data(text.utf8).write(to: URL(fileURLWithPath: original))
+            guard let item = FileActions.FileIdentity(atPath: original),
+                let folder = FileActions.FileIdentity(atPath: home.path),
+                (try? manager.moveItem(atPath: original, toPath: binned)) != nil
+            else { return nil }
+            return FileActions.TrashReceipt(inTrash: binned, item: item, folder: folder)
+        }
+        func outcome(_ receipt: FileActions.TrashReceipt, to path: String) -> String {
             do {
-                try FileActions.putBack(from, to: to)
+                try FileActions.putBack(receipt, to: path)
                 return "put back"
             } catch {
                 return error.localizedDescription
             }
         }
+        func text(_ path: String) -> String {
+            (try? String(contentsOfFile: path, encoding: .utf8)) ?? "nothing"
+        }
+
+        guard let plain = throwAway() else {
+            check("the put-back fixture can be built", false, "")
+            return
+        }
         check(
-            "something that is not in the Trash can't be brought back from it",
-            refusal(base.appendingPathComponent("never-was"), base.path + "/x")
-                == "It is no longer in the Trash.",
-            refusal(base.appendingPathComponent("never-was"), base.path + "/x")
+            "something in the Trash is known to be there",
+            plain.isStillInTrash,
+            ""
         )
         check(
-            "nor into a folder that has gone",
-            refusal(spare, base.path + "/no-such-folder/spare.txt")
-                .contains("is no longer there"),
-            refusal(spare, base.path + "/no-such-folder/spare.txt")
+            "and goes back where it was",
+            outcome(plain, to: original) == "put back" && text(original) == "the first"
+                && !manager.fileExists(atPath: binned) && !plain.isStillInTrash,
+            text(original)
         )
+
+        // Emptied out, and another file of the same name thrown away since:
+        // it is given the first one's place in the Trash.
+        guard let emptied = throwAway() else { return }
+        try? manager.removeItem(atPath: binned)
         check(
-            "and a refusal moves nothing",
-            FileManager.default.fileExists(atPath: spare.path),
-            "spare.txt was moved"
+            "what has been emptied out of the Trash is not there to bring back",
+            !emptied.isStillInTrash
+                && outcome(emptied, to: original) == "It is no longer in the Trash.",
+            outcome(emptied, to: original)
+        )
+        try? Data("somebody else's".utf8).write(to: URL(fileURLWithPath: binned))
+        check(
+            "nor is something else that has been given its place there",
+            !emptied.isStillInTrash
+                && outcome(emptied, to: original) == "It is no longer in the Trash."
+                && text(binned) == "somebody else's" && !manager.fileExists(atPath: original),
+            "\(outcome(emptied, to: original)); the Trash holds “\(text(binned))”"
+        )
+
+        // Something has arrived where it was. Whatever it is, it stays.
+        func refusedOver(_ what: String, _ put: () -> Void) {
+            guard let receipt = throwAway() else { return }
+            put()
+            let there = FileActions.FileIdentity(atPath: original)
+            let said = outcome(receipt, to: original)
+            check(
+                "it is not put back over \(what), which is left as it was",
+                said.hasPrefix("Something else is at") && receipt.isStillInTrash
+                    && there != nil && FileActions.FileIdentity(atPath: original) == there,
+                said
+            )
+            try? manager.removeItem(atPath: original)
+        }
+        refusedOver("a file") {
+            try? Data("in its place".utf8).write(to: URL(fileURLWithPath: original))
+        }
+        refusedOver("an empty folder") {
+            try? manager.createDirectory(atPath: original, withIntermediateDirectories: false)
+        }
+        refusedOver("a link that leads nowhere") {
+            try? manager.createSymbolicLink(
+                atPath: original,
+                withDestinationPath: base.path + "/no-such-thing"
+            )
+        }
+
+        // The folder it came out of has gone, or is not that folder.
+        guard let orphan = throwAway() else { return }
+        try? manager.removeItem(at: home)
+        check(
+            "it is not put back into a folder that has gone",
+            outcome(orphan, to: original).contains("is no longer there")
+                && orphan.isStillInTrash,
+            outcome(orphan, to: original)
+        )
+        try? manager.createSymbolicLink(at: home, withDestinationURL: elsewhere)
+        check(
+            "nor through a link that has taken the folder's place, into somewhere else",
+            outcome(orphan, to: original).contains("is no longer there")
+                && orphan.isStillInTrash
+                && (try? manager.contentsOfDirectory(atPath: elsewhere.path)) == [],
+            outcome(orphan, to: original) + "; elsewhere holds "
+                + "\((try? manager.contentsOfDirectory(atPath: elsewhere.path)) ?? [])"
+        )
+        try? manager.removeItem(at: home)
+        try? manager.createDirectory(at: home, withIntermediateDirectories: true)
+        check(
+            "nor into a new folder of the same name, which is not the one it left",
+            outcome(orphan, to: original).contains("is no longer there")
+                && orphan.isStillInTrash,
+            outcome(orphan, to: original)
         )
     }
 
@@ -7266,6 +7396,8 @@ enum SelfTest {
                 return
             }
             let targets = pick(counted, duplicate, result.root)
+            // Taken while they are still there to have one.
+            let paths = targets.map(\.path)
             trash(model, targets)
             check(
                 "\(what): gone, the tree is what is left on disk",
@@ -7277,6 +7409,13 @@ enum SelfTest {
                 "\(what): undone, the tree is what is on disk again",
                 agreesWithAFreshScan(model, base) == nil && model.actionError == nil,
                 agreesWithAFreshScan(model, base) ?? (model.actionError ?? "")
+            )
+            // A tree and a disk that are both still without it agree as well.
+            check(
+                "\(what): and what went is back, on disk and in the tree",
+                !targets.isEmpty && targets.allSatisfy { !$0.isStale }
+                    && paths.allSatisfy { FileManager.default.fileExists(atPath: $0) },
+                "\(targets.filter(\.isStale).map(\.name)) not in the tree"
             )
             let names = [a, b].flatMap { dir in
                 dir.files.filter { !$0.isRemoved && $0.name.hasPrefix("film") }
@@ -7314,19 +7453,48 @@ enum SelfTest {
             return [NodeRef(dir: c, fileIndex: index)]
         }
 
+        // What the Trash is said to hold is what left the totals. Asked of
+        // each name on its own it came to nothing for both names of a file:
+        // each is a name that frees nothing, and between them were all of it.
+        if let result = loadSynchronously(into: model),
+            let a = result.root.subdir(named: "a"),
+            let b = result.root.subdir(named: "b"),
+            let (counted, duplicate) = roles(a, b)
+        {
+            let whole = film(counted).alloc
+            let before = model.bytesInTrash
+            trash(model, [film(counted), film(duplicate)])
+            check(
+                "both names moved together are all of it, once",
+                model.bytesInTrash - before == whole,
+                "\(model.bytesInTrash - before) more bytes in the Trash, the file takes \(whole)"
+            )
+            model.undoTrash()
+        } else {
+            check("the fixture is a linked pair for both names at once", false, "the pair did not scan as a pair")
+        }
+
         // Both names go, and only one can come back: it is then the only
         // name in the tree, and has to be the one that carries the bytes.
         guard let result = loadSynchronously(into: model),
             let a = result.root.subdir(named: "a"),
             let b = result.root.subdir(named: "b"),
             let (counted, duplicate) = roles(a, b)
-        else { return }
+        else {
+            check("the fixture is a linked pair for one name coming back", false, "")
+            return
+        }
         let stays = film(counted)
         let returns = film(duplicate)
         let blocked = URL(fileURLWithPath: stays.path)
         trash(model, [stays, returns])
         try? Data("in its place".utf8).write(to: blocked)
         model.undoTrash()
+        check(
+            "and the name left in the Trash holds nothing that is missing from the totals",
+            model.bytesInTrash == 0,
+            "\(model.bytesInTrash) bytes in the Trash"
+        )
         check(
             "a second name that comes back alone carries the bytes itself",
             returns.file?.isDuplicateLink == false && stays.isStale
@@ -7338,6 +7506,35 @@ enum SelfTest {
         )
         model.actionError = nil
         model.actionErrorDetail = nil
+
+        // The name that stayed in the Trash is given back to the file under
+        // its old name, so there is a pair again for one last round — which
+        // comes last because it leaves a name in the Trash for good.
+        try? FileManager.default.removeItem(at: blocked)
+        try? FileManager.default.linkItem(atPath: returns.path, toPath: blocked.path)
+        if let result = loadSynchronously(into: model),
+            let a = result.root.subdir(named: "a"),
+            let b = result.root.subdir(named: "b"),
+            let (counted, duplicate) = roles(a, b)
+        {
+            let whole = film(counted).alloc
+            let held = model.bytesInTrash
+            trash(model, [film(duplicate)])
+            check(
+                "a second name in the Trash holds nothing there that is not still here",
+                model.bytesInTrash == held,
+                "\(model.bytesInTrash - held) more bytes in the Trash"
+            )
+            trash(model, [film(counted)])
+            check(
+                "once the last name has gone too, the Trash holds the file",
+                model.bytesInTrash - held == whole && whole > 0,
+                "\(model.bytesInTrash - held) more bytes in the Trash, the file takes \(whole)"
+            )
+            model.undoTrash()
+        } else {
+            check("the fixture is a linked pair for one name after the other", false, "the pair did not scan as a pair")
+        }
     }
 
     /// The measure on show and what was last scanned started over at every
