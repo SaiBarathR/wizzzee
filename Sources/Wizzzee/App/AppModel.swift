@@ -1387,32 +1387,48 @@ final class AppModel: ObservableObject {
     /// The files and folders the scan found under `dir` that are no longer on
     /// disk. A folder that has gone is named once, not entry by entry.
     ///
-    /// Anything that can't be looked at — a path too long to ask about, a
-    /// folder that can't be entered — is taken to be still there. Wrongly
-    /// kept, it overstates a total until the next scan; wrongly dropped, it
-    /// would be a file the tree says has gone that has not.
+    /// Asked by path, and where a path is too long to ask by, of the folder
+    /// the entry is in. A scan opens folders by path and so reaches down to
+    /// `PATH_MAX`, which leaves it holding one level of entries whose own
+    /// paths are past it — and a removal that had to change directory to get
+    /// that deep removes exactly those. Taken for still there, they stayed in
+    /// the tree, and could not be deleted from it either.
+    ///
+    /// Anything that still can't be looked at — a folder that can't be opened
+    /// — is taken to be there. Wrongly kept, it overstates a total until the
+    /// next scan; wrongly dropped, it would be a file the tree says has gone
+    /// that has not.
     private nonisolated static func missing(
         under dir: DirNode,
         at path: String
     ) -> [NodeRef] {
-        func isMissing(_ path: String) -> Bool {
-            var info = stat()
-            return lstat(path, &info) != 0 && errno == ENOENT
-        }
         var gone: [NodeRef] = []
         var pending: [(dir: DirNode, path: String)] = [(dir, path)]
         while let (dir, path) = pending.popLast() {
+            // Opened only for a name in here that is past `PATH_MAX`.
+            var folder: Int32 = -1
+            defer { if folder >= 0 { close(folder) } }
+            func isMissing(_ name: String) -> Bool {
+                var info = stat()
+                if lstat(path + "/" + name, &info) == 0 { return false }
+                if errno == ENOENT { return true }
+                guard errno == ENAMETOOLONG else { return false }
+                if folder < 0 { folder = open(path, O_RDONLY | O_DIRECTORY) }
+                guard folder >= 0 else { return false }
+                return fstatat(folder, name, &info, AT_SYMLINK_NOFOLLOW) != 0
+                    && errno == ENOENT
+            }
+
             for index in dir.files.indices where !dir.files[index].isRemoved {
-                if isMissing(path + "/" + dir.files[index].name) {
+                if isMissing(dir.files[index].name) {
                     gone.append(NodeRef(dir: dir, fileIndex: index))
                 }
             }
             for sub in dir.subdirs {
-                let below = path + "/" + sub.name
-                if isMissing(below) {
+                if isMissing(sub.name) {
                     gone.append(NodeRef(sub))
                 } else {
-                    pending.append((sub, below))
+                    pending.append((sub, path + "/" + sub.name))
                 }
             }
         }

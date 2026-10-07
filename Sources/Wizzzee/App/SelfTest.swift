@@ -64,6 +64,7 @@ enum SelfTest {
         testARemovalCarriesOnPastWhatItCannotRemove()
         testARemovalReachesPastPathMax()
         testADeleteThatLeavesSomethingShowsWhatIsLeft()
+        testAPartialDeletePastPathMaxShowsWhatIsLeft()
         testADeleteCanBeStoppedPartWay()
         testRowsKeepTheirPlacesAcrossADelete()
         testTheFileListKeepsItsPlaceAcrossADelete()
@@ -2474,12 +2475,117 @@ enum SelfTest {
         )
     }
 
+    /// A scan opens folders by path, so it reaches down to `PATH_MAX` and is
+    /// left holding one level of entries whose own paths are past it. A
+    /// removal that has to change directory to get that deep removes those —
+    /// and when it leaves the folder standing, the tree has to find out they
+    /// went without being able to ask for them by path.
+    //
+    // part/<level>/<level>/…  past PATH_MAX, a long-named file at every level,
+    //                         and one that can't be removed at the bottom
+    @MainActor
+    private static func testAPartialDeletePastPathMaxShowsWhatIsLeft() {
+        let base = scratch("partial-deep")
+        let level = "level-of-fifteen"
+        let long = "a-file-with-a-name-long-enough-to-matter.dat"
+        let levels = Int(PATH_MAX) / 16 + 40
+        // Down to the bottom by way of each folder in turn, which is the only
+        // way there is to name anything in it.
+        func bottom() -> Int32 {
+            var folder = open(base.path + "/part", O_RDONLY | O_DIRECTORY)
+            for _ in 0..<levels where folder >= 0 {
+                let next = openat(folder, level, O_RDONLY | O_DIRECTORY)
+                close(folder)
+                folder = next
+            }
+            return folder
+        }
+        defer {
+            let folder = bottom()
+            if folder >= 0 {
+                let locked = openat(folder, "locked.dat", O_RDONLY)
+                if locked >= 0 {
+                    fchflags(locked, 0)
+                    close(locked)
+                }
+                close(folder)
+            }
+            _ = Removal.remove(base.path)
+        }
+        mkdir(base.path, 0o755)
+        mkdir(base.path + "/part", 0o755)
+        var folder = open(base.path + "/part", O_RDONLY | O_DIRECTORY)
+        for _ in 0..<levels {
+            mkdirat(folder, level, 0o755)
+            let next = openat(folder, level, O_RDONLY | O_DIRECTORY)
+            close(openat(next, long, O_CREAT | O_WRONLY, 0o644))
+            close(folder)
+            folder = next
+        }
+        let locked = openat(folder, "locked.dat", O_CREAT | O_WRONLY, 0o644)
+        let isLocked = locked >= 0 && fchflags(locked, UInt32(UF_IMMUTABLE)) == 0
+        close(locked)
+        close(folder)
+        guard isLocked else {
+            check("the deep partial fixture can be built", false, "errno \(errno)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let part = result.root.subdir(named: "part") else {
+            check("the deep partial fixture scanned", false, "missing folder")
+            return
+        }
+        // What the scan could reach, and how much of it is past the point a
+        // path can name: the last few levels' files.
+        let scannedFiles = part.totalFiles
+        let scannedDirs = part.totalDirs
+        var beyond = 0
+        var pending = [(dir: part, path: part.path)]
+        while let (dir, path) = pending.popLast() {
+            for file in dir.files where path.utf8.count + 1 + file.name.utf8.count
+                >= Int(PATH_MAX)
+            {
+                beyond += 1
+            }
+            pending.append(contentsOf: dir.subdirs.map { ($0, path + "/" + $0.name) })
+        }
+        check(
+            "the scan holds files it can't name by path",
+            scannedFiles > beyond && beyond > 0,
+            "\(beyond) of \(scannedFiles) scanned files are past PATH_MAX"
+        )
+
+        deletePermanently(model, [NodeRef(part)])
+
+        check(
+            "the folder is left standing by the one file that would not go",
+            model.actionError != nil && result.root.subdir(named: "part") === part,
+            "error \(model.actionError ?? "none")"
+        )
+        check(
+            "every file that went is out of the tree, past PATH_MAX or not",
+            part.totalFiles == 0,
+            "\(part.totalFiles) of \(scannedFiles) still listed"
+        )
+        check(
+            "and every folder, which all still stand, is still in it",
+            part.totalDirs == scannedDirs,
+            "\(part.totalDirs) folders listed, \(scannedDirs) scanned"
+        )
+    }
+
     /// Stop, part-way through one folder, through the model: the count the
     /// bar is drawn from, the Stop itself, and the tree left agreeing with a
     /// disk that has lost an arbitrary part of the folder.
     ///
-    /// Eight thousand files, so the removal is still running when the first
-    /// progress report — a twentieth of a second in — has made its way here.
+    /// Nothing here waits on how fast the disk is. Stop is pressed the moment
+    /// the rows are set back, which with no grace asked for is as soon as the
+    /// batch has handed the removal off — a millisecond or two into eight
+    /// thousand files, wherever they are. And that the bar moved is read from
+    /// what was published, which includes where the removal ended.
     @MainActor
     private static func testADeleteCanBeStoppedPartWay() {
         let base = scratch("partway")
@@ -2529,34 +2635,35 @@ enum SelfTest {
             "got \(String(describing: model.deleteProgress)), expected \(expected)"
         )
 
-        var fractions: [Double] = []
-        var dimmed = false
-        let deadline = Date().addingTimeInterval(20)
-        while model.isDeleting, (model.deleteProgress?.items ?? 0) == 0,
-            Date() < deadline
-        {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        var published: [AppModel.DeleteProgress] = []
+        let watch = model.$deleteProgress.sink { progress in
+            if let progress { published.append(progress) }
         }
-        if let progress = model.deleteProgress { fractions.append(progress.fraction) }
-        dimmed =
+        let deadline = Date().addingTimeInterval(20)
+        while model.isDeleting, model.removing.isEmpty, Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.001))
+        }
+        let dimmed =
             model.isBeingRemoved(NodeRef(big))
             && model.isBeingRemoved(NodeRef(dir: inside, fileIndex: 0))
             && !model.isBeingRemoved(NodeRef(dir: result.root, fileIndex: spare))
-        let reported = model.deleteProgress?.items ?? 0
         model.cancelDelete()
         pumpUntilDeleteSettles(model)
+        watch.cancel()
 
         let left = census(URL(fileURLWithPath: bigPath)).items
-        check(
-            "progress is reported while one folder is still being removed",
-            reported > 0 && reported < expected
-                && fractions.allSatisfy { $0 > 0 && $0 < 1 },
-            "saw \(reported) of \(expected) before stopping"
-        )
         check(
             "the rows on their way out are set back, and no others",
             dimmed && model.removing.isEmpty,
             "dimmed \(dimmed), still marked \(model.removing.count)"
+        )
+        check(
+            "the bar moves while one folder is being removed, and stops short",
+            published.contains { $0.items > 0 && $0.items < expected }
+                && published.allSatisfy {
+                    $0.itemsTotal == expected && $0.fraction < 1
+                },
+            "published \(published.map(\.items)) of \(expected)"
         )
         check(
             "Stop takes effect part-way through the folder",
