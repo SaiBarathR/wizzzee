@@ -294,7 +294,11 @@ final class AppModel: ObservableObject {
     private var volumeWatch: AnyCancellable?
 
     /// True while the folder picker is up.
-    private var isChoosingFolder = false
+    ///
+    /// Published, so the delete commands are greyed for as long as it is and
+    /// not merely refused when they arrive: a key that matches a greyed item
+    /// goes on to the panel, which is where ⌘⌫ was aimed.
+    @Published private(set) var isChoosingFolder = false
 
     private var engine: ScanEngine?
     private var deleteTask: Task<Void, Never>?

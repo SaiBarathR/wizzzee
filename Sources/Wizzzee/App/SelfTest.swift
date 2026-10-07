@@ -1966,10 +1966,16 @@ enum SelfTest {
         // A map wired to the model as `TreemapPane` wires it, and handed what
         // `TreemapCanvas` would hand it.
         let layouts = DispatchQueue(label: "com.wizzzee.selftest.outline")
-        let map = TreemapNSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
-        map.layoutQueue = layouts
-        map.liveRevision = { model.treeRevision }
-        map.onOutline = { model.treemapOutline = $0 }
+        func makeMap() -> TreemapNSView {
+            let map = TreemapNSView(
+                frame: NSRect(x: 0, y: 0, width: 400, height: 300)
+            )
+            map.layoutQueue = layouts
+            map.liveRevision = { model.treeRevision }
+            map.onOutline = { model.treemapOutline = $0 }
+            return map
+        }
+        var map = makeMap()
         func redraw() {
             map.selection = model.primarySelection
             map.apply(
@@ -2022,6 +2028,19 @@ enum SelfTest {
             model.treemapOutline == cRef && model.selectionOnShow.isEmpty,
             "on show: \(model.selectionOnShow.map(\.name))"
         )
+        // Putting the map away clears what it reported, and showing it again
+        // makes a new one. Nothing else puts the outline back, so the new map
+        // has to say so itself once it has drawn.
+        model.treemapOutline = nil
+        model.showsTreemap = true
+        map = makeMap()
+        redraw()
+        check(
+            "a map shown again outlines the selection again, back within reach",
+            model.treemapOutline == cRef && model.canUseDeleteKeys,
+            "outlined \(model.treemapOutline?.name ?? "nothing")"
+        )
+        model.showsTreemap = false
 
         // File View lists files only, so a folder picked in the tree has no
         // row there however selected it still is.
