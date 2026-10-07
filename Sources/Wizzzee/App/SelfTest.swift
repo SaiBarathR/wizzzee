@@ -89,6 +89,9 @@ enum SelfTest {
         testAFolderPromisesOnlyWhatDeletingItFrees()
         testATrashedNameStillSharesItsStorage()
         testFileTypesFollowADelete()
+        testAFileTypeCanBePickedOut()
+        testTheMapSetsBackWhatIsOutOfFocus()
+        testTheLegendCanListEveryType()
         testDeletingALinkWithNoPartnerInTreeSubtracts()
         testTreemapLayoutIsFencedAgainstDeletes()
         testAQueuedLayoutPinsTheFoldersAboveItsRoot()
@@ -5251,6 +5254,283 @@ enum SelfTest {
                 && result.typeCount == 1,
             "top by size \(result.topBySize.map(\.ext)), "
                 + "\(result.typeCount) types counted"
+        )
+    }
+
+    // MARK: - File type in focus
+
+    /// File Types said how much of a scan a type took and nothing about
+    /// where. A row of it can be picked: the File View then lists that type's
+    /// largest files and no others, and the focus lets go by itself when the
+    /// row it was on has gone — with a delete, or with the scan.
+    @MainActor
+    private static func testAFileTypeCanBePickedOut() {
+        let base = scratch("type-focus")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            for folder in ["a", "b", "c"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            try write(base.appendingPathComponent("a/one.dat"), bytes: 9_000)
+            try write(base.appendingPathComponent("b/two.dat"), bytes: 4_000)
+            try write(base.appendingPathComponent("b/three.log"), bytes: 2_000)
+            try write(base.appendingPathComponent("c/four.txt"), bytes: 1_000)
+            try write(base.appendingPathComponent("c/five.bin"), bytes: 6_000)
+            try write(base.appendingPathComponent("c/README"), bytes: 3_000)
+        } catch {
+            check("the type-focus fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        pumpUntilFileRowsSettle(model, expecting: 6)
+
+        let dat = result.typeIndex(for: "dat")
+        let onlyDat = result.largestFiles(ofType: dat, limit: 10)
+        check(
+            "a walk held to one type lists that type's files, largest first",
+            onlyDat.map(\.name) == ["one.dat", "two.dat"],
+            "got \(onlyDat.map(\.name))"
+        )
+        check(
+            "and a name filter narrows it further, not instead",
+            result.largestFiles(matching: "two", ofType: dat, limit: 10)
+                .map(\.name) == ["two.dat"]
+                && result.largestFiles(matching: "three", ofType: dat, limit: 10)
+                    .isEmpty,
+            "‘three’ within .dat gave "
+                + "\(result.largestFiles(matching: "three", ofType: dat, limit: 10).map(\.name))"
+        )
+        let bare = result.largestFiles(
+            ofType: result.typeIndex(for: ""),
+            limit: 10
+        )
+        check(
+            "files with no extension are a type of their own",
+            bare.map(\.name) == ["README"],
+            "got \(bare.map(\.name))"
+        )
+        check(
+            "a type the scan never saw has no index to ask for",
+            result.typeIndex(for: "nope") == nil,
+            "got \(String(describing: result.typeIndex(for: "nope")))"
+        )
+
+        model.focusType("dat")
+        pumpUntilFileRowsSettle(model, expecting: 2)
+        check(
+            "picking a type puts it in focus, under the number its files carry",
+            model.focusedType == "dat" && model.focusedTypeIndex == dat
+                && model.focusedTypeStat?.count == 2,
+            "focus \(model.focusedType ?? "nil"), index "
+                + "\(String(describing: model.focusedTypeIndex)) against "
+                + "\(String(describing: dat))"
+        )
+        check(
+            "and the File View lists that type and nothing else",
+            model.fileRows.map(\.name) == ["one.dat", "two.dat"],
+            "rows \(model.fileRows.map(\.name))"
+        )
+
+        model.focusType("nope")
+        check(
+            "a type with no files can't take the focus, and leaves none",
+            model.focusedType == nil,
+            "focus \(model.focusedType ?? "nil")"
+        )
+        pumpUntilFileRowsSettle(model, expecting: 6)
+        check(
+            "with no type in focus the File View is every file again",
+            model.fileRows.count == 6,
+            "\(model.fileRows.count) rows"
+        )
+
+        // One of the two .dat files goes: the type is still there to look at.
+        model.focusType("dat")
+        pumpUntilFileRowsSettle(model, expecting: 2)
+        guard let a = result.root.subdir(named: "a"),
+            let b = result.root.subdir(named: "b"),
+            let two = b.files.firstIndex(where: { $0.name == "two.dat" })
+        else {
+            check("the type-focus fixture scanned", false, "missing folders")
+            return
+        }
+        deletePermanently(model, [NodeRef(a)])
+        pumpUntilFileRowsSettle(model, expecting: 1)
+        check(
+            "a delete that leaves the type some files leaves it in focus",
+            model.focusedType == "dat"
+                && model.fileRows.map(\.name) == ["two.dat"],
+            "focus \(model.focusedType ?? "nil"), rows "
+                + "\(model.fileRows.map(\.name))"
+        )
+
+        // The last of them goes, and its row in File Types with it.
+        deletePermanently(model, [NodeRef(dir: b, fileIndex: two)])
+        pumpUntilFileRowsSettle(model, expecting: 4)
+        check(
+            "deleting the last file of the type in focus lets the focus go",
+            model.focusedType == nil && model.focusedTypeIndex == nil,
+            "focus \(model.focusedType ?? "nil")"
+        )
+        check(
+            "and the File View goes back to everything that is left",
+            model.fileRows.count == 4,
+            "rows \(model.fileRows.map(\.name))"
+        )
+
+        model.focusType("bin")
+        check(
+            "another type can be picked afterwards",
+            model.focusedType == "bin",
+            "focus \(model.focusedType ?? "nil")"
+        )
+        _ = loadSynchronously(into: model)
+        check(
+            "a rescan starts with no type in focus",
+            model.focusedType == nil,
+            "focus \(model.focusedType ?? "nil")"
+        )
+    }
+
+    /// With a type in focus the map draws every other tile set back, in the
+    /// bitmap itself. Read back out of the image: that a tile of the type is
+    /// drawn exactly as it was, and one outside it — another type, or a
+    /// folder drawn as one tile — a good deal darker.
+    private static func testTheMapSetsBackWhatIsOutOfFocus() {
+        func entry(_ name: String, _ bytes: UInt64, type: Int32) -> FileEntry {
+            FileEntry(
+                name: name,
+                size: bytes,
+                alloc: bytes,
+                mtime: 0,
+                extIndex: type,
+                isSymlink: false,
+                isDuplicateLink: false
+            )
+        }
+        // Two files of different types side by side, and a folder too deep
+        // to be broken down, which the layout draws as a single tile.
+        let root = DirNode(name: "/wizzzee-selftest-focus", parent: nil)
+        root.files = [entry("x.dat", 5_000, type: 0), entry("y.log", 3_000, type: 1)]
+        let folder = DirNode(name: "folder", parent: root)
+        folder.files = [entry("z.dat", 2_000, type: 0)]
+        folder.totalSize = 2_000
+        folder.totalAlloc = 2_000
+        folder.totalFiles = 1
+        root.subdirs = [folder]
+        root.totalSize = 10_000
+        root.totalAlloc = 10_000
+        root.totalFiles = 3
+        root.totalDirs = 1
+
+        let layout = TreemapLayout.build(
+            root: root,
+            ancestors: [],
+            size: CGSize(width: 300, height: 200),
+            metric: .allocated,
+            maxDepth: 0
+        )
+        guard let x = layout.cells.first(where: { $0.ref.name == "x.dat" }),
+            let y = layout.cells.first(where: { $0.ref.name == "y.log" }),
+            let z = layout.cells.first(where: { $0.ref.isDirectory })
+        else {
+            check(
+                "the focus fixture lays out as two files and a folder tile",
+                false,
+                "cells \(layout.cells.map(\.ref.name))"
+            )
+            return
+        }
+
+        /// How bright the middle of `cell` is in `image`, out of 765.
+        func light(_ cell: TreemapCell, in image: CGImage?) -> Int {
+            guard let image, let data = image.dataProvider?.data,
+                let bytes = CFDataGetBytePtr(data)
+            else { return -1 }
+            let px = min(image.width - 1, Int(cell.rect.midX))
+            let py = min(image.height - 1, Int(cell.rect.midY))
+            let at = py * image.bytesPerRow + px * 4
+            // Little-endian 0xXXRRGGBB: blue, green, red, unused.
+            return Int(bytes[at]) + Int(bytes[at + 1]) + Int(bytes[at + 2])
+        }
+
+        let plain = TreemapRenderer.render(model: layout, scale: 1)
+        let focused = TreemapRenderer.render(model: layout, scale: 1, focus: 0)
+        check(
+            "the tile of the type in focus is drawn as it was",
+            light(x, in: plain) > 0 && light(x, in: focused) == light(x, in: plain),
+            "\(light(x, in: focused)) in focus against \(light(x, in: plain))"
+        )
+        check(
+            "a tile of another type is set back",
+            light(y, in: focused) * 2 < light(y, in: plain),
+            "\(light(y, in: focused)) in focus against \(light(y, in: plain))"
+        )
+        check(
+            "and so is a folder drawn as one tile, whatever is inside it",
+            light(z, in: focused) * 2 < light(z, in: plain),
+            "\(light(z, in: focused)) in focus against \(light(z, in: plain))"
+        )
+        check(
+            "set back is not blacked out: the map underneath can still be read",
+            light(y, in: focused) > 30,
+            "\(light(y, in: focused)) of 765"
+        )
+    }
+
+    /// The legend lists the largest few types, and a real disk has thousands.
+    /// The rest are kept ranked too, so the list can be asked for all of them.
+    private static func testTheLegendCanListEveryType() {
+        let count = ScanResult.legendLength + 5
+        let stats = (0..<count).map { i in
+            ExtensionStat(
+                ext: "t\(i)",
+                size: UInt64(count - i) * 1_000,
+                alloc: UInt64(i + 1) * 1_000,
+                count: i == 3 ? 0 : 1
+            )
+        }
+        let result = ScanResult(
+            root: DirNode(name: "/wizzzee-selftest-legend", parent: nil),
+            rootPath: "/wizzzee-selftest-legend",
+            extensionStats: stats,
+            elapsed: 0,
+            deniedCount: 0,
+            hardLinkSavings: 0,
+            hardLinkAllocSavings: 0,
+            volumeTotal: 0,
+            volumeFree: 0,
+            volumeUsed: 0,
+            isSharedContainer: false
+        )
+        check(
+            "the legend's short list stops where it always has",
+            result.topBySize.count == ScanResult.legendLength
+                && result.topByAllocated.count == ScanResult.legendLength,
+            "\(result.topBySize.count) by size, \(result.topByAllocated.count) on disk"
+        )
+        check(
+            "the full list has every type that still has a file",
+            result.allBySize.count == count - 1
+                && result.allByAllocated.count == count - 1
+                && result.typeCount == count - 1
+                && !result.allBySize.contains { $0.ext == "t3" },
+            "\(result.allBySize.count) by size, \(result.typeCount) counted"
+        )
+        check(
+            "each in its own order, and the short list is the top of it",
+            result.allBySize.first?.ext == "t0"
+                && result.allByAllocated.first?.ext == "t\(count - 1)"
+                && Array(result.allBySize.prefix(ScanResult.legendLength))
+                    == result.topBySize,
+            "first by size \(result.allBySize.first?.ext ?? "nil"), on disk "
+                + "\(result.allByAllocated.first?.ext ?? "nil")"
         )
     }
 

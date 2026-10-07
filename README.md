@@ -72,6 +72,13 @@ rebuilding.
   button at the right-hand end of the status bar, gives the whole tab to the
   table; showing it again keeps the zoom you left it at, and whichever way you
   leave it is how it opens next launch.
+- **File Types** — the list beside the tree ranks the scan by file extension.
+  Click a type to put it in focus: its tiles stay lit on the treemap while every
+  other tile is set back, and File View lists that type's largest files and no
+  others. A label naming the type appears beside the map and above the file
+  list; click it to take the focus off, or press `Esc` in the list. The list
+  starts at the 40 largest types — click **top 40 of …** in its heading for all
+  of them.
 - **Right-click anything** for Reveal in Finder, Open, Open in Terminal, Copy
   Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the
   way up the tree without rescanning: the row goes, its neighbours stay where

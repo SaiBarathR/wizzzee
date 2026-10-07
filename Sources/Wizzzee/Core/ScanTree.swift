@@ -512,6 +512,12 @@ final class ScanResult {
     /// when the tree does, so a delete re-ranks them once.
     private(set) var topBySize: [ExtensionStat] = []
     private(set) var topByAllocated: [ExtensionStat] = []
+    /// The same two rankings uncut, for when the legend is asked to list
+    /// every type and not only the ones that fit at a glance.
+    private(set) var allBySize: [ExtensionStat] = []
+    private(set) var allByAllocated: [ExtensionStat] = []
+    /// How many types the legend lists until it is asked for all of them.
+    static let legendLength = 40
     /// How many types still have at least one file.
     private(set) var typeCount = 0
     private let extensionIndex: [String: Int]
@@ -571,8 +577,10 @@ final class ScanResult {
     func rankTypes() {
         let present = extensionStats.filter { $0.count > 0 }
         typeCount = present.count
-        topBySize = Array(present.sorted { $0.size > $1.size }.prefix(40))
-        topByAllocated = Array(present.sorted { $0.alloc > $1.alloc }.prefix(40))
+        allBySize = present.sorted { $0.size > $1.size }
+        allByAllocated = present.sorted { $0.alloc > $1.alloc }
+        topBySize = Array(allBySize.prefix(Self.legendLength))
+        topByAllocated = Array(allByAllocated.prefix(Self.legendLength))
     }
 
     /// Takes a file that has left the tree out of its type's totals.
@@ -610,6 +618,11 @@ final class ScanResult {
         extensionIndex[ext].map { extensionStats[$0] }
     }
 
+    /// Where `ext` sits in `extensionStats`, which is the number a file of
+    /// that type carries as its `extIndex` and a treemap tile as its colour.
+    /// Nil for a type this scan never saw.
+    func typeIndex(for ext: String) -> Int? { extensionIndex[ext] }
+
     /// Color index for a file, used by both the treemap and the legend.
     func colorIndex(for file: FileEntry) -> Int {
         let i = Int(file.extIndex)
@@ -625,13 +638,18 @@ final class ScanResult {
     /// Returns an empty array if `token` is cancelled part-way: a caller that
     /// gave up is about to change the tree this is reading, and a partial
     /// ranking of it is worth nothing.
+    ///
+    /// `typeIndex` holds the list to one file type, named as `typeIndex(for:)`
+    /// gives it.
     func largestFiles(
         matching query: String = "",
+        ofType typeIndex: Int? = nil,
         limit: Int = 1000,
         metric: SizeMetric = .allocated,
         token: WalkToken? = nil
     ) -> [NodeRef] {
         let needle = query.foldedForSearch
+        let wantedType = typeIndex.map { Int32($0) }
         // Nearly every filter is plain ASCII, and is matched byte for byte
         // against names as they are stored. Anything else needs each name
         // folded the same way as the needle before the two can be compared.
@@ -663,6 +681,7 @@ final class ScanResult {
             for i in dir.files.indices {
                 let file = dir.files[i]
                 if file.isDuplicateLink || file.isRemoved { continue }
+                if let wantedType, file.extIndex != wantedType { continue }
                 let weight = metric == .logical ? file.size : file.alloc
                 if !heap.wouldAccept(weight) { continue }
                 if !needle.isEmpty {
