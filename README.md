@@ -83,8 +83,10 @@ rebuilding.
   of them.
 - **`⌘Y` opens Quick Look** on the selected item, and shuts it again — so what
   a file is can be seen before deciding what to do with it. While it is open it
-  follows the selection, and when the item on show is removed it moves on to
-  whatever took its place, so a list can be worked down with it up. A file that
+  shows the one thing selected: it follows the selection, shuts when several
+  rows are selected, and when the item on show is removed it moves on to
+  whatever took its place, so a list can be worked down with it up. Opened from
+  the right-click menu, it selects the row it shows. A file that
   is *online only* is not previewed: that would download it.
 - **Right-click anything** for Reveal in Finder, Open, Quick Look, Open in
   Terminal, Copy Path, Move to Trash, or Delete Permanently. Deleting updates the sizes all the

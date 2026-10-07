@@ -571,9 +571,15 @@ final class AppModel: ObservableObject {
         return shown.count == 1 ? shown.first : nil
     }
 
-    /// Whether ⌘Y has anything to do: something to look at, or a panel to
-    /// shut.
-    var canTogglePreview: Bool { previewURL != nil || previewCandidate != nil }
+    /// Whether ⌘Y has anything to do: a panel to shut, or something to look
+    /// at and nothing in the way of looking — the folder picker, a question
+    /// waiting for an answer. A key reaches the menu from under those, and
+    /// would put a panel up over them.
+    var canTogglePreview: Bool {
+        if previewURL != nil { return true }
+        return previewCandidate != nil && !isChoosingFolder
+            && permanentDeleteTargets.isEmpty && actionError == nil
+    }
 
     /// ⌘Y, as in Finder: opens Quick Look on the selected item, and shuts it
     /// if it is open.
@@ -591,17 +597,31 @@ final class AppModel: ObservableObject {
     /// its contents down, and Quick Look reads it: a look at a 4 GB file
     /// that was taking no space would put 4 GB on a disk someone is in the
     /// middle of emptying.
+    ///
+    /// What is looked at becomes what is selected. The right-click menu acts
+    /// on the row that was clicked, which need not be the selected one, and
+    /// the delete keys act on the selection: a panel showing one file beside
+    /// a highlight on another had ⌘⌫ remove the one that was not being
+    /// looked at.
     func preview(_ ref: NodeRef) {
         guard !ref.isStale else { return }
-        if let file = ref.file, file.storage == .dataless {
+        if isOnlineOnly(ref) {
             actionError = "“\(ref.name)” is online only"
             actionErrorDetail =
                 "Its contents are with a cloud provider and not on this disk. "
                 + "Looking at it would download all "
-                + "\(ByteFormat.decimal(file.size)) of it."
+                + "\(ByteFormat.decimal(ref.size)) of it."
             return
         }
+        if selection != [ref] { selection = [ref] }
         show(inPreview: ref)
+    }
+
+    /// Whether Quick Look would have to download `ref` to show it. A folder
+    /// is shown as its icon and is not read.
+    private func isOnlineOnly(_ ref: NodeRef) -> Bool {
+        guard let file = ref.file else { return false }
+        return file.storage == .dataless || FileActions.isOnlineOnly(ref.path)
     }
 
     /// Points the panel at `ref`, or shuts it if `ref` is not something it
@@ -609,7 +629,7 @@ final class AppModel: ObservableObject {
     /// moved, or what was on show was deleted — when an alert about a file
     /// someone only passed over would be an interruption.
     private func show(inPreview ref: NodeRef) {
-        guard !ref.isStale, ref.file?.storage != .dataless else {
+        guard !ref.isStale, !isOnlineOnly(ref) else {
             previewURL = nil
             return
         }
@@ -618,12 +638,16 @@ final class AppModel: ObservableObject {
     }
 
     /// With the panel open, a change of selection is a change of what is
-    /// being looked at, as it is in Finder.
+    /// being looked at, as it is in Finder — and a selection of several, or
+    /// of nothing, is no one thing to look at, so the panel shuts. While it
+    /// is up it is always showing the one thing that is selected.
     private func previewFollowsSelection() {
-        guard previewURL != nil, selection.count == 1, let ref = selection.first,
-            ref != previewed
-        else { return }
-        show(inPreview: ref)
+        guard previewURL != nil else { return }
+        guard selection.count == 1, let ref = selection.first else {
+            previewURL = nil
+            return
+        }
+        if ref != previewed { show(inPreview: ref) }
     }
 
     // MARK: - Tabs
@@ -2084,6 +2108,10 @@ final class AppModel: ObservableObject {
         // relieved of what has actually gone, and the table is handed the
         // same rows less those — which it can take out without redrawing the
         // rest.
+        // Asked before the selection is relieved of what went: a panel that
+        // was showing the selected row shuts as that row leaves the
+        // selection, and is then no longer showing anything to ask about.
+        let wasShowingWhatWent = previewed?.isStale == true
         selection = selection.filter { !$0.isStale }
         // A mark on something that went has done its job; one on something
         // that could not be removed stays, to be tried again or taken off.
@@ -2096,7 +2124,6 @@ final class AppModel: ObservableObject {
         // put back up below, on whatever the selection moves to: working
         // down a list with it open, looking and then removing, is what it is
         // for.
-        let wasShowingWhatWent = previewed?.isStale == true
         if wasShowingWhatWent { previewURL = nil }
         sharedStorageCache = [:]
         treeRevision += 1

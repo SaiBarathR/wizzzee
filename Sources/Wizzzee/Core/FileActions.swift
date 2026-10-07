@@ -71,6 +71,19 @@ enum FileActions {
         )
     }
 
+    /// Whether reading what is at `path` would download it: the file there,
+    /// or the file a link there leads to, is one a cloud provider is
+    /// holding.
+    ///
+    /// Asked of the disk as it is now, and through any link. The scan's own
+    /// note of it is as old as the scan, and is of the link and not of what
+    /// the link is to — and what reads a link reads what it is to.
+    static func isOnlineOnly(_ path: String) -> Bool {
+        var info = stat()
+        // `SF_DATALESS`. Looking at the flags brings nothing down.
+        return stat(path, &info) == 0 && info.st_flags & 0x4000_0000 != 0
+    }
+
     /// Paths that System Integrity Protection makes read-only, so the app can
     /// explain up front rather than surfacing a bare EPERM.
     private static let protectedPrefixes = [
