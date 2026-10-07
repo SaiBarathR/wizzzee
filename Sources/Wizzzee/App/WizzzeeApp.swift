@@ -67,6 +67,12 @@ struct WizzzeeApp: App {
                 .keyboardShortcut(.delete, modifiers: [.command, .option])
                 .disabled(!model.canUseDeleteKeys)
             }
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                // The filter is on one tab of three; this is on all of them.
+                Button("Find…") { model.beginSearch() }
+                    .keyboardShortcut("f", modifiers: .command)
+            }
             CommandGroup(after: .toolbar) {
                 // The tab strip, which only ever answered a click.
                 ForEach(MainTab.allCases, id: \.self) { tab in

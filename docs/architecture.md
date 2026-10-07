@@ -156,7 +156,11 @@ there too rather than in the views, so `--selftest` can hold them to the
 measure on show.
 
 Two pieces of background work read the tree off the main thread — the scan
-itself, and the File View's largest-files walk. Deletes mutate the tree in place
+itself, and the File View's walk. With nothing typed that walk is the largest
+files, and a file too small to make the list is passed over without a look.
+With a search in the filter (`SearchQuery`) every file and folder is held up to
+it, listed or not, because how many matched and what they come to is half of
+what was asked; that is the one thing a search costs over the plain list. Deletes mutate the tree in place
 (unlinking a node and subtracting its bytes from every ancestor) instead of
 rescanning, which means a mutation must never overlap a read. Both reads go
 through one serial `treeQueue`, and a delete cancels any pending walk and then

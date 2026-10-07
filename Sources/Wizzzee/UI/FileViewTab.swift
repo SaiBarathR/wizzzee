@@ -13,6 +13,17 @@ struct FileViewTab: View {
         // Leaving the tab takes the field away without it ever losing focus,
         // which would leave the delete keys off for good.
         .onDisappear { model.isEditingFilter = false }
+        // ⌘F. From another tab this view is not there yet when it is pressed,
+        // so it asks on arriving as well as on being told.
+        .onAppear { focusFilterIfAsked() }
+        .onChange(of: model.filterFocusCount) { focusFilterIfAsked() }
+    }
+
+    private func focusFilterIfAsked() {
+        guard model.takeFilterFocus() else { return }
+        // On the next turn: a field that has only just been put on screen is
+        // not yet something the keyboard can be given to.
+        DispatchQueue.main.async { filterHasFocus = true }
     }
 
     private var filterBar: some View {
@@ -22,7 +33,7 @@ struct FileViewTab: View {
                 .font(.system(size: 11))
 
             TextField(
-                "Filter by name, or type a / to match the whole path",
+                "Search names — or add >1gb, older:1y, ext:dmg, kind:folder",
                 text: $model.fileQuery
             )
             .textFieldStyle(.roundedBorder)
@@ -30,13 +41,22 @@ struct FileViewTab: View {
             .focused($filterHasFocus)
             .onChange(of: filterHasFocus) { model.isEditingFilter = filterHasFocus }
             .onChange(of: model.fileQuery) { model.refreshFileRows() }
+            .onExitCommand { model.clearSearch() }
+            .help(Self.syntax)
 
             if !model.fileQuery.isEmpty {
-                Button("Clear") {
-                    model.fileQuery = ""
-                    model.refreshFileRows(immediately: true)
-                }
-                .buttonStyle(.borderless)
+                Button("Clear") { model.clearSearch() }
+                    .buttonStyle(.borderless)
+            }
+
+            // A filter that could not be read finds nothing, and this is
+            // where it says which one.
+            if let unread = model.fileSearch.unreadable.first {
+                Text("Can’t read “\(unread)”")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help(Self.syntax)
             }
 
             // The list is one type's files and no others while this is up.
@@ -51,14 +71,54 @@ struct FileViewTab: View {
             Text(summary)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+                .help(
+                    model.fileTally == nil
+                        ? ""
+                        : "Everything the search found, listed or not. A match "
+                            + "inside a folder that also matched is counted, and "
+                            + "adds nothing to the size."
+                )
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.bar)
     }
 
+    /// What can be typed, for the field's tooltip.
+    private static let syntax = """
+        Words are looked for in names, all of them, in any order. \
+        A word with a / in it is looked for in the whole path, and "two words" \
+        in quotes are one.
+
+        >1gb  <500kb — bigger or smaller than
+        older:1y  newer:30d — by when last modified (d, w, m, y)
+        ext:dmg — one file type (ext:none for none)
+        kind:folder  kind:file — folders are found by name unless told otherwise
+        """
+
     private var summary: String {
         guard model.result != nil else { return "" }
+        // Something was asked for, so everything that matched is counted:
+        // the rows are the largest of it, and the figure is for all of it.
+        if !model.fileSearch.isEmpty {
+            // Nothing is said until the count is in. Adding up the rows on
+            // show in the meantime gave a figure for some of what matched,
+            // with a folder and the things listed inside it added twice.
+            guard let tally = model.fileTally, !model.isFilteringFiles else {
+                return "counting…"
+            }
+            if tally.matches == 0 { return "nothing found" }
+            // Called by what all of it is, not by what the largest are.
+            let noun =
+                tally.folders == 0
+                ? "file" : (tally.folders == tally.matches ? "folder" : "item")
+            let found = ByteFormat.counted(tally.matches, noun)
+            let shown = model.fileRows.count
+            let count =
+                tally.matches > shown
+                ? "largest \(ByteFormat.count(shown)) of \(found)" : found
+            return "\(count) • \(ByteFormat.decimal(tally.bytes))"
+        }
         let shown = model.fileRows.count
         // Totalled with the metric the rows were ranked by, so the figure agrees
         // with the column the list is sorted on rather than quietly reporting
