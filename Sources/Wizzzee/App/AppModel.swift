@@ -733,7 +733,16 @@ final class AppModel: ObservableObject {
         for index in dir.files.indices where !dir.files[index].isRemoved {
             children.append(NodeRef(dir: dir, fileIndex: index))
         }
-        children.sort { sort.compare($0, $1) == .orderedAscending }
+        // Rows the order can't tell apart stay as they were listed. Left to
+        // the sort, which promises nothing about them, a delete elsewhere in
+        // the folder could swap two files of one size.
+        children = children.enumerated().sorted { a, b in
+            switch sort.compare(a.element, b.element) {
+            case .orderedAscending: return true
+            case .orderedDescending: return false
+            case .orderedSame: return a.offset < b.offset
+            }
+        }.map(\.element)
 
         for (offset, child) in children.enumerated() {
             let last = offset == children.count - 1
@@ -821,7 +830,7 @@ final class AppModel: ObservableObject {
                     self.fileQuery == query,
                     self.treeRevision == revision, self.result === source
                 else { return }
-                self.fileRows = rows.sorted(using: self.fileSort)
+                self.fileRows = self.inFileOrder(rows)
                 self.isFilteringFiles = false
             }
         }
@@ -833,7 +842,25 @@ final class AppModel: ObservableObject {
     }
 
     func resortFileRows() {
-        fileRows = fileRows.sorted(using: fileSort)
+        fileRows = inFileOrder(fileRows)
+    }
+
+    /// `rows` in the order the File View is sorted by, with those it can't
+    /// tell apart left in the order they came in — which, fresh from a walk,
+    /// is the order the walk found them in. The sort alone promises nothing
+    /// about rows that compare equal, and files of one size are common.
+    private func inFileOrder(_ rows: [FileRow]) -> [FileRow] {
+        let comparators = fileSort
+        return rows.enumerated().sorted { a, b in
+            for comparator in comparators {
+                switch comparator.compare(a.element, b.element) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame: continue
+                }
+            }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     // MARK: - Treemap visibility

@@ -67,6 +67,7 @@ enum SelfTest {
         testAPartialDeletePastPathMaxShowsWhatIsLeft()
         testADeleteCanBeStoppedPartWay()
         testRowsKeepTheirPlacesAcrossADelete()
+        testEqualFilesKeepTheirOrderAcrossADelete()
         testTheFileListKeepsItsPlaceAcrossADelete()
         testTheDeleteLineStaysWithinWhatWasCounted()
         testAScanCannotStartDuringADelete()
@@ -2852,6 +2853,84 @@ enum SelfTest {
             otherRef.isStale && z.isStale && otherRef.path.isEmpty
                 && model.distinctTargets([otherRef, z]).isEmpty,
             "path \(otherRef.path)"
+        )
+    }
+
+    /// Files of one size, which is most files in a folder of small ones. The
+    /// File View lists the largest thousand, and which of a run of equals made
+    /// the cut — and in what order — used to depend on how the heap that picks
+    /// them happened to be laid out. Deleting one file anywhere reshuffled
+    /// the rest. They are taken in the order the walk meets them, so the list
+    /// after a delete is the list before, less what went, with the next in
+    /// line at the end.
+    //
+    // 1,100 files of 100 bytes at the top, met first; big/ holds fifty larger
+    // ones, each a different size, met after them and pushing equals out.
+    @MainActor
+    private static func testEqualFilesKeepTheirOrderAcrossADelete() {
+        let base = scratch("equals")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("big"),
+                withIntermediateDirectories: true
+            )
+            for i in 0..<1_100 {
+                try write(base.appendingPathComponent("same\(i).dat"), bytes: 100)
+            }
+            for i in 0..<50 {
+                try write(
+                    base.appendingPathComponent("big/b\(i).dat"),
+                    bytes: 100_000 + i * 10_000
+                )
+            }
+        } catch {
+            check("the equal-files fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let big = result.root.subdir(named: "big") else {
+            check("the equal-files fixture scanned", false, "missing folder")
+            return
+        }
+        model.tab = .files
+        pumpUntilFileRowsSettle(model, expecting: 1_000)
+        let filesBefore = model.fileRows.map(\.ref)
+        let treeBefore = model.treeRows.map(\.ref)
+        guard filesBefore.count == 1_000,
+            filesBefore.prefix(50).allSatisfy({ $0.dir === big })
+        else {
+            check("the list leads with the fifty larger files", false,
+                "\(filesBefore.count) rows")
+            return
+        }
+
+        // One of the larger ones goes, which lets one more equal in.
+        let gone = filesBefore[10]
+        trash(model, [gone])
+        pumpUntilFileRowsSettle(model, expecting: 1_000)
+        let filesAfter = model.fileRows.map(\.ref)
+
+        check(
+            "the list after is the list before, less the file that went",
+            filesAfter.count == 1_000
+                && Array(filesAfter.dropLast()) == filesBefore.filter { $0 != gone },
+            "\(zip(filesAfter, filesBefore.filter { $0 != gone }).prefix { $0 == $1 }.count)"
+                + " rows in from the top before the two part company"
+        )
+        check(
+            "with the next equal in line added at the end",
+            filesAfter.last.map { !filesBefore.contains($0) && $0.dir === result.root }
+                == true,
+            "last row is \(filesAfter.last?.name ?? "missing")"
+        )
+        check(
+            "and the tree table's rows, all one size, are in the order they were",
+            model.treeRows.map(\.ref) == treeBefore.filter { $0 != gone },
+            "the rows changed places"
         )
     }
 

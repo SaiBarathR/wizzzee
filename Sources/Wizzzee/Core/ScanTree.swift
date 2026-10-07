@@ -849,47 +849,76 @@ final class ScanResult {
 }
 
 /// Bounded min-heap that keeps the `limit` largest items seen.
+///
+/// Of items the same size, the ones seen first are the ones kept, and they
+/// come back out in the order they were seen. Which of them made the cut used
+/// to depend on how the heap happened to be laid out, so removing one file
+/// from a scan could change which of its equals were listed and in what
+/// order — in a folder of small files, where most are the same few sizes, the
+/// File View reshuffled on every delete. A walk visits what is left in the
+/// same order as before, so with this the list is what it was, less what
+/// went, with the next in line added at the end.
 private struct SizeHeap {
     private var sizes: [UInt64] = []
+    /// When each was seen: its place among everything offered.
+    private var orders: [Int] = []
     private var refs: [NodeRef] = []
+    private var seen = 0
     private let limit: Int
 
     init(limit: Int) {
         self.limit = max(1, limit)
         sizes.reserveCapacity(self.limit + 1)
+        orders.reserveCapacity(self.limit + 1)
         refs.reserveCapacity(self.limit + 1)
     }
 
     /// Cheap pre-filter: skip work for items that cannot displace the minimum.
+    /// One the same size as the minimum can't: it was seen later.
     func wouldAccept(_ size: UInt64) -> Bool {
         sizes.count < limit || size > sizes[0]
     }
 
     mutating func insert(_ ref: NodeRef, size: UInt64) {
+        seen += 1
         if sizes.count < limit {
             sizes.append(size)
+            orders.append(seen)
             refs.append(ref)
             siftUp(from: sizes.count - 1)
         } else if size > sizes[0] {
             sizes[0] = size
+            orders[0] = seen
             refs[0] = ref
             siftDown(from: 0)
         }
     }
 
     func sortedDescending() -> [NodeRef] {
-        zip(sizes, refs)
-            .sorted { $0.0 > $1.0 }
-            .map(\.1)
+        sizes.indices
+            .sorted { isBehind($1, $0) }
+            .map { refs[$0] }
+    }
+
+    /// Whether the item at `a` ranks behind the one at `b`: smaller, or the
+    /// same size and seen later. The root is the one behind all the rest,
+    /// which is the one to go when something bigger turns up.
+    private func isBehind(_ a: Int, _ b: Int) -> Bool {
+        sizes[a] != sizes[b] ? sizes[a] < sizes[b] : orders[a] > orders[b]
+    }
+
+    private mutating func swapAt(_ a: Int, _ b: Int) {
+        sizes.swapAt(a, b)
+        orders.swapAt(a, b)
+        refs.swapAt(a, b)
     }
 
     private mutating func siftUp(from start: Int) {
         var child = start
         while child > 0 {
             let parent = (child - 1) / 2
-            if sizes[child] >= sizes[parent] { break }
-            sizes.swapAt(child, parent)
-            refs.swapAt(child, parent)
+            if !isBehind(child, parent) { break }
+            swapAt(child, parent)
             child = parent
         }
     }
@@ -899,13 +928,12 @@ private struct SizeHeap {
         while true {
             let left = parent * 2 + 1
             let right = left + 1
-            var smallest = parent
-            if left < sizes.count, sizes[left] < sizes[smallest] { smallest = left }
-            if right < sizes.count, sizes[right] < sizes[smallest] { smallest = right }
-            if smallest == parent { return }
-            sizes.swapAt(parent, smallest)
-            refs.swapAt(parent, smallest)
-            parent = smallest
+            var last = parent
+            if left < sizes.count, isBehind(left, last) { last = left }
+            if right < sizes.count, isBehind(right, last) { last = right }
+            if last == parent { return }
+            swapAt(parent, last)
+            parent = last
         }
     }
 }
