@@ -87,14 +87,12 @@ struct ExtensionLegend: View {
     /// A computed property here re-sorted every extension in the scan —
     /// thousands on a real disk — on each body evaluation, which this view gets
     /// for any change published by the model, hovering the treemap included.
-    /// The allocated order is instead derived once per scan and cached.
+    /// Both orders are instead kept by the scan result, which re-ranks them
+    /// when a delete changes what the types hold.
     private var stats: [ExtensionStat] {
         guard let result = model.result else { return [] }
-        if model.sizeMetric == .logical {
-            // Already stored in descending size order.
-            return Array(result.extensionStats.prefix(40))
-        }
-        return result.topByAllocated
+        return model.sizeMetric == .logical
+            ? result.topBySize : result.topByAllocated
     }
 
     private func weight(_ stat: ExtensionStat) -> UInt64 {
@@ -107,7 +105,7 @@ struct ExtensionLegend: View {
                 Text("File Types")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
-                if let total = model.result?.extensionStats.count, total > stats.count {
+                if let total = model.result?.typeCount, total > stats.count {
                     Text("top \(stats.count) of \(ByteFormat.count(total))")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
@@ -166,7 +164,7 @@ struct ExtensionLegend: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .trailing)
-                            .help("\(ByteFormat.count(stat.count)) files")
+                            .help(ByteFormat.counted(stat.count, "file"))
                     }
                     .width(min: 44, ideal: 50, max: 70)
                 }

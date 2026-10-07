@@ -1054,6 +1054,11 @@ final class AppModel: ObservableObject {
         for promoted in promotions {
             add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
         }
+        // The File Types panel is totalled per type at scan time, so what is
+        // leaving has to come off those totals too, or it goes on listing
+        // files that are gone against a total that no longer includes them.
+        result?.forgetTypes(under: folders)
+        result?.rankTypes()
         for folder in folders { detachDirectory(folder) }
 
         // Removing a file shifts the indices of its siblings, invalidating any
@@ -1094,6 +1099,7 @@ final class AppModel: ObservableObject {
                 unlinking: unlinked
             )
             result?.forgetDuplicate(size: file.size)
+            result?.forgetType(of: file)
             subtract(size: 0, alloc: 0, files: 1, dirs: 0, from: dir)
             dir.files.remove(at: index)
             return
@@ -1117,6 +1123,7 @@ final class AppModel: ObservableObject {
             add(size: promoted.size, alloc: promoted.alloc, to: promoted.dir)
         }
 
+        result?.forgetType(of: file)
         subtract(size: file.size, alloc: file.alloc, files: 1, dirs: 0, from: dir)
         dir.files.remove(at: index)
     }

@@ -35,6 +35,7 @@ enum SelfTest {
         print("fixture: \(root.path)\n")
 
         testFileEntryStaysNarrow()
+        testCountsAreWordedInTheSingular()
         testScanTotals(root)
         testSymlinkedRootIsScanned(root)
         testHardLinks(root)
@@ -59,12 +60,14 @@ enum SelfTest {
         testStaleReferencesSurviveADelete(batchRoot)
         testFileRowsNeverOutliveADelete(batchRoot)
         testFileRowsDontOutliveTheirScan(batchRoot)
+        testARefFromAReplacedScanIsInert(batchRoot)
         testAncestorDedupe(batchRoot)
         testDeletingTheCountedNameOfAPairPromotesTheOther()
         testDeletingTheDuplicateNameFreesTheOther()
         testDeletingAFolderHandsItsHardLinksOn()
         testAFolderPromisesOnlyWhatDeletingItFrees()
         testATrashedNameStillSharesItsStorage()
+        testFileTypesFollowADelete()
         testDeletingALinkWithNoPartnerInTreeSubtracts()
         testTreemapLayoutIsFencedAgainstDeletes()
         testAQueuedLayoutPinsTheFoldersAboveItsRoot()
@@ -1366,6 +1369,70 @@ enum SelfTest {
         )
     }
 
+    /// SwiftUI keeps a context menu's content after the menu has closed and
+    /// re-runs its body whenever the model publishes. The references in it can
+    /// be from a scan that has since been replaced: they keep their own folder
+    /// alive and nothing above it. Asking one for its path walked up through
+    /// folders that had been freed — found in the released 0.3.2 as a crash a
+    /// few clicks after a rescan, once the allocator had reused that memory.
+    ///
+    /// A folder's link to its parent is weak now, so a parent that has gone
+    /// reads as gone, and a reference cut off from its scan's root resolves to
+    /// no path at all rather than to a fragment of one.
+    @MainActor
+    private static func testARefFromAReplacedScanIsInert(_ root: URL) {
+        final class Watch { weak var node: DirNode? }
+        let model = AppModel()
+        model.customFolder = root.path
+        let replaced = Watch()
+        // Only what a closed context menu holds on to leaves this scope: a
+        // folder two levels down, and a file in it.
+        func kept() -> (folder: NodeRef, file: NodeRef)? {
+            guard let first = loadSynchronously(into: model),
+                let inner = first.root.subdir(named: "nest")?.subdir(named: "inner"),
+                !inner.files.isEmpty
+            else { return nil }
+            replaced.node = first.root
+            return (NodeRef(inner), NodeRef(dir: inner, fileIndex: 0))
+        }
+        guard let refs = kept() else {
+            check("the replaced-scan fixture scanned", false, "missing nest/inner")
+            return
+        }
+        check(
+            "a reference into a live scan resolves to its full path",
+            refs.folder.path.hasSuffix("/nest/inner")
+                && refs.file.path.hasSuffix("/nest/inner/deep.dat"),
+            "got “\(refs.folder.path)” and “\(refs.file.path)”"
+        )
+
+        guard let second = loadSynchronously(into: model) else { return }
+        pumpUntilFileRowsSettle(model, expecting: second.root.totalFiles)
+        // The premise: nothing else is holding the old tree up.
+        check(
+            "the scan that was replaced has been let go",
+            replaced.node == nil,
+            "something still holds it, so the checks below prove nothing"
+        )
+        check(
+            "a folder kept from it reads the folder above it as gone",
+            refs.folder.dir.parent == nil,
+            "it still points at where its parent used to be"
+        )
+        check(
+            "and resolves to no path, rather than to a fragment of one",
+            refs.folder.path.isEmpty && refs.file.path.isEmpty,
+            "got “\(refs.folder.path)” and “\(refs.file.path)”"
+        )
+        check(
+            "so nothing offers to delete it",
+            model.deletionRefusal(for: refs.folder) != nil
+                && model.deletionRefusal(for: refs.file) != nil
+                && model.distinctTargets([refs.folder, refs.file]).isEmpty,
+            "a reference into a discarded scan was accepted as a target"
+        )
+    }
+
     /// Whether `node` is `ancestor` or sits beneath it. Walks down rather than up,
     /// so it never reads a `parent` that a discarded scan may have left dangling.
     private static func isWithin(_ node: DirNode, _ ancestor: DirNode) -> Bool {
@@ -1772,6 +1839,25 @@ enum SelfTest {
             "got \(MemoryLayout<FileEntry>.stride), which is "
                 + "\((MemoryLayout<FileEntry>.stride - 56) * 4_000_000 / 1_000_000)"
                 + " MB more on a 4M-file scan"
+        )
+    }
+
+    /// A folder holding one file was offered for deletion as "… and 1 items
+    /// inside it?", and a scan of one file reported "1 files, 1 folders".
+    private static func testCountsAreWordedInTheSingular() {
+        check(
+            "exactly one of something is worded in the singular",
+            ByteFormat.counted(1, "item") == "1 item"
+                && ByteFormat.counted(1, "folder") == "1 folder",
+            "got “\(ByteFormat.counted(1, "item"))” and "
+                + "“\(ByteFormat.counted(1, "folder"))”"
+        )
+        check(
+            "none, and more than one, in the plural",
+            ByteFormat.counted(0, "item") == "0 items"
+                && ByteFormat.counted(2, "file") == "2 files",
+            "got “\(ByteFormat.counted(0, "item"))” and "
+                + "“\(ByteFormat.counted(2, "file"))”"
         )
     }
 
@@ -2631,6 +2717,125 @@ enum SelfTest {
                     + "\(left.map(\.isDuplicateLink)), trio \(trio.totalSize)"
             )
         }
+    }
+
+    /// The File Types panel was worked out once per scan and never again. A
+    /// delete moved every total in the tree and left the panel quoting types,
+    /// sizes and counts for files that were gone — measured against the new,
+    /// smaller total, so one deleted 1.5 GB file read as "31789.1 %" of a scan
+    /// that no longer held it.
+    ///
+    /// Checked against ground truth: after each removal the per-type figures
+    /// have to be exactly what a fresh scan of the same folder reports.
+    @MainActor
+    private static func testFileTypesFollowADelete() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-types-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            for folder in ["a", "b", "c"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            // One file with a name of each of two types, in different folders,
+            // so whichever the scan counted, removing it moves bytes between
+            // types as well as between folders.
+            try write(base.appendingPathComponent("a/one.dat"), bytes: 9_000)
+            try FileManager.default.linkItem(
+                at: base.appendingPathComponent("a/one.dat"),
+                to: base.appendingPathComponent("b/one.log")
+            )
+            try write(base.appendingPathComponent("a/two.dat"), bytes: 4_000)
+            try write(base.appendingPathComponent("b/three.log"), bytes: 2_000)
+            try write(base.appendingPathComponent("c/four.txt"), bytes: 1_000)
+            try write(base.appendingPathComponent("c/five.bin"), bytes: 6_000)
+        } catch {
+            check("the file-types fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+
+        // Per type, for the types that still have a file: size, on disk, count.
+        func types(_ scan: ScanResult) -> [String: [UInt64]] {
+            var table: [String: [UInt64]] = [:]
+            for stat in scan.extensionStats where stat.count > 0 {
+                table[stat.ext] = [stat.size, stat.alloc, UInt64(stat.count)]
+            }
+            return table
+        }
+        func describe(_ table: [String: [UInt64]]) -> String {
+            table.keys.sorted().map { "\($0)=\(table[$0] ?? [])" }
+                .joined(separator: " ")
+        }
+        // While both names of the hard-linked file are in the tree, which of
+        // its two types gets the bytes is whichever a scan worker reached
+        // first, and two scans need not agree. Until one name is gone the
+        // comparison is of what cannot differ: every type's count, and the
+        // bytes summed over all of them.
+        func agrees(_ what: String, exactly: Bool = true) {
+            let panel = types(result)
+            let fresh = types(scan(base))
+            func counts(_ t: [String: [UInt64]]) -> [String: UInt64] {
+                t.mapValues { $0[2] }
+            }
+            func bytes(_ t: [String: [UInt64]]) -> [UInt64] {
+                [t.values.reduce(0) { $0 + $1[0] }, t.values.reduce(0) { $0 + $1[1] }]
+            }
+            check(
+                what,
+                exactly
+                    ? panel == fresh
+                    : counts(panel) == counts(fresh) && bytes(panel) == bytes(fresh),
+                "panel \(describe(panel)), a fresh scan \(describe(fresh))"
+            )
+        }
+
+        agrees("the file types start out as a fresh scan reports them", exactly: false)
+
+        guard let c = result.root.subdir(named: "c"),
+            let four = c.files.firstIndex(where: { $0.name == "four.txt" }),
+            let a = result.root.subdir(named: "a")
+        else {
+            check("the file-types fixture scanned", false, "missing folders")
+            return
+        }
+        deletePermanently(model, [NodeRef(dir: c, fileIndex: four)])
+        agrees("deleting the only file of a type takes that type away", exactly: false)
+        check(
+            "and it is gone from the panel's rankings, not left there at nothing",
+            result.stat(for: "txt")?.count == 0
+                && !result.topBySize.contains { $0.ext == "txt" }
+                && !result.topByAllocated.contains { $0.ext == "txt" }
+                && result.typeCount == 3,
+            "top by size \(result.topBySize.map(\.ext)), "
+                + "\(result.typeCount) types counted"
+        )
+
+        deletePermanently(model, [NodeRef(a)])
+        agrees("deleting a folder takes its files out of their types")
+        check(
+            "and a hard link's bytes move to the type of the name that is left",
+            result.stat(for: "log")?.size == 11_000
+                && (result.stat(for: "dat")?.count ?? 0) == 0,
+            "log is \(result.stat(for: "log")?.size ?? 0) bytes, "
+                + "dat still has \(result.stat(for: "dat")?.count ?? 0) files"
+        )
+
+        trash(model, [NodeRef(c)])
+        agrees("moving a folder to the Trash does the same")
+        check(
+            "leaving the one type that still has files",
+            result.topBySize.map(\.ext) == ["log"]
+                && result.topByAllocated.map(\.ext) == ["log"]
+                && result.typeCount == 1,
+            "top by size \(result.topBySize.map(\.ext)), "
+                + "\(result.typeCount) types counted"
+        )
     }
 
     /// Two files in one folder, trashed together. Removing an entry renumbers

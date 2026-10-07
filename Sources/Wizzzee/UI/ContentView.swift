@@ -78,7 +78,7 @@ struct ContentView: View {
         guard let target = targets.first else { return "" }
         if target.isDirectory {
             return "Permanently delete “\(target.name)” and "
-                + "\(ByteFormat.count(target.dir.totalItems)) items inside it?"
+                + "\(ByteFormat.counted(target.dir.totalItems, "item")) inside it?"
         }
         return "Permanently delete “\(target.name)”?"
     }

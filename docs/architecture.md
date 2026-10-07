@@ -82,8 +82,11 @@ parent. At four million files, one object per file would cost more in allocation
 headers and retain/release traffic than the data itself. The array form keeps a
 full-disk scan in a few hundred megabytes.
 
-`DirNode.parent` is `unowned`: the root retains the tree downward, so a strong
-back-reference would cycle and leak the whole tree on every rescan.
+`DirNode.parent` is `weak`: the root retains the tree downward, so a strong
+back-reference would cycle and leak the whole tree on every rescan. It is weak
+rather than unowned because the UI holds nodes past the life of their scan — a
+closed context menu keeps its references — and a parent that has gone has to
+read as gone, not as whatever now occupies its memory.
 
 `NodeRef` is the shared currency of the UI — it points at either a directory or
 one file within a directory (`fileIndex == -1` means the directory itself), so
