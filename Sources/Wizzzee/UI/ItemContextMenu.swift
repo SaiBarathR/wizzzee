@@ -25,6 +25,7 @@ struct ItemContextMenu: View {
         Button(ref.isDirectory ? "Open Folder" : "Open") {
             FileActions.open(ref.path)
         }
+        Button("Quick Look") { model.preview(ref) }
         Button("Open in Terminal") { FileActions.openTerminal(at: ref.path) }
 
         Divider()

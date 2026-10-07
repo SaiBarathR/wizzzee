@@ -1,3 +1,4 @@
+import QuickLook
 import SwiftUI
 
 struct ContentView: View {
@@ -41,6 +42,7 @@ struct ContentView: View {
         // columns instead of compressing them, so this is the real floor.
         // Enforced as the window minimum via .windowResizability(.contentMinSize).
         .frame(minWidth: 1160, minHeight: 660)
+        .quickLookPreview($model.previewURL)
         .alert(
             model.actionError ?? "Something went wrong",
             isPresented: Binding(
