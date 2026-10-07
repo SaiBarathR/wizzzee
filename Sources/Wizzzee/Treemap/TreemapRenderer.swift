@@ -18,8 +18,22 @@ enum TreemapRenderer {
     /// How much a tile's 1px border is darkened, to separate adjacent tiles.
     private static let edgeShade = 0.62
     private static let background: UInt32 = 0x0F_1114
+    /// How far a tile outside the type in focus is set back: how much of its
+    /// colour goes to grey, and how much of its light is kept.
+    private static let setBackGrey = 0.8
+    private static let setBackLight = 0.3
 
-    static func render(model: TreemapModel, scale: CGFloat) -> CGImage? {
+    /// `focus` is the colour index of the one file type to leave lit; every
+    /// other tile is drawn set back. Nil lights them all.
+    ///
+    /// Done here and not as an overlay in the view: that is drawn again on
+    /// every move of the pointer, and a map can hold two hundred thousand
+    /// tiles. In the bitmap it costs nothing that was not already being paid.
+    static func render(
+        model: TreemapModel,
+        scale: CGFloat,
+        focus: Int? = nil
+    ) -> CGImage? {
         let width = Int((model.size.width * scale).rounded())
         let height = Int((model.size.height * scale).rounded())
         guard width > 0, height > 0 else { return nil }
@@ -31,10 +45,13 @@ enum TreemapRenderer {
         let inverseScale = 1.0 / Double(scale)
 
         for cell in model.cells {
-            let base =
+            var base =
                 cell.colorIndex < 0
                 ? TreemapPalette.collapsedFolder
                 : TreemapPalette.rgb(cell.colorIndex)
+            // A folder drawn as one tile is no one type, so it goes with the
+            // rest: lighting it for what might be inside would be a guess.
+            if let focus, cell.colorIndex != focus { base = setBack(base) }
 
             // Pixel bounds, clamped to the bitmap.
             let x0 = max(0, Int((cell.rect.minX * scale).rounded(.down)))
@@ -116,6 +133,18 @@ enum TreemapRenderer {
             shouldInterpolate: false,
             intent: .defaultIntent
         )
+    }
+
+    /// A tile's colour once it is out of focus: mostly grey, and dim. Some of
+    /// the hue is kept so the map underneath is still the map it was.
+    static func setBack(
+        _ color: (r: Double, g: Double, b: Double)
+    ) -> (r: Double, g: Double, b: Double) {
+        let grey = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b
+        func mixed(_ channel: Double) -> Double {
+            (channel + (grey - channel) * setBackGrey) * setBackLight
+        }
+        return (mixed(color.r), mixed(color.g), mixed(color.b))
     }
 
     /// Packs into the 0xXXRRGGBB layout that `noneSkipFirst` + little-endian

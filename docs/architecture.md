@@ -142,6 +142,11 @@ This sounds expensive and is not: the tiles tile the canvas, so the total work i
 about one pass over the bitmap no matter how many files the scan found. A
 million-file treemap costs the same as a hundred-file one.
 
+A file type picked out in the legend is drawn here as well: every tile of
+another type has most of its colour taken out and is darkened, in the bitmap.
+As an overlay in the view it would be filled again on every move of the
+pointer, once per tile, and a map can hold two hundred thousand of them.
+
 ## App
 
 `AppModel` is the single `@MainActor` owner of scan state, derived table rows,

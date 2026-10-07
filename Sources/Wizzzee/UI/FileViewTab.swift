@@ -39,6 +39,9 @@ struct FileViewTab: View {
                 .buttonStyle(.borderless)
             }
 
+            // The list is one type's files and no others while this is up.
+            TypeFocusChip(model: model)
+
             if model.isFilteringFiles {
                 ProgressView().controlSize(.small)
             }

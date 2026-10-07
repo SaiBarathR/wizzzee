@@ -23,6 +23,7 @@ enum UIShot {
         var showTreemap = true
         var metric = SizeMetric.allocated
         var markCount = 0
+        var focusType: String?
 
         var index = 0
         while index < arguments.count {
@@ -79,6 +80,17 @@ enum UIShot {
                 index += 2
             case "--zoom":
                 zoomDepth = Int(next ?? "1") ?? 1
+                index += 2
+            case "--type":
+                // A row of File Types is picked by clicking it. Given as the
+                // legend shows it or without the dot; "none" is the files
+                // that have no extension.
+                if let next {
+                    let name = next.lowercased()
+                    focusType =
+                        name == "none"
+                        ? "" : String(name.drop(while: { $0 == "." }))
+                }
                 index += 2
             case "--metric":
                 // The Size / On Disk picker, which is otherwise only reachable
@@ -177,6 +189,13 @@ enum UIShot {
             // Not the largest, so the marked tiles are not most of the map.
             model.setMarked(Set(children.dropFirst().prefix(markCount)), true)
             model.showsMarks = true
+        }
+        if let focusType {
+            model.focusType(focusType)
+            guard model.focusedType == focusType else {
+                print("no files of type “\(focusType)” in this scan")
+                exit(2)
+            }
         }
         if tab == .files { model.refreshFileRows(immediately: true) }
 

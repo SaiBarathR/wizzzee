@@ -89,13 +89,14 @@ Wizzzee --uishot --tab files --path /System/Library \
 | `--metric size\|disk` | `disk` | Which measure is on show, as the Size / On Disk control sets it |
 | `--select-largest` | off | Select the biggest item before rendering |
 | `--mark N` | `0` | Mark N items for removal and open the list of them |
+| `--type EXT` | none | Put one file type in focus, as clicking its row in File Types does. With or without the dot; `none` is the files that have no extension |
 | `--no-access-banner` | off | Hide the Full Disk Access warning |
 | `--no-treemap` | off | Hide the treemap, as the View menu's Hide Treemap does |
 
 `--tab` accepts either the short name or the display title, matched by prefix,
 so `files`, `file`, and `"file view"` all select the File View. An unrecognized
 value exits with status 2 rather than silently falling back, and so does an
-unrecognized `--metric`.
+unrecognized `--metric`, or a `--type` the scan has no files of.
 
 A command-line build can never hold Full Disk Access, so the warning banner is
 always up; `--no-access-banner` produces the layout a user who has granted it

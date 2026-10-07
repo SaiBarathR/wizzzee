@@ -22,6 +22,8 @@ struct TreemapCanvas: NSViewRepresentable {
     /// What is marked for removal, which the map draws hatched.
     let marks: Set<NodeRef>
     let onMark: (NodeRef) -> Void
+    /// The colour index of the one file type to leave lit, or nil for all.
+    var focus: Int? = nil
 
     func makeNSView(context: Context) -> TreemapNSView {
         let view = TreemapNSView()
@@ -46,7 +48,7 @@ struct TreemapCanvas: NSViewRepresentable {
         view.onMark = onMark
         view.marks = marks
         view.selection = selection
-        view.apply(root: root, metric: metric, revision: revision)
+        view.apply(root: root, metric: metric, revision: revision, focus: focus)
     }
 }
 
@@ -101,6 +103,8 @@ final class TreemapNSView: NSView {
     private var ancestors: [DirNode] = []
     private var metric: SizeMetric = .logical
     private var revision = -1
+    /// The file type left lit, as the colour index its tiles carry.
+    private var focus: Int?
 
     private var model = TreemapModel()
     /// The tree revision the layout in `model` was built from.
@@ -146,14 +150,21 @@ final class TreemapNSView: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func apply(root: DirNode?, metric: SizeMetric, revision: Int) {
+    func apply(
+        root: DirNode?,
+        metric: SizeMetric,
+        revision: Int,
+        focus: Int? = nil
+    ) {
         let changed =
-            self.root !== root || self.metric != metric || self.revision != revision
+            self.root !== root || self.metric != metric
+            || self.revision != revision || self.focus != focus
         guard changed else { return }
         self.root = root
         self.ancestors = root.map { TreemapLayout.ancestors(of: $0) } ?? []
         self.metric = metric
         self.revision = revision
+        self.focus = focus
         rebuild()
     }
 
@@ -239,6 +250,7 @@ final class TreemapNSView: NSView {
         let metric = self.metric
         let ancestors = self.ancestors
         let revision = self.revision
+        let focus = self.focus
         let scale = window?.backingScaleFactor ?? 2
 
         queue.async { [weak self] in
@@ -248,7 +260,11 @@ final class TreemapNSView: NSView {
                 size: size,
                 metric: metric
             )
-            let rendered = TreemapRenderer.render(model: built, scale: scale)
+            let rendered = TreemapRenderer.render(
+                model: built,
+                scale: scale,
+                focus: focus
+            )
             DispatchQueue.main.async {
                 guard let self, token == self.renderToken else { return }
                 // Both land together, so the borders and labels drawn from the
