@@ -3,12 +3,16 @@ import SwiftUI
 /// Flat list of the biggest files anywhere in the scan, with a live filter.
 struct FileViewTab: View {
     @ObservedObject var model: AppModel
+    @FocusState private var filterHasFocus: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             filterBar
             table
         }
+        // Leaving the tab takes the field away without it ever losing focus,
+        // which would leave the delete keys off for good.
+        .onDisappear { model.isEditingFilter = false }
     }
 
     private var filterBar: some View {
@@ -23,6 +27,8 @@ struct FileViewTab: View {
             )
             .textFieldStyle(.roundedBorder)
             .frame(maxWidth: 460)
+            .focused($filterHasFocus)
+            .onChange(of: filterHasFocus) { model.isEditingFilter = filterHasFocus }
             .onChange(of: model.fileQuery) { model.refreshFileRows() }
 
             if !model.fileQuery.isEmpty {

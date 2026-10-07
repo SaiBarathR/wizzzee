@@ -20,7 +20,28 @@ struct WizzzeeApp: App {
         .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            // In place of New Window, which a single scan has no use for, and
+            // where Finder keeps the same two on the same keys.
+            CommandGroup(replacing: .newItem) {
+                // The key comes off as well as the item going grey while the
+                // filter is being typed in: ⌘⌫ there belongs to the text.
+                Button("Move to Trash") { model.trashSelection() }
+                    .keyboardShortcut(
+                        model.isEditingFilter
+                            ? nil : KeyboardShortcut(.delete, modifiers: .command)
+                    )
+                    .disabled(!model.canUseDeleteKeys)
+                Button("Delete Permanently…") { model.confirmDeletingSelection() }
+                    .keyboardShortcut(
+                        model.isEditingFilter
+                            ? nil
+                            : KeyboardShortcut(
+                                .delete,
+                                modifiers: [.command, .option]
+                            )
+                    )
+                    .disabled(!model.canUseDeleteKeys)
+            }
             CommandGroup(after: .toolbar) {
                 // Disabled rather than silently ignored: `startScan` refuses
                 // while a scan or a delete is running, so ⌘R then looked like a

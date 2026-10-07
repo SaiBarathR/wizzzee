@@ -60,6 +60,7 @@ enum SelfTest {
         testDeleteCanBeStopped()
         testAScanCannotStartDuringADelete()
         testAPendingDeleteDoesNotOutliveTheTree()
+        testTheDeleteKeysActOnWhatIsOnShow()
         testTrashUpdatesTree(root)
         testPermanentDeleteFolder(root)
         testStaleReferencesSurviveADelete(batchRoot)
@@ -1826,6 +1827,206 @@ enum SelfTest {
             "still aimed at the scan that was thrown away"
         )
         pumpUntilSettled(model)
+    }
+
+    /// ⌘⌫ sends the selection to the Trash without asking, and the selection
+    /// is one set shared by every tab: it keeps a row that a collapsed folder
+    /// has hidden, and a folder picked in Tree View stays in it under a File
+    /// View that has no row for it. So the keys act only on what the tab in
+    /// front has on show, and on nothing while something else holds the
+    /// keyboard or a sheet is waiting.
+    //
+    // shown/a.dat        3,000 bytes
+    // shown/b.dat        4,000
+    // deep/inner/c.dat   5,000
+    @MainActor
+    private static func testTheDeleteKeysActOnWhatIsOnShow() {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-keys-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            for folder in ["shown", "deep/inner"] {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent(folder),
+                    withIntermediateDirectories: true
+                )
+            }
+            try write(base.appendingPathComponent("shown/a.dat"), bytes: 3_000)
+            try write(base.appendingPathComponent("shown/b.dat"), bytes: 4_000)
+            try write(base.appendingPathComponent("deep/inner/c.dat"), bytes: 5_000)
+        } catch {
+            check("the delete-key fixture can be built", false, "\(error)")
+            return
+        }
+        func onDisk(_ path: String) -> Bool {
+            FileManager.default.fileExists(
+                atPath: base.appendingPathComponent(path).path
+            )
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        guard let result = loadSynchronously(into: model) else { return }
+        guard let shown = result.root.subdir(named: "shown"),
+            let deep = result.root.subdir(named: "deep"),
+            let inner = deep.subdir(named: "inner"),
+            let a = shown.files.firstIndex(where: { $0.name == "a.dat" }),
+            let b = shown.files.firstIndex(where: { $0.name == "b.dat" }),
+            inner.files.count == 1
+        else {
+            check("the delete-key fixture scanned", false, "missing entries")
+            return
+        }
+        let aRef = NodeRef(dir: shown, fileIndex: a)
+        let bRef = NodeRef(dir: shown, fileIndex: b)
+        let cRef = NodeRef(dir: inner, fileIndex: 0)
+        // The treemap counts as on show for one clicked tile, so it is put
+        // away until the checks that are about it.
+        model.showsTreemap = false
+
+        // A scan lands with its root selected, which is the first thing the
+        // keys are ever pressed on.
+        model.trashSelection()
+        check(
+            "⌘⌫ on the scan root explains itself instead of doing nothing",
+            model.actionError != nil && !model.isDeleting && onDisk("shown/a.dat"),
+            "error \(model.actionError ?? "none"), deleting \(model.isDeleting)"
+        )
+        check(
+            "and the keys wait for that alert to be answered",
+            !model.canUseDeleteKeys,
+            "still live behind the alert"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+
+        // What is on show is worked out from which folders are open, so it is
+        // held to the rows the table was actually given.
+        var everything: Set<NodeRef> = []
+        var pending = [result.root]
+        while let dir = pending.popLast() {
+            everything.insert(NodeRef(dir))
+            for index in dir.files.indices {
+                everything.insert(NodeRef(dir: dir, fileIndex: index))
+            }
+            pending.append(contentsOf: dir.subdirs)
+        }
+        model.selection = everything
+        var agreed = true
+        for (dir, open) in [
+            (shown, true), (inner, true), (deep, true), (deep, false),
+            (shown, false),
+        ] {
+            model.setExpanded(dir, open)
+            agreed = agreed
+                && model.selectionOnShow == Set(model.treeRows.map(\.ref))
+        }
+        check(
+            "what is on show in Tree View is exactly the table's rows",
+            agreed,
+            "the two disagreed as folders were opened and closed"
+        )
+
+        model.setExpanded(shown, true)
+        model.selection = [aRef]
+        check(
+            "a selected row can be acted on",
+            model.canUseDeleteKeys && model.selectionOnShow == [aRef],
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
+        model.setExpanded(shown, false)
+        model.trashSelection()
+        check(
+            "a row hidden by collapsing its folder is left alone",
+            !model.canUseDeleteKeys && !model.isDeleting && onDisk("shown/a.dat"),
+            "it was acted on"
+        )
+
+        // A tile clicked on the map is selected without being given a row.
+        model.selection = [cRef]
+        check(
+            "with the treemap hidden, a file in a closed folder is not on show",
+            model.selectionOnShow.isEmpty,
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
+        model.showsTreemap = true
+        check(
+            "with it showing, the one outlined tile is",
+            model.selectionOnShow == [cRef] && model.canUseDeleteKeys,
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
+        model.zoom(into: shown)
+        check(
+            "unless the map is zoomed somewhere that leaves it out",
+            model.selectionOnShow.isEmpty,
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
+        model.resetZoom()
+        model.showsTreemap = false
+
+        // File View lists files only, so a folder picked in the tree has no
+        // row there however selected it still is.
+        model.tab = .files
+        pumpUntilFileRowsSettle(model, expecting: 3)
+        model.selection = [NodeRef(shown)]
+        check(
+            "a folder selected in the tree is not on show in File View",
+            !model.canUseDeleteKeys,
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
+        model.selection = [aRef]
+        check(
+            "a file listed there is",
+            model.canUseDeleteKeys && model.selectionOnShow == [aRef],
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
+        model.isEditingFilter = true
+        model.trashSelection()
+        check(
+            "⌘⌫ is left to the filter while it is being typed in",
+            !model.canUseDeleteKeys && !model.isDeleting && onDisk("shown/a.dat"),
+            "it reached the selection"
+        )
+        model.isEditingFilter = false
+        model.tab = .about
+        check(
+            "nothing is on show in About",
+            !model.canUseDeleteKeys,
+            "on show: \(model.selectionOnShow.map(\.name))"
+        )
+
+        model.tab = .tree
+        model.setExpanded(shown, true)
+        model.confirmDeletingSelection()
+        check(
+            "⌥⌘⌫ asks first, and removes nothing until it is answered",
+            model.permanentDeleteTargets == [aRef] && !model.isDeleting
+                && onDisk("shown/a.dat"),
+            "pending \(model.permanentDeleteTargets.map(\.name))"
+        )
+        model.trashSelection()
+        check(
+            "and the keys wait for that answer too",
+            !model.canUseDeleteKeys && !model.isDeleting && onDisk("shown/a.dat"),
+            "a second action started behind the confirmation"
+        )
+        model.permanentDeleteTargets = []
+
+        model.selection = [bRef]
+        model.trashSelection()
+        check(
+            "the keys are off while a batch runs",
+            model.isDeleting && !model.canUseDeleteKeys,
+            "deleting \(model.isDeleting)"
+        )
+        pumpUntilDeleteSettles(model)
+        check(
+            "⌘⌫ moves the selected row to the Trash, and only that",
+            !onDisk("shown/b.dat") && onDisk("shown/a.dat")
+                && shown.files.map(\.name) == ["a.dat"]
+                && model.actionError == nil,
+            "left \(shown.files.map(\.name)), error \(model.actionError ?? "none")"
+        )
     }
 
     @MainActor
