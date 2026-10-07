@@ -59,6 +59,19 @@ enum Preferences {
         set { set(newValue, forKey: lastVolumeKey) }
     }
 
+    /// Follows a volume to its new mount point, which is what renaming one
+    /// in Finder moves: the volume remembered, and a folder remembered on it.
+    static func volumeMoved(from old: String, to new: String) {
+        if lastVolume == old { lastVolume = new }
+        if let folder = lastFolder {
+            if folder == old {
+                lastFolder = new
+            } else if folder.hasPrefix(old + "/") {
+                lastFolder = new + folder.dropFirst(old.count)
+            }
+        }
+    }
+
     private static func set(_ value: String?, forKey key: String) {
         if let value {
             store.set(value, forKey: key)

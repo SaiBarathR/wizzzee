@@ -6828,6 +6828,37 @@ enum SelfTest {
             "\(model.marksLostToRescan) lost, \(model.marks.count) marked"
         )
 
+        // An open folder is deleted, and the root is shut over the open
+        // folders beneath it. What is put back is what was open: not the
+        // folder that has gone, and not the root for being the root.
+        guard let again = model.result, let a3 = again.root.subdir(named: "a"),
+            let b3 = a3.subdir(named: "b")
+        else { return }
+        check("b is open before it goes", model.isExpanded(b3) && model.isExpanded(a3), "")
+        model.zoom(into: again.root)
+        deletePermanently(model, [NodeRef(b3)])
+        model.setExpanded(again.root, false)
+        check(
+            "with the root shut only its own row is on show",
+            model.treeRows.count == 1 && model.isExpanded(a3),
+            "\(model.treeRows.count) rows"
+        )
+        guard let shut = loadSynchronously(into: model),
+            let a4 = shut.root.subdir(named: "a")
+        else { return }
+        check(
+            "a root that was shut comes back shut, with what was open under it still open",
+            !model.isExpanded(shut.root) && model.isExpanded(a4)
+                && model.treeRows.count == 1,
+            "root open \(model.isExpanded(shut.root)), a open \(model.isExpanded(a4))"
+        )
+        check(
+            "and a folder deleted while it was open is simply not there to open",
+            a4.subdir(named: "b") == nil,
+            "\(a4.subdirs.map(\.name))"
+        )
+        model.setExpanded(shut.root, true)
+
         // Somewhere else is somewhere new: nothing is carried over to it.
         model.customFolder = base.appendingPathComponent("a").path
         guard let third = loadSynchronously(into: model) else { return }
@@ -6835,7 +6866,8 @@ enum SelfTest {
             "a scan of a different folder starts afresh",
             model.marks.isEmpty && model.selection == [NodeRef(third.root)]
                 && model.treemapRoot === third.root && model.marksLostToRescan == 0
-                && third.root.subdir(named: "b").map(model.isExpanded) == false,
+                && third.root.subdir(named: "empty").map(model.isExpanded) == false
+                && model.isExpanded(third.root),
             "marked \(model.marks.count), map at \(model.treemapRoot?.name ?? "nil")"
         )
 
@@ -6907,11 +6939,16 @@ enum SelfTest {
             "stored \(Preferences.sizeMetric), folder \(Preferences.lastFolder ?? "none")"
         )
 
-        Preferences.lastFolder = folder.path
+        // What choosing a folder in the panel comes to, without the panel.
+        let chooser = AppModel()
+        chooser.scanFolder(folder.path)
+        pumpUntilSettled(chooser)
         check(
-            "a folder that was being scanned is what the next launch offers",
-            AppModel().customFolder == folder.path,
-            "folder \(AppModel().customFolder ?? "none")"
+            "a folder that is chosen is recorded, and is what the next launch offers",
+            Preferences.lastFolder == folder.path && chooser.customFolder == folder.path
+                && chooser.phase == .complete && AppModel().customFolder == folder.path,
+            "stored \(Preferences.lastFolder ?? "none"), next launch "
+                + "\(AppModel().customFolder ?? "none")"
         )
         try? FileManager.default.removeItem(at: folder)
         check(
@@ -6936,6 +6973,29 @@ enum SelfTest {
             "a disk that is no longer mounted is not picked again",
             AppModel().selectedVolumePath == (picker.volumes.first?.path ?? "/"),
             "selected \(AppModel().selectedVolumePath)"
+        )
+
+        // Renaming a volume in Finder moves its mount point. What is
+        // remembered has to move with it, or the next launch looks for the
+        // disk where it no longer is.
+        Preferences.lastVolume = "/Volumes/Backup"
+        Preferences.lastFolder = "/Volumes/Backup/Photos/2024"
+        Preferences.volumeMoved(from: "/Volumes/Backup", to: "/Volumes/Backups")
+        check(
+            "a renamed volume is remembered by its new name, and a folder on it too",
+            Preferences.lastVolume == "/Volumes/Backups"
+                && Preferences.lastFolder == "/Volumes/Backups/Photos/2024",
+            "volume \(Preferences.lastVolume ?? "none"), folder "
+                + "\(Preferences.lastFolder ?? "none")"
+        )
+        Preferences.lastFolder = "/Volumes/Backup2/Photos"
+        Preferences.volumeMoved(from: "/Volumes/Backup", to: "/Volumes/Other")
+        check(
+            "a volume whose name only starts the same is left alone",
+            Preferences.lastVolume == "/Volumes/Backups"
+                && Preferences.lastFolder == "/Volumes/Backup2/Photos",
+            "volume \(Preferences.lastVolume ?? "none"), folder "
+                + "\(Preferences.lastFolder ?? "none")"
         )
     }
 
