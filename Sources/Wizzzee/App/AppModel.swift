@@ -952,8 +952,13 @@ final class AppModel: ObservableObject {
     /// False while something else is over the window waiting for an answer:
     /// two sheets on one window are shown one after the other, and the guide
     /// would come up when the question under it had been answered.
+    ///
+    /// And while a removal is running. Its Stop is in the status bar, which
+    /// the guide would cover, and what it has to say if it fails would wait
+    /// behind the guide to be said.
     var canShowWelcome: Bool {
         permanentDeleteTargets.isEmpty && actionError == nil && !isChoosingFolder
+            && !isDeleting
     }
 
     /// Puts the guide up, at `page`. Already up, it turns to that page.

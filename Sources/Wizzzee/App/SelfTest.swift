@@ -1792,6 +1792,13 @@ enum SelfTest {
             model.phase == .complete && model.result === result,
             "phase \(model.phase), same result: \(model.result === result)"
         )
+        // The guide would cover the status bar, which is where Stop is.
+        model.showWelcome()
+        check(
+            "nor is the guide put up over a delete that is running",
+            model.isDeleting && !model.canShowWelcome && !model.showsWelcome,
+            "deleting=\(model.isDeleting), guide up=\(model.showsWelcome)"
+        )
 
         pumpUntilDeleteSettles(model)
         check(
@@ -9943,6 +9950,10 @@ enum SelfTest {
         defer { window.close() }
 
         guard let result = loadSynchronously(into: model) else { return }
+        // Again: a scan asks afresh, and run from a terminal that has Full
+        // Disk Access it takes the banner down and leaves the window roomier
+        // than the one this is about.
+        model.hasFullDiskAccess = false
         func listHeight() -> CGFloat { layout.parts[.marksList]?.height ?? -1 }
         /// The parts that are not wholly inside the window. Half a point is
         /// let go: a frame that ends on the window's edge can end a hair
