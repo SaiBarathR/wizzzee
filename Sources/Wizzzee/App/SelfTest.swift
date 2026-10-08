@@ -9797,9 +9797,13 @@ enum SelfTest {
         let hosting = host(model, tellingLayoutTo: layout)
         let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
         hosting.frame = frame
+        // With no title bar. The parts say where they are from the top of
+        // the window, and the table from the top of its contents: under a
+        // title bar the two are that bar's height apart, and a button could
+        // have overlapped the table by as much and passed.
         let window = NSWindow(
             contentRect: frame,
-            styleMask: [.titled, .resizable],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
