@@ -125,14 +125,17 @@ rebuilding.
   brings the figures up to date and leaves the window as it was: the same
   folders open, the map zoomed to the same folder, the same selection and the
   same marks, wherever those things are still there. A mark whose item has
-  gone is counted beside "Scan complete", so a shorter list is not taken for
-  the whole of it. A scan of somewhere else starts afresh.
+  gone, or has been replaced by another of the same name, is counted beside
+  "Scan complete", so a shorter list is not taken for the whole of it. Stopping
+  a rescan does not lose the marks: the next scan of that folder puts them
+  back. A scan of somewhere else starts afresh.
 - **`⌘Z` undoes the last move to the Trash**, as does **Edit ▸ Undo** and the
   **Undo** button the status bar shows after one: what went comes back, on
   disk and in the tree, selected and with the marks it left with. It is the last
-  move only, and only until something else is removed or the folder is scanned
-  again. Something whose place has been taken in the meantime stays in the
-  Trash and is named; nothing is put back over anything. The status bar says
+  move only, and only until something else is removed, the folder is scanned
+  again, or the Trash is emptied. Something whose place has been taken in the
+  meantime stays in the Trash and is named, and is not put back over what took
+  it. The status bar says
   what Wizzzee has moved to the Trash that is still there — it has left the
   totals and not the disk, so that figure is what emptying the Trash frees.
 - **`⌘⌫` and `⌥⌘⌫`** do what they do in Finder, to whatever is selected: the
@@ -143,7 +146,7 @@ rebuilding.
 
 | Shortcut | Action |
 | --- | --- |
-| `Return` | Scan |
+| `Return` | Scan (not while typing in the File View's filter) |
 | `⌘O` | Choose a folder to scan |
 | `⌘.` | Stop a running scan |
 | `⌘R` | Rescan |
@@ -160,6 +163,10 @@ rebuilding.
 | `⌘0` | Reset the treemap zoom |
 
 ![File View, showing the biggest files in the scan](docs/images/file-view.png)
+
+![One file type picked out: its tiles lit on the treemap, the rest set back](docs/images/file-types.png)
+
+![A search for folders by name and size, with the count of what it found](docs/images/search.png)
 
 ![Two folders marked for removal: ticked in the table, hatched on the treemap, and listed with their sizes above the status bar](docs/images/marks.png)
 
@@ -253,11 +260,13 @@ The full write-up is in [docs/architecture.md](docs/architecture.md).
 ```
 Sources/Wizzzee/
   Core/       BulkEnumerator (getattrlistbulk), ScanEngine, ScanTree,
-              Volumes, FileActions, Formatting
-  Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer, TreemapView
+              SearchQuery, Volumes, FileActions, Removal, Formatting
+  Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer,
+              TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,
-              StatusBar
-  App/        Main, WizzzeeApp, AppModel, AppInfo, CLI, SelfTest, UIShot
+              StatusBar, ItemContextMenu, Marks
+  App/        Main, WizzzeeApp, AppModel, AppInfo, Preferences, CLI, SelfTest,
+              UIShot
 scripts/      build-app.sh, validate-release.sh, make-icon.swift
 docs/         architecture.md, cli.md, releasing.md, releases/
 ```
@@ -270,7 +279,7 @@ dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest
 ```
 
 `--selftest` builds a throwaway tree with known contents and checks the scanner
-and both delete paths against ground truth — 402 checks, no permissions needed.
+and both delete paths against ground truth — 714 checks, no permissions needed.
 CI runs it on every push, along with a universal-binary and signature check.
 
 ## Releasing

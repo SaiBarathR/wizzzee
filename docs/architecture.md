@@ -175,12 +175,20 @@ anything in the next: a `NodeRef` is a node and an index. What carries over a
 rescan of the same folder is therefore kept as paths — the open folders, the
 map's root, the selection, the marks — taken before the old tree is let go and
 looked up in the new one when it lands. What is no longer there is not put
-back, and a mark that could not be is counted.
+back, and a mark that could not be is counted. A selection or a mark is looked
+up by its inode as well as its path, since the marks are moved to the Trash
+without asking: another file or folder that has taken the name is not what was
+marked. Which folders were open and where the map was zoomed to go by path
+alone — nothing is removed by a folder being open. A scan that is stopped or
+fails keeps the place it was holding, for the next scan of the same folder.
 
 The selection and the marks are two sets and are kept apart on purpose. The
 selection is what is being looked at: a plain click replaces it, and a
 collapsed folder or a change of tab takes it off the screen, which is why the
-delete keys only act on the part of it that is on show. The marks are what has
+delete keys only act on the part of it that is on show. In the File View that
+also means rows that answer what is being asked for: the rows of the search
+before stay on screen while the walk for the next one runs, and until it comes
+back none of them is on show. The marks are what has
 been decided on. They live in the model, not in a table, so they outlast all of
 that, and they never nest — a folder's mark stands for everything in it — so
 the list of them can be totalled without counting anything twice. Both are sets
@@ -196,6 +204,23 @@ them. So nothing is remembered about which it was: each hard-linked name is
 told which it is from the tree as it stands when it returns. Only the last
 move can be undone, and only until something else changes the tree — a delete
 or a rescan — because that is the tree it would be put back into.
+
+On disk, bringing something back is the one place the app moves a file to
+somewhere it chose, so it is sure of three things first. What goes into the
+Trash is taken down as what it is — its volume and its number on it — with
+the folder it came out of, because a place in the Trash is a name and names
+there are used again. Coming back, the thing at that place has to be that
+thing, the folder at the other end has to be that folder and not a link to
+another, and the move is one that fails if anything is already there
+(`renamex_np` with `RENAME_EXCL`): a look followed by a move replaces whatever
+arrived in between. A volume that has no such move — exFAT — gets the look and
+then the move, which is the best there is on one. It is a rename and never a
+copy.
+
+What is said to be in the Trash is kept up to date by looking, since the Trash
+is emptied from Finder. A thing has left when nothing is at its place or
+something else is; a place that can't be looked at, on a share that has
+dropped, has said neither, and both the figure and the Undo are kept.
 
 ### `Removal` — deleting with something to show for it
 
@@ -239,7 +264,8 @@ release is built with an older one.
 ```
 Sources/Wizzzee/
   Core/       BulkEnumerator (getattrlistbulk), ScanEngine, ScanTree,
-              Volumes, FileActions, Removal (removefile), Formatting
+              SearchQuery, Volumes, FileActions, Removal (removefile),
+              Formatting
   Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer,
               TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,
