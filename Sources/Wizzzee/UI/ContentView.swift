@@ -22,6 +22,20 @@ struct ContentView: View {
             tabBar
             Divider()
 
+            // The list of what is marked drops down from the bar that counts
+            // it, which is in the row above with the tabs.
+            if model.showsMarks && !model.marks.isEmpty {
+                MarksList(model: model)
+                    .frame(
+                        height: MarksList.height(
+                            for: model.marks.count,
+                            inWindow: windowHeight
+                        )
+                    )
+                    .placed(as: .marksList)
+                Divider()
+            }
+
             Group {
                 switch model.tab {
                 case .tree: TreeViewTab(model: model)
@@ -30,23 +44,6 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // There for as long as anything is marked, and not only once it
-            // has been asked for: it is where the marks are acted on.
-            if !model.marks.isEmpty {
-                if model.showsMarks {
-                    Divider()
-                    MarksList(model: model)
-                        .frame(
-                            height: MarksList.height(
-                                for: model.marks.count,
-                                inWindow: windowHeight
-                            )
-                        )
-                        .placed(as: .marksList)
-                }
-                MarksBar(model: model)
-            }
 
             Divider()
             StatusBar(model: model)
@@ -153,9 +150,11 @@ struct ContentView: View {
                     model.show(tab)
                 } label: {
                     Text(tab.rawValue)
-                        .font(.system(size: 11, weight: model.tab == tab ? .semibold : .regular))
+                        .font(.system(size: 12, weight: model.tab == tab ? .semibold : .regular))
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
+                        .padding(.vertical, 6)
                         .background(
                             RoundedRectangle(cornerRadius: 5)
                                 .fill(
@@ -168,12 +167,26 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .help("\(tab.rawValue) (⌘\(tab.key))")
             }
-            Spacer()
+            // What is marked, and what to do with it, beside the tabs: at
+            // the top of the window, where a selection's own buttons are,
+            // and in a row that is there already. It was across the foot of
+            // the window, and before that a chip in the status bar.
+            if model.marks.isEmpty {
+                Spacer()
+            } else {
+                MarksBar(model: model)
+                    .padding(.leading, 12)
+            }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        // One height with the bar in it or not, so that the first mark
+        // moves nothing: the box that was just ticked stays under the
+        // pointer.
+        .frame(height: Self.tabRowHeight)
         .background(.bar)
     }
+
+    private static let tabRowHeight: CGFloat = 42
 }
 
 /// Shown when the app can't read TCC-protected locations, which would otherwise

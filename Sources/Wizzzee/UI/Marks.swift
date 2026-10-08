@@ -74,10 +74,12 @@ struct MarkBox: View {
 
 /// What is marked, what removing it would free, and what to do about it.
 ///
-/// Across the foot of the window on every tab, from the first mark to the
-/// last. It was a chip in the status bar's small type, with the buttons in a
-/// list that the chip had to be clicked to open: someone new to the app
-/// ticked three boxes and could find nothing to do with them.
+/// In the row the tabs are in, filling what they leave of it, from the first
+/// mark to the last and on every tab. It has been a chip in the status bar's
+/// small type, and then a bar across the foot of the window: both were at
+/// the far end of the window from the boxes being ticked and from every
+/// other control that acts on a selection, and someone new to the app did
+/// not look there.
 struct MarksBar: View {
     @ObservedObject var model: AppModel
     /// False for the moment the bar is first put up, which it spends lit.
@@ -92,9 +94,11 @@ struct MarksBar: View {
                 .accessibilityHidden(true)
             Text(model.marksHeadline)
                 .font(.system(size: 13, weight: .semibold))
+                .layoutPriority(2)
             Text(ByteFormat.decimal(model.markedBytes) + " on disk")
                 .font(.system(size: 12).monospacedDigit())
                 .foregroundStyle(.secondary)
+                .layoutPriority(1)
                 .help(
                     "The space on disk that removing all of these gives back. "
                         + "A hard link whose data has another name on disk "
@@ -102,7 +106,7 @@ struct MarksBar: View {
                 )
             listToggle
 
-            Spacer(minLength: 12)
+            Spacer(minLength: 8)
 
             // Off while a batch runs, like every other way of starting one.
             Group {
@@ -119,38 +123,42 @@ struct MarksBar: View {
                     .placed(as: .deleteMarked)
             }
             .disabled(model.isDeleting)
+            .fixedSize()
         }
         .lineLimit(1)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        // Tinted, and under a line of the same colour in place of a divider.
-        // It arrives lit and fades to that: it comes and goes, and has to be
-        // seen arriving by someone looking at a checkbox at the other end of
-        // the window.
-        .background(Color.accentColor.opacity(hasSettled ? 0.14 : 0.5))
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.accentColor.opacity(0.5))
-                .frame(height: 1)
-        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 32)
+        // A tinted strip with a line of the same colour round it. It
+        // arrives lit and fades to that: it comes and goes, and has to be
+        // seen arriving by someone looking at a checkbox further down.
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.accentColor.opacity(hasSettled ? 0.16 : 0.55))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.accentColor.opacity(0.45), lineWidth: 1)
+        )
         .onAppear {
             withAnimation(.easeOut(duration: 0.9)) { hasSettled = true }
         }
     }
 
-    /// Opens the list of what is marked, and shuts it. The list opens
-    /// upwards and the bar stays put, so this is under the pointer for both.
+    /// Opens the list of what is marked, and shuts it. The list drops down
+    /// under the row and the bar stays put, so this is under the pointer
+    /// for both.
     private var listToggle: some View {
         Button {
             model.showsMarks.toggle()
         } label: {
             HStack(spacing: 4) {
                 Text(model.showsMarks ? "Hide List" : "Show List")
-                Image(systemName: model.showsMarks ? "chevron.down" : "chevron.up")
+                Image(systemName: model.showsMarks ? "chevron.up" : "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
             }
         }
+        .fixedSize()
         .help(
             model.showsMarks
                 ? "Hide the marked items"
@@ -165,17 +173,17 @@ struct MarksBar: View {
 
 /// The marked items, each with its size and a way to take its mark back off.
 ///
-/// Above the bar that counts them, on every tab, since marks are gathered
+/// Under the bar that counts them, on every tab, since marks are gathered
 /// from all of them: the tree, the file list and the treemap.
 struct MarksList: View {
     @ObservedObject var model: AppModel
 
     /// What the rest of the window needs when it has the most in it and
     /// each part is at its least: the header, the banner about Full Disk
-    /// Access, the tabs, the tree over the treemap, the bar under this list
-    /// and the status bar. Added up from the window on screen, with a couple
-    /// of points to spare.
-    static let restOfWindow: CGFloat = 530
+    /// Access, the tabs' row with the bar in it, the tree over the treemap
+    /// and the status bar. Added up from the window on screen, with a few
+    /// points to spare.
+    static let restOfWindow: CGFloat = 510
 
     /// A row for each mark up to ten of them, and no more than a window
     /// `window` high can spare: past either the list scrolls.

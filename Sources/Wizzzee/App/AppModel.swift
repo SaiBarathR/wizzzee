@@ -354,7 +354,7 @@ final class AppModel: ObservableObject {
     /// folder's row can say there is something marked inside it without
     /// looking through everything it holds.
     private var marksBeneath: [UInt64: Int] = [:]
-    /// Whether the list of marks is open above the bar that counts them.
+    /// Whether the list of marks is open under the bar that counts them.
     @Published var showsMarks = false
 
     // The guide
@@ -1945,7 +1945,7 @@ final class AppModel: ObservableObject {
     /// occupies a fraction of it.
     var markedBytes: UInt64 { reclaimableSpace(marks) }
 
-    /// How many are marked, as the bar across the foot of the window says it.
+    /// How many are marked, as the bar beside the tabs says it.
     var marksHeadline: String {
         ByteFormat.counted(marks.count, "item") + " marked for removal"
     }

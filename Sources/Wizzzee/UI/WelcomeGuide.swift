@@ -92,7 +92,7 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
         case .treemap: return "The lower half of Tree View"
         case .search: return "The File View tab"
         case .look: return "Any row, and any tile"
-        case .remove: return "The foot of the window"
+        case .remove: return "The tabs’ row, and the status bar"
         case .keys: return nil
         }
     }
@@ -105,7 +105,7 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
         case .treemap: return [.treemap]
         case .search: return [.tabs, .filter, .table]
         case .look: return [.table, .treemap]
-        case .remove: return [.marks, .status]
+        case .remove: return [.tabs, .status]
         case .keys: return []
         }
     }
@@ -260,10 +260,10 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                     keys: [["space"], ["⇧", "⌘", "M"]]
                 ),
                 WelcomeTip(
-                    2, "The bar at the foot of the window",
-                    "It appears with the first mark, on every tab: how many "
-                        + "things are marked, and what removing them frees. "
-                        + "**Show List** opens the list of them."
+                    2, "The bar beside the tabs",
+                    "It appears with the first mark, in the row the tabs are "
+                        + "in: how many things are marked, and what removing "
+                        + "them frees. **Show List** opens the list of them."
                 ),
                 WelcomeTip(
                     3, "Remove the lot",
@@ -808,7 +808,7 @@ struct GuideBadge: View {
 /// The window, drawn small, with the part a page is about lit.
 struct WindowMap: View {
     enum Region: Hashable {
-        case header, tabs, table, types, treemap, filter, marks, status
+        case header, tabs, table, types, treemap, filter, status
     }
 
     let lit: Set<Region>
@@ -832,7 +832,6 @@ struct WindowMap: View {
                 .frame(height: 17)
                 part(.treemap).frame(height: 15)
             }
-            part(.marks).frame(height: 4)
             part(.status).frame(height: 3)
         }
         .padding(5)
