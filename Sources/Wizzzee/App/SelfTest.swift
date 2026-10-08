@@ -6933,11 +6933,29 @@ enum SelfTest {
             "marked \(model.marks.map(\.name))"
         )
         model.customFolder = base.appendingPathComponent("a").path
-        guard let fourth = loadSynchronously(into: model) else { return }
+        guard let back = loadSynchronously(into: model) else { return }
         check(
             "and the place the stopped one held is not waiting on the way back",
             model.marks.isEmpty && model.marksLostToRescan == 0,
             "marked \(model.marks.map(\.name))"
+        )
+        // Nor does it wait out a scan of somewhere else that was itself
+        // stopped: a place is for the next scan, and that was it.
+        model.setMarked([NodeRef(dir: back.root, fileIndex: 0)], true)
+        let held = model.marks.count
+        model.startScan()
+        model.cancelScan()
+        pumpUntilSettled(model)
+        model.customFolder = base.path
+        model.startScan()
+        model.cancelScan()
+        pumpUntilSettled(model)
+        model.customFolder = base.appendingPathComponent("a").path
+        guard let fourth = loadSynchronously(into: model) else { return }
+        check(
+            "a place is let go of by a scan of somewhere else, even one that is stopped",
+            held == 1 && model.marks.isEmpty && model.marksLostToRescan == 0,
+            "\(held) marked before; marked \(model.marks.map(\.name)) after"
         )
 
         // A mark is on a file and not on a name. Another file put where a
@@ -7710,12 +7728,33 @@ enum SelfTest {
         // dropped — has not been emptied. The line and the Undo stay.
         chmod(bin.path, 0)
         model.refreshTrashLine()
-        let kept = (undo: model.canUndoTrash, bytes: model.bytesInTrash)
+        let kept = (
+            undo: model.canUndoTrash, bytes: model.bytesInTrash, watched: model.isWatchingTrash
+        )
+        // And again, and again. Each look at a place that does not answer
+        // can wait out a timeout on the main thread, so after a few the
+        // looking every three seconds stops, with nothing let go of.
+        model.refreshTrashLine()
+        model.refreshTrashLine()
+        let later = (
+            undo: model.canUndoTrash, bytes: model.bytesInTrash, watched: model.isWatchingTrash
+        )
         chmod(bin.path, 0o755)
         check(
             "a Trash that can't be looked into is not taken for an empty one",
-            getuid() == 0 || (kept.undo && kept.bytes == zOnDisk),
-            "can undo \(kept.undo), \(kept.bytes) bytes in the Trash"
+            getuid() == 0 || (kept.undo && kept.bytes == zOnDisk && kept.watched),
+            "can undo \(kept.undo), \(kept.bytes) bytes in the Trash, watched \(kept.watched)"
+        )
+        check(
+            "one that goes on not answering is no longer asked every few seconds",
+            getuid() == 0 || (later.undo && later.bytes == zOnDisk && !later.watched),
+            "can undo \(later.undo), \(later.bytes) bytes in the Trash, watched \(later.watched)"
+        )
+        model.refreshTrashLine()
+        check(
+            "and is again once it answers",
+            model.isWatchingTrash && model.canUndoTrash && model.bytesInTrash == zOnDisk,
+            "watched \(model.isWatchingTrash), \(model.bytesInTrash) bytes in the Trash"
         )
         // Asked to bring it back at such a moment: it was said to be "no
         // longer in the Trash", which was not so, and the Undo was thrown
@@ -7759,6 +7798,41 @@ enum SelfTest {
             model.bytesInTrash == 0 && counted == true
                 && FileManager.default.fileExists(atPath: bin.path + "/z.dat"),
             "\(model.bytesInTrash) bytes in the Trash, in the scan \(counted ?? false)"
+        )
+
+        // A folder in the Trash that the scan finds and can't read is in the
+        // tree and not in the totals. Found there, it was taken for counted,
+        // and the line let go of bytes that were in neither place.
+        guard let b3 = third.root.subdir(named: "a")?.subdir(named: "b") else {
+            check("a/b is still there to be moved", false, "")
+            return
+        }
+        let bOnDisk = b3.totalAlloc
+        trash(model, [NodeRef(b3)])
+        let binned = bin.appendingPathComponent("b").path
+        check(
+            "a folder moved to the Trash is said to be in it",
+            model.bytesInTrash == bOnDisk && bOnDisk > 0
+                && FileManager.default.fileExists(atPath: binned + "/x.dat"),
+            "\(model.bytesInTrash) bytes in the Trash, a/b takes \(bOnDisk)"
+        )
+        chmod(binned, 0)
+        let unread = loadSynchronously(into: model)
+        let seen = unread?.root.subdir(named: "bin")?.subdir(named: "b")
+        let after = model.bytesInTrash
+        chmod(binned, 0o755)
+        check(
+            "found by a scan and not read, it is still counted as in the Trash",
+            getuid() == 0
+                || (seen?.exclusion == .permissionDenied && seen?.totalAlloc == 0
+                    && after == bOnDisk),
+            "\(after) bytes in the Trash; the scan has it as \(String(describing: seen?.exclusion))"
+        )
+        _ = loadSynchronously(into: model)
+        check(
+            "and once a scan has read it, it is not",
+            model.bytesInTrash == 0,
+            "\(model.bytesInTrash) bytes in the Trash"
         )
     }
 
