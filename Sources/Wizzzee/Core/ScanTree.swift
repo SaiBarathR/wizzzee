@@ -855,6 +855,35 @@ final class ScanResult {
         return NodeRef(dir: dir, fileIndex: index)
     }
 
+    /// Whether what is at `path` is in this scan's totals, all of it that
+    /// the scan could have counted.
+    ///
+    /// Found is not counted. A folder the scan could not open has a node
+    /// and nothing under it, and one it stopped reading part-way — itself
+    /// or anywhere beneath — has some of its contents in the totals and
+    /// some not. Neither is, and of those it is safer to say so: this
+    /// decides whether something in the Trash has stopped being space that
+    /// is missing from the totals.
+    ///
+    /// A folder reached a second time by another path is: it was counted
+    /// under the first. A folder beneath that could not be opened does not
+    /// stand in the way either — what is in it was no more countable when
+    /// the folder above it was moved to the Trash.
+    func hasCounted(at path: String) -> Bool {
+        if file(at: path) != nil { return true }
+        guard let top = directory(at: path) else { return false }
+        switch top.exclusion {
+        case .permissionDenied, .partiallyRead, .otherVolume: return false
+        case .none, .alreadyCounted: break
+        }
+        var stack = top.subdirs
+        while let dir = stack.popLast() {
+            if dir.exclusion == .partiallyRead { return false }
+            stack.append(contentsOf: dir.subdirs)
+        }
+        return true
+    }
+
     /// Total across every file, ignoring hard-link duplicates.
     var fileCount: Int { root.totalFiles }
 

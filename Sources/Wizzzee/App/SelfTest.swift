@@ -126,6 +126,7 @@ enum SelfTest {
         testPuttingBackMovesOnlyWhatWasPutThere()
         testTheTrashLineCountsAFileUnderWhicheverNameIsLeft()
         testAMoveBeyondUndoIsSaidToBe()
+        testFoundByAScanIsNotCountedByIt()
         testUndoingATrashPutsHardLinksRight()
         testChoicesOutlastALaunch()
         testAVolumeScanSaysHowFarItHasGot()
@@ -7833,6 +7834,87 @@ enum SelfTest {
             "and once a scan has read it, it is not",
             model.bytesInTrash == 0,
             "\(model.bytesInTrash) bytes in the Trash"
+        )
+    }
+
+    /// A scan that reads the Trash has counted what is in it, and the line
+    /// for the Trash lets go of it. Found was taken for counted: a folder
+    /// the scan could not open, or stopped reading part-way, is in the tree
+    /// with what it holds still missing from the totals.
+    private static func testFoundByAScanIsNotCountedByIt() {
+        let root = DirNode(name: "/wizzzee-selftest-counted", parent: nil)
+        func folder(_ name: String, in parent: DirNode, _ state: DirExclusion = .none) -> DirNode {
+            let dir = DirNode(name: name, parent: parent)
+            dir.exclusion = state
+            parent.subdirs.append(dir)
+            return dir
+        }
+        root.files = [
+            FileEntry(
+                name: "loose.dat",
+                size: 10,
+                alloc: 4_096,
+                mtime: 0,
+                extIndex: -1,
+                isSymlink: false,
+                isDuplicateLink: false
+            ),
+        ]
+        let read = folder("read", in: root)
+        _ = folder("inside", in: read)
+        _ = folder("shut", in: root, .permissionDenied)
+        _ = folder("half", in: root, .partiallyRead)
+        _ = folder("twice", in: root, .alreadyCounted)
+        _ = folder("elsewhere", in: root, .otherVolume)
+        let deep = folder("deep", in: root)
+        _ = folder("half", in: folder("down", in: deep), .partiallyRead)
+        let mostly = folder("mostly", in: root)
+        _ = folder("shut", in: folder("down", in: mostly), .permissionDenied)
+        let result = ScanResult(
+            root: root,
+            rootPath: "/wizzzee-selftest-counted",
+            extensionStats: [],
+            elapsed: 0,
+            deniedCount: 0,
+            hardLinkSavings: 0,
+            hardLinkAllocSavings: 0,
+            volumeTotal: 0,
+            volumeFree: 0,
+            volumeUsed: 0,
+            isSharedContainer: false
+        )
+        func counted(_ name: String) -> Bool {
+            result.hasCounted(at: "/wizzzee-selftest-counted/" + name)
+        }
+        check(
+            "a file the scan lists, and a folder it read through, are counted",
+            counted("loose.dat") && counted("read") && counted("read/inside"),
+            ""
+        )
+        check(
+            "what the scan has no node for is not",
+            !counted("nothing-here") && !result.hasCounted(at: "/somewhere/else"),
+            ""
+        )
+        check(
+            "nor a folder it could not open, or stopped reading part-way",
+            !counted("shut") && !counted("half") && !counted("elsewhere"),
+            "shut \(counted("shut")), half \(counted("half")), elsewhere \(counted("elsewhere"))"
+        )
+        check(
+            "nor one with a folder anywhere beneath that it stopped reading part-way",
+            !counted("deep") && !counted("deep/down") && !counted("deep/down/half"),
+            "deep \(counted("deep")), deep/down \(counted("deep/down"))"
+        )
+        check(
+            "one reached a second time by another path was counted under the first",
+            counted("twice"),
+            ""
+        )
+        check(
+            "and one with a folder beneath that can't be opened is counted for the rest",
+            counted("mostly") && counted("mostly/down") && !counted("mostly/down/shut"),
+            "mostly \(counted("mostly"))"
         )
     }
 

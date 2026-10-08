@@ -1265,12 +1265,10 @@ final class AppModel: ObservableObject {
                     ScanEngine.normalize(inTrash.deletingLastPathComponent),
                     inTrash.lastPathComponent
                 )
-                if scanned.file(at: path) != nil { return true }
-                // A folder the scan found and could not read is in the tree
-                // and not in its totals: what it holds is still missing
-                // from them.
-                guard let folder = scanned.directory(at: path) else { return false }
-                return folder.exclusion == .none
+                // Counted, and not merely found: a folder the scan could
+                // not read, or read part of, is in the tree with what it
+                // holds still missing from the totals.
+                return scanned.hasCounted(at: path)
             }
             refreshTrashLine()
         }
