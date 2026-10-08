@@ -235,12 +235,13 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                     2, "Right-click anything",
                     "Reveal in Finder, Open, Quick Look, Open in Terminal and "
                         + "Copy Path, on a row or on a tile. A folder adds Zoom "
-                        + "Treemap Here, and a file Show in Tree."
+                        + "Treemap Here; a file, and anything in File View, adds "
+                        + "Show in Tree."
                 ),
                 WelcomeTip(
                     3, "Double-click",
                     "A file’s row is shown in Finder. A folder’s row in the tree "
-                        + "opens or shuts, and a tile on the treemap zooms in."
+                        + "opens or shuts, and a folder on the treemap zooms in."
                 ),
                 WelcomeTip(
                     4, "The notes beside a name",
@@ -287,7 +288,8 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                     6, "What can’t be removed",
                     "The system volume is sealed, and a whole volume, a home "
                         + "folder and the folder a scan started from are not for "
-                        + "removing. Their rows have no box to tick."
+                        + "removing. Their rows have no box to tick: only a dash, "
+                        + "when something inside is marked."
                 ),
             ]
         case .keys:
@@ -382,7 +384,7 @@ struct WelcomeShortcutGroup: Identifiable {
             shortcuts: [
                 WelcomeShortcut(
                     [["space"], ["⇧", "⌘", "M"]],
-                    "Mark the selected rows, or unmark them"
+                    "Mark the selection, or unmark it"
                 ),
                 WelcomeShortcut([["⌘", "⌫"]], "Move the selection to the Trash"),
                 WelcomeShortcut(

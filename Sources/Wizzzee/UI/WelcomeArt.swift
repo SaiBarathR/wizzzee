@@ -134,21 +134,31 @@ private struct ArtIcon: View {
 
 /// The box at the head of a row.
 private struct ArtCheckbox: View {
-    enum Mark { case off, on, partly }
+    /// `.holds` is a row that can't be marked itself and has something
+    /// marked inside it: a dash that is not a box, and can't be clicked.
+    enum Mark { case off, on, partly, holds }
     var mark = Mark.off
 
     var body: some View {
         Image(systemName: symbol)
             .font(.system(size: 11))
-            .foregroundStyle(mark == .off ? Color.secondary.opacity(0.7) : Color.accentColor)
+            .foregroundStyle(colour)
             .frame(width: 13)
+    }
+
+    private var colour: Color {
+        switch mark {
+        case .off: return .secondary.opacity(0.7)
+        case .holds: return .secondary
+        case .on, .partly: return .accentColor
+        }
     }
 
     private var symbol: String {
         switch mark {
         case .off: return "square"
         case .on: return "checkmark.square.fill"
-        case .partly: return "minus.square.fill"
+        case .partly, .holds: return "minus.square.fill"
         }
     }
 }
@@ -659,8 +669,9 @@ private struct LookArt: View {
 private struct RemoveArt: View {
     var body: some View {
         VStack(spacing: 5) {
-            // The folder the scan started from: no box, since it can't go.
-            row(nil, "/Users/you", "232 GB")
+            // The folder the scan started from. It can't go, so it has no
+            // box: the dash says something inside it is marked.
+            row(.holds, "/Users/you", "232 GB")
                 .guideBadge(6, at: .leading, outset: 20)
             row(.partly, "Projects", "38.2 GB", depth: 1)
             row(.on, "node_modules", "1.9 GB", depth: 2)
@@ -677,15 +688,11 @@ private struct RemoveArt: View {
     }
 
     private func row(
-        _ mark: ArtCheckbox.Mark?, _ name: String, _ size: String, depth: Int = 0,
+        _ mark: ArtCheckbox.Mark, _ name: String, _ size: String, depth: Int = 0,
         isSelected: Bool = false
     ) -> some View {
         HStack(spacing: 5) {
-            if let mark {
-                ArtCheckbox(mark: mark)
-            } else {
-                Color.clear.frame(width: 13, height: 1)
-            }
+            ArtCheckbox(mark: mark)
             Color.clear.frame(width: CGFloat(depth) * 12, height: 1)
             ArtIcon()
             artText(name)
