@@ -5,6 +5,8 @@ struct ContentView: View {
     @ObservedObject var model: AppModel
     /// The window's, which is what Edit ▸ Undo and ⌘Z act on.
     @Environment(\.undoManager) private var undoManager
+    /// How high the window's contents are. The shortest it goes until told.
+    @State private var windowHeight: CGFloat = 660
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,7 +36,12 @@ struct ContentView: View {
                 if model.showsMarks {
                     Divider()
                     MarksList(model: model)
-                        .frame(height: MarksList.height(for: model.marks.count))
+                        .frame(
+                            height: MarksList.height(
+                                for: model.marks.count,
+                                inWindow: windowHeight
+                            )
+                        )
                 }
                 MarksBar(model: model)
             }
@@ -47,6 +54,19 @@ struct ContentView: View {
         // columns instead of compressing them, so this is the real floor.
         // Enforced as the window minimum via .windowResizability(.contentMinSize).
         .frame(minWidth: 1160, minHeight: 660)
+        // Measured, for the list of marks to be told how much there is. The
+        // stack would not share it out: the tree and the treemap are an
+        // AppKit split, which takes the least it will do with whatever it is
+        // offered, and draws over the tabs above it to get it.
+        .background(
+            GeometryReader { window in
+                Color.clear
+                    .onAppear { windowHeight = window.size.height }
+                    .onChange(of: window.size.height) {
+                        windowHeight = window.size.height
+                    }
+            }
+        )
         .onAppear { model.undoManager = undoManager }
         .onChange(of: undoManager) { model.undoManager = undoManager }
         .quickLookPreview($model.previewURL)

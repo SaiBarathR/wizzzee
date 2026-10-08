@@ -166,10 +166,24 @@ struct MarksBar: View {
 struct MarksList: View {
     @ObservedObject var model: AppModel
 
-    /// Tall enough for a handful and no taller than a third of a small
-    /// window: past that the list scrolls.
-    static func height(for count: Int) -> CGFloat {
-        min(220, CGFloat(count) * 22 + 2)
+    /// What the rest of the window needs when it has the most in it and
+    /// each part is at its least: the header, the banner about Full Disk
+    /// Access, the tabs, the tree over the treemap, the bar under this list
+    /// and the status bar. Added up from the window on screen, with a couple
+    /// of points to spare.
+    static let restOfWindow: CGFloat = 530
+
+    /// A row for each mark up to ten of them, and no more than a window
+    /// `window` high can spare: past either the list scrolls.
+    ///
+    /// Given the height its rows asked for whatever the window's, a long
+    /// list took room the window did not have. At its shortest, what was
+    /// above the list was drawn over itself to fit — the tree across the
+    /// tabs — or went off the top, and the status bar, where a delete's
+    /// Stop is, off the foot.
+    static func height(for count: Int, inWindow window: CGFloat) -> CGFloat {
+        let rows = CGFloat(count) * 22 + 2
+        return max(min(rows, 46), min(rows, 220, window - restOfWindow))
     }
 
     var body: some View {
