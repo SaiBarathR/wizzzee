@@ -138,6 +138,10 @@ enum SelfTest {
         testARevealLeavesANarrowTableWhereItWasAcross()
         testTheMarksBarIsThereFromTheFirstMark()
         testALongListOfMarksLeavesTheFootOfTheWindowInSight()
+        testTheGuideOpensAtLaunchUntilAskedNotTo()
+        testTheKeysWaitUnderTheGuide()
+        testTheGuideSaysWhatTheAppDoes()
+        testTheGuideIsPutUpOverTheWindow()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
 
@@ -9362,6 +9366,281 @@ enum SelfTest {
                 && table.visibleRect.minX == 0,
             "rows \(rowWidth) wide in \(table.visibleRect.width); showing "
                 + "from \(table.visibleRect.minX) across"
+        )
+    }
+
+    // MARK: - The guide
+
+    /// The guide opens with the app until it is asked not to, and that is
+    /// remembered. Once a launch: a window closed and opened again is not
+    /// one.
+    @MainActor
+    private static func testTheGuideOpensAtLaunchUntilAskedNotTo() {
+        let suite = "wizzzee-selftest-welcome-\(getpid())"
+        guard let scratch = UserDefaults(suiteName: suite) else {
+            check("a throwaway preference suite is available", false, suite)
+            return
+        }
+        let real = Preferences.store
+        Preferences.store = scratch
+        defer {
+            Preferences.store = real
+            scratch.removePersistentDomain(forName: suite)
+        }
+
+        check(
+            "with nothing stored the guide is due, and asking stores nothing",
+            Preferences.showsWelcome && !Preferences.showsWelcomeIsStored
+                && Preferences.summary().contains("showsWelcome: true (default)"),
+            Preferences.summary()
+        )
+        let first = AppModel()
+        check(
+            "a model does not put the guide up by being made",
+            !first.showsWelcome,
+            "up before the window is"
+        )
+        first.offerWelcome()
+        check(
+            "the first window of a first launch opens with the guide, at its start",
+            first.showsWelcome && first.welcomePage == .scan,
+            "up \(first.showsWelcome), at \(first.welcomePage)"
+        )
+        first.showsWelcome = false
+        first.offerWelcome()
+        check(
+            "a window opened again in the same launch does not bring it back",
+            !first.showsWelcome,
+            "offered twice"
+        )
+        check(
+            "shutting it is not asking it to stay away",
+            Preferences.showsWelcome && !Preferences.showsWelcomeIsStored,
+            Preferences.summary()
+        )
+
+        Preferences.showsWelcome = false
+        let later = AppModel()
+        later.offerWelcome()
+        check(
+            "asked to stay away, it does at the next launch",
+            !later.showsWelcome
+                && Preferences.summary().contains("showsWelcome: false (stored)"),
+            "up \(later.showsWelcome); " + Preferences.summary()
+        )
+        later.showWelcome(at: .keys)
+        check(
+            "and can still be asked for, at a page",
+            later.showsWelcome && later.welcomePage == .keys,
+            "up \(later.showsWelcome), at \(later.welcomePage)"
+        )
+        later.showWelcome()
+        check(
+            "asked for again while it is up, it turns to the page asked for",
+            later.showsWelcome && later.welcomePage == .scan,
+            "up \(later.showsWelcome), at \(later.welcomePage)"
+        )
+
+        Preferences.showsWelcome = true
+        let again = AppModel()
+        again.offerWelcome()
+        check(
+            "asked back, it opens with the app again",
+            again.showsWelcome,
+            Preferences.summary()
+        )
+    }
+
+    /// The guide names ⌘⌫ to someone who cannot see what is selected behind
+    /// it. A menu's keys go on working under a sheet, so the ones that act on
+    /// the selection are held off for as long as it is up.
+    @MainActor
+    private static func testTheKeysWaitUnderTheGuide() {
+        let model = AppModel()
+        guard let (base, result) = loadWalkabout("guide-keys", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = result.root.subdir(named: "a"),
+            let y = a.files.firstIndex(where: { $0.name == "y.dat" })
+        else {
+            check("the guide keys fixture scanned", false, "missing entries")
+            return
+        }
+        let yRef = NodeRef(dir: a, fileIndex: y)
+        let onDisk = { FileManager.default.fileExists(atPath: yRef.path) }
+        model.showsTreemap = false
+        model.setExpanded(a, true)
+        model.selection = [yRef]
+        check(
+            "with a row selected and nothing in the way, the keys are live",
+            model.canUseDeleteKeys && model.canMarkSelection
+                && model.canTogglePreview && model.canChooseFolder,
+            "delete \(model.canUseDeleteKeys), mark \(model.canMarkSelection), "
+                + "look \(model.canTogglePreview), folder \(model.canChooseFolder)"
+        )
+
+        model.showWelcome()
+        check(
+            "under the guide they are not",
+            !model.canUseDeleteKeys && !model.canMarkSelection
+                && !model.canTogglePreview && !model.canChooseFolder,
+            "delete \(model.canUseDeleteKeys), mark \(model.canMarkSelection), "
+                + "look \(model.canTogglePreview), folder \(model.canChooseFolder)"
+        )
+        model.trashSelection()
+        model.confirmDeletingSelection()
+        let marked = model.markSelection()
+        check(
+            "and pressed anyway, they move nothing, ask nothing and mark nothing",
+            onDisk() && !model.isDeleting && model.permanentDeleteTargets.isEmpty
+                && !marked && model.marks.isEmpty,
+            "on disk \(onDisk()), deleting \(model.isDeleting), asking about "
+                + "\(model.permanentDeleteTargets.count), marked \(model.marks.count)"
+        )
+
+        model.showsWelcome = false
+        check(
+            "they are back when it is shut",
+            model.canUseDeleteKeys && model.canMarkSelection,
+            "delete \(model.canUseDeleteKeys), mark \(model.canMarkSelection)"
+        )
+
+        // Quick Look's panel floats over a sheet, and its key is one of
+        // those the guide holds off.
+        model.togglePreview()
+        let wasLooking = model.previewURL != nil
+        model.showWelcome()
+        check(
+            "the guide shuts Quick Look as it opens, and is not put up beside it",
+            wasLooking && model.showsWelcome && model.previewURL == nil,
+            "looking before \(wasLooking), after \(model.previewURL != nil); "
+                + "guide up \(model.showsWelcome)"
+        )
+        model.showsWelcome = false
+
+        // Two sheets on one window are shown one after the other: the guide
+        // would come up when the question under it had been answered.
+        model.confirmDeletingSelection()
+        model.showWelcome()
+        check(
+            "the guide is not put up over a question that is waiting for an answer",
+            !model.permanentDeleteTargets.isEmpty && !model.canShowWelcome
+                && !model.showsWelcome,
+            "asking about \(model.permanentDeleteTargets.count), guide up "
+                + "\(model.showsWelcome)"
+        )
+        model.permanentDeleteTargets = []
+    }
+
+    /// What the guide says is held to itself: a page numbers its tips from
+    /// one, since the picture above them points at them by number, and a key
+    /// that a page names is in the table of all of them.
+    private static func testTheGuideSaysWhatTheAppDoes() {
+        var misnumbered: [String] = []
+        var unplaced: [String] = []
+        for page in WelcomePage.allCases where page != .keys {
+            if page.tips.map(\.id) != Array(1...max(page.tips.count, 1)) {
+                misnumbered.append(page.title)
+            }
+            if page.place == nil || page.regions.isEmpty || page.tips.isEmpty {
+                unplaced.append(page.title)
+            }
+        }
+        check(
+            "every page of the guide numbers its tips from one, with none missing",
+            misnumbered.isEmpty,
+            "out of order on: \(misnumbered)"
+        )
+        check(
+            "every page that is about a part of the window says which part",
+            unplaced.isEmpty,
+            "no place, nothing lit or no tips on: \(unplaced)"
+        )
+        check(
+            "the page of keys is about no one part, and has the table instead",
+            WelcomePage.keys.tips.isEmpty && WelcomePage.keys.place == nil
+                && !WelcomeShortcutGroup.all.isEmpty,
+            "\(WelcomePage.keys.tips.count) tips, \(WelcomeShortcutGroup.all.count) groups"
+        )
+
+        let listed = Set(
+            WelcomeShortcutGroup.all.flatMap(\.shortcuts).flatMap(\.keys)
+                .map { $0.joined(separator: " ") }
+        )
+        var unlisted: [String] = []
+        for page in WelcomePage.allCases {
+            for tip in page.tips {
+                for chord in tip.keys where !listed.contains(chord.joined(separator: " ")) {
+                    unlisted.append("\(chord.joined(separator: " ")) (\(page.title))")
+                }
+            }
+        }
+        check(
+            "a key that a page names is in the table of all the keys",
+            unlisted.isEmpty,
+            "not in the table: \(unlisted)"
+        )
+        let actions = WelcomeShortcutGroup.all.flatMap(\.shortcuts).map(\.action)
+        check(
+            "and the table says no one thing twice",
+            Set(actions).count == actions.count,
+            "\(actions.count) lines, \(Set(actions).count) different"
+        )
+        // The tabs' keys are the model's to set, and the table spells them out.
+        let tabKeys = Set(MainTab.allCases.map { "⌘ \($0.key)" })
+        check(
+            "the keys it gives for the tabs are the keys the tabs have",
+            tabKeys.isSubset(of: listed),
+            "tabs on \(tabKeys.sorted()), table has \(listed.sorted())"
+        )
+        check(
+            "a chord is read out by the names of its keys",
+            KeyCap.spoken(["⌥", "⌘", "⌫"]) == "Option Command Delete"
+                && KeyCap.spoken(["⌘", "R"]) == "Command R",
+            KeyCap.spoken(["⌥", "⌘", "⌫"])
+        )
+    }
+
+    /// The guide is a sheet on the real window, put up and taken down by the
+    /// model's say-so and nothing else.
+    @MainActor
+    private static func testTheGuideIsPutUpOverTheWindow() {
+        let model = AppModel()
+        model.dismissedAccessPrompt = true
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+        pump(0.3)
+        check(
+            "a window that is only being drawn has no guide over it",
+            window.attachedSheet == nil && !model.showsWelcome,
+            "sheet \(window.attachedSheet != nil), asked for \(model.showsWelcome)"
+        )
+
+        model.showWelcome(at: .remove)
+        let came = pumpUntil(10, { window.attachedSheet != nil })
+        let size = window.attachedSheet?.contentView?.frame.size ?? .zero
+        check(
+            "asked for, the guide comes up as a sheet on the window, at its size",
+            came && size == WelcomeGuide.size,
+            "sheet \(came), \(size) for \(WelcomeGuide.size)"
+        )
+        model.showsWelcome = false
+        let went = pumpUntil(10, { window.attachedSheet == nil })
+        check(
+            "and goes when it is shut",
+            went,
+            "still attached"
         )
     }
 

@@ -23,7 +23,11 @@ enum CLI {
                                              [--metric size|disk]
                                              [--select-largest] [--no-access-banner]
                                              [--no-treemap] [--mark N]
+                                             [--no-marks-list]
                                              [--type EXT] [--filter TEXT]
+                                             [--appearance light|dark]
+              Wizzzee --uishot --welcome N   render page N of the guide instead
+                                             [--out <png>] [--appearance light|dark]
               Wizzzee --version              print the version
             """
         )

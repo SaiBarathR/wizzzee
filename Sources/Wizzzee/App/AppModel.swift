@@ -357,6 +357,14 @@ final class AppModel: ObservableObject {
     /// Whether the list of marks is open above the bar that counts them.
     @Published var showsMarks = false
 
+    // The guide
+    /// Whether the guide to the app is up, over the window.
+    @Published var showsWelcome = false
+    /// The page of it that is open, or that it will open at.
+    @Published var welcomePage = WelcomePage.scan
+    /// Whether this launch has had its chance to open with the guide.
+    private var hasOfferedWelcome = false
+
     // Errors surfaced as a sheet
     @Published var actionError: String?
     @Published var actionErrorDetail: String?
@@ -855,6 +863,7 @@ final class AppModel: ObservableObject {
         if previewURL != nil { return true }
         return previewCandidate != nil && !isChoosingFolder
             && permanentDeleteTargets.isEmpty && actionError == nil
+            && !showsWelcome
     }
 
     /// ⌘Y, as in Finder: opens Quick Look on the selected item, and shuts it
@@ -936,6 +945,35 @@ final class AppModel: ObservableObject {
             return
         }
         if ref != previewed { show(inPreview: ref) }
+    }
+
+    // MARK: - The guide
+
+    /// False while something else is over the window waiting for an answer:
+    /// two sheets on one window are shown one after the other, and the guide
+    /// would come up when the question under it had been answered.
+    var canShowWelcome: Bool {
+        permanentDeleteTargets.isEmpty && actionError == nil && !isChoosingFolder
+    }
+
+    /// Puts the guide up, at `page`. Already up, it turns to that page.
+    ///
+    /// Quick Look is shut first. Its panel floats over the guide, and ⌘Y,
+    /// which would shut it, is off for as long as the guide is up.
+    func showWelcome(at page: WelcomePage = .scan) {
+        guard showsWelcome || canShowWelcome else { return }
+        if previewURL != nil { previewURL = nil }
+        welcomePage = page
+        showsWelcome = true
+    }
+
+    /// Opens with the guide, the first time the window is put up in a launch
+    /// and for as long as it has not been asked to stay away. Once: a window
+    /// that is closed and opened again is not a launch.
+    func offerWelcome() {
+        guard !hasOfferedWelcome else { return }
+        hasOfferedWelcome = true
+        if Preferences.showsWelcome { showWelcome() }
     }
 
     // MARK: - Tabs
@@ -1101,7 +1139,7 @@ final class AppModel: ObservableObject {
     /// keeps ⌘⌫ in the panel from trashing the selection behind it.
     var canChooseFolder: Bool {
         canStartScan && !isChoosingFolder && permanentDeleteTargets.isEmpty
-            && actionError == nil
+            && actionError == nil && !showsWelcome
     }
 
     func chooseFolder() {
@@ -1821,7 +1859,7 @@ final class AppModel: ObservableObject {
     /// Whether Space and the menu have anything to mark: what is selected and
     /// on show, as for the delete keys, less whatever can't carry a mark.
     var canMarkSelection: Bool {
-        guard !isEditingFilter, !isDeleting else { return false }
+        guard !isEditingFilter, !isDeleting, !showsWelcome else { return false }
         let onShow = isOnShow
         // Cheapest first: `canMark` builds a path, and this is asked on
         // every publish.
@@ -1984,10 +2022,13 @@ final class AppModel: ObservableObject {
 
     /// False when the delete keys have nothing to act on or something is in
     /// the way: a batch already running, a sheet waiting for an answer, the
-    /// filter or the folder picker holding the keyboard.
+    /// filter or the folder picker holding the keyboard, the guide over the
+    /// window — which names these keys, to someone who cannot see what is
+    /// selected behind it.
     var canUseDeleteKeys: Bool {
         !isDeleting && !isEditingFilter && !isChoosingFolder
             && permanentDeleteTargets.isEmpty && actionError == nil
+            && !showsWelcome
             && selection.contains(where: isOnShow)
     }
 

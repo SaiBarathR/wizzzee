@@ -196,6 +196,12 @@ struct AboutTab: View {
                     .font(.system(size: 22, weight: .semibold))
                 Text("A disk space analyzer for macOS, in the shape of WizTree.")
                     .foregroundStyle(.secondary)
+                // Where someone looking for how it works will look.
+                HStack(spacing: 8) {
+                    Button("Welcome Guide…") { model.showWelcome() }
+                    Button("Keyboard Shortcuts…") { model.showWelcome(at: .keys) }
+                }
+                .disabled(!model.canShowWelcome)
 
                 if let result = model.result {
                     Divider()

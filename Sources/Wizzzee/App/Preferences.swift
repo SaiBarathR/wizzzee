@@ -43,6 +43,20 @@ enum Preferences {
 
     static var sizeMetricIsStored: Bool { store.object(forKey: sizeMetricKey) != nil }
 
+    private static let showsWelcomeKey = "showsWelcome"
+
+    /// Whether the guide is put up when the app opens. Absent means it is:
+    /// the launch with nothing stored is the first, which is the one it is
+    /// for.
+    static var showsWelcome: Bool {
+        get { store.object(forKey: showsWelcomeKey) as? Bool ?? true }
+        set { store.set(newValue, forKey: showsWelcomeKey) }
+    }
+
+    static var showsWelcomeIsStored: Bool {
+        store.object(forKey: showsWelcomeKey) != nil
+    }
+
     private static let lastFolderKey = "lastFolder"
     private static let lastVolumeKey = "lastVolume"
 
@@ -104,6 +118,7 @@ enum Preferences {
             (\(sizeMetricIsStored ? "stored" : "default"))
             lastFolder: \(lastFolder ?? "none")
             lastVolume: \(lastVolume ?? "none")
+            showsWelcome: \(showsWelcome) (\(showsWelcomeIsStored ? "stored" : "default"))
             """
     }
 }

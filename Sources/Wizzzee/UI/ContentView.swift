@@ -70,6 +70,9 @@ struct ContentView: View {
         .onAppear { model.undoManager = undoManager }
         .onChange(of: undoManager) { model.undoManager = undoManager }
         .quickLookPreview($model.previewURL)
+        .sheet(isPresented: $model.showsWelcome) {
+            WelcomeGuide(page: $model.welcomePage) { model.showsWelcome = false }
+        }
         .alert(
             model.actionError ?? "Something went wrong",
             isPresented: Binding(

@@ -26,6 +26,7 @@ enum UIShot {
         var opensMarksList = true
         var focusType: String?
         var filter = ""
+        var welcomePage: WelcomePage?
 
         var index = 0
         while index < arguments.count {
@@ -80,6 +81,31 @@ enum UIShot {
                 // them needs some put on for it.
                 markCount = Int(next ?? "1") ?? 1
                 index += 2
+            case "--welcome":
+                // The guide, which is a sheet over the window and so is not
+                // in a picture of the window. Drawn on its own, at the page
+                // numbered.
+                let number = Int(next ?? "1") ?? 1
+                guard let page = WelcomePage(rawValue: number - 1) else {
+                    print(
+                        "no page \(number) in the guide; it has "
+                            + "\(WelcomePage.allCases.count)"
+                    )
+                    exit(2)
+                }
+                welcomePage = page
+                index += 2
+            case "--appearance":
+                // Whichever the system is in is what a picture comes out
+                // in, and one machine is in one of them.
+                switch next?.lowercased() {
+                case "light": NSApplication.shared.appearance = NSAppearance(named: .aqua)
+                case "dark": NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+                default:
+                    print("unknown appearance “\(next ?? "")”; expected light or dark")
+                    exit(2)
+                }
+                index += 2
             case "--no-marks-list":
                 // The bar the marks bring up, as it is before Show List is
                 // clicked.
@@ -123,6 +149,22 @@ enum UIShot {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
+        if let welcomePage {
+            // Over the window it is on a sheet, which is what it is drawn
+            // against. Here there is none, and nothing behind the text.
+            let guide = WelcomeGuide(page: .constant(welcomePage)) {}
+                .background(Color(nsColor: .windowBackgroundColor))
+            let hosting = NSHostingView(rootView: guide)
+            hosting.frame = NSRect(origin: .zero, size: WelcomeGuide.size)
+            let window = offscreenWindow(holding: hosting)
+            pump(seconds: 1.0)
+            hosting.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            pump(seconds: 0.5)
+            write(hosting, to: output)
+            exit(0)
+        }
+
         let model = AppModel()
         model.tab = tab
         model.customFolder = scanPath
@@ -134,18 +176,7 @@ enum UIShot {
         let frame = NSRect(x: 0, y: 0, width: width, height: height)
         hosting.frame = frame
 
-        let window = NSWindow(
-            contentRect: frame,
-            styleMask: [.titled, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Wizzzee"
-        window.contentView = hosting
-        window.isReleasedWhenClosed = false
-        // Kept off screen so the capture doesn't steal focus from the user.
-        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
-        window.orderFront(nil)
+        let window = offscreenWindow(holding: hosting)
 
         print("Scanning \(scanPath) for UI capture…")
         model.startScan()
@@ -216,13 +247,38 @@ enum UIShot {
         window.displayIfNeeded()
         pump(seconds: 1.5)
 
-        guard
-            let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds)
-        else {
+        write(hosting, to: output)
+        exit(0)
+    }
+
+    /// A window for `view` to be laid out and drawn in, where nobody will
+    /// see it.
+    @MainActor
+    private static func offscreenWindow(holding view: NSView) -> NSWindow {
+        let window = NSWindow(
+            contentRect: view.frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Wizzzee"
+        window.contentView = view
+        window.isReleasedWhenClosed = false
+        // Kept off screen so the capture doesn't steal focus from the user.
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        return window
+    }
+
+    /// Draws `view` as it stands into a PNG at `output`, and says so. Ends
+    /// the process if it can't.
+    @MainActor
+    private static func write(_ view: NSView, to output: String) {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             print("couldn't allocate a bitmap for the view")
             exit(1)
         }
-        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        view.cacheDisplay(in: view.bounds, to: rep)
 
         guard let image = rep.cgImage else {
             print("couldn't rasterize the view")
@@ -248,7 +304,6 @@ enum UIShot {
             print("failed to write \(output)")
             exit(1)
         }
-        exit(0)
     }
 
     /// Runs the main run loop until `condition` holds or `timeout` elapses.
