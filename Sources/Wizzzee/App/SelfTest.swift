@@ -7717,6 +7717,41 @@ enum SelfTest {
             getuid() == 0 || (kept.undo && kept.bytes == zOnDisk),
             "can undo \(kept.undo), \(kept.bytes) bytes in the Trash"
         )
+        // Asked to bring it back at such a moment: it was said to be "no
+        // longer in the Trash", which was not so, and the Undo was thrown
+        // away with the thing still sitting there.
+        let stack = UndoManager()
+        model.undoManager = stack
+        if getuid() != 0 {
+            chmod(bin.path, 0)
+            model.undoTrash()
+            drainMainQueue()
+            let refused = (
+                error: model.actionError, detail: model.actionErrorDetail,
+                undo: model.canUndoTrash, bytes: model.bytesInTrash, stacked: stack.canUndo
+            )
+            chmod(bin.path, 0o755)
+            check(
+                "asked for while its Trash can't be reached, a move is still one to undo",
+                refused.error == "Couldn’t put back “z.dat”"
+                    && refused.detail?.contains("can’t be reached") == true
+                    && refused.undo && refused.stacked && refused.bytes == zOnDisk,
+                "\(refused.error ?? "nothing said"): \(refused.detail ?? ""); can undo "
+                    + "\(refused.undo), on the stack \(refused.stacked)"
+            )
+            model.actionError = nil
+            model.actionErrorDetail = nil
+        }
+        model.undoTrash()
+        check(
+            "and is undone once it can be",
+            FileManager.default.fileExists(atPath: base.path + "/c/z.dat")
+                && !model.canUndoTrash && model.bytesInTrash == 0 && model.actionError == nil,
+            "\(model.actionError ?? "no error"); \(model.bytesInTrash) bytes in the Trash"
+        )
+        model.undoManager = nil
+        // Back into the Trash, for the scan that follows to find it there.
+        trash(model, [NodeRef(dir: c2, fileIndex: index)])
         guard let third = loadSynchronously(into: model) else { return }
         let counted = third.root.subdir(named: "bin")?.files.contains { $0.name == "z.dat" }
         check(

@@ -2519,11 +2519,13 @@ final class AppModel: ObservableObject {
 
         var back: [Trashed] = []
         var failures: [(name: String, reason: String)] = []
+        var unreached = 0
         for item in batch {
             do {
                 try FileActions.putBack(item.receipt, to: item.path)
                 back.append(item)
             } catch {
+                if case FileActions.PutBackError.unreachable = error { unreached += 1 }
                 failures.append(
                     ((item.path as NSString).lastPathComponent, error.localizedDescription)
                 )
@@ -2550,6 +2552,17 @@ final class AppModel: ObservableObject {
         )
         refreshTrashLine()
         rereadCapacity()
+
+        // None of it could be reached, which is neither a move undone nor
+        // one that can't be: it is still the move to undo, once the disk
+        // answers. Put back on the stack a turn later, since anything
+        // registered while an undo is under way is taken for a redo.
+        if unreached == batch.count {
+            lastTrash = batch
+            lastTrashTook = took
+            canUndoTrash = true
+            DispatchQueue.main.async { [weak self] in self?.registerUndo() }
+        }
 
         guard let first = failures.first else { return }
         actionError =

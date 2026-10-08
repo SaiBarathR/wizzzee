@@ -235,6 +235,9 @@ enum FileActions {
     /// Why something could not be brought back out of the Trash.
     enum PutBackError: LocalizedError {
         case notInTrash
+        /// Its place in the Trash can't be looked at, so nothing is known
+        /// of it: it may well be there.
+        case unreachable
         case nameTaken(String)
         case folderGone(String)
         case failed(String)
@@ -243,6 +246,8 @@ enum FileActions {
             switch self {
             case .notInTrash:
                 return "It is no longer in the Trash."
+            case .unreachable:
+                return "The Trash it is in can’t be reached just now."
             case .nameTaken(let path):
                 return "Something else is at “\(path)” now."
             case .folderGone(let path):
@@ -274,7 +279,10 @@ enum FileActions {
     /// It is a rename and nothing else. The Trash is on the volume the item
     /// came from, so there is never a copy to fall back on.
     static func putBack(_ receipt: TrashReceipt, to path: String) throws {
-        guard receipt.isStillInTrash else { throw PutBackError.notInTrash }
+        guard receipt.isStillInTrash else {
+            // Not seen there is not the same as gone from there.
+            throw receipt.hasLeftTrash ? PutBackError.notInTrash : PutBackError.unreachable
+        }
         let folder = (path as NSString).deletingLastPathComponent
         var info = stat()
         guard lstat(folder, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
