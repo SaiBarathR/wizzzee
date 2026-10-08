@@ -288,8 +288,8 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                     6, "What can’t be removed",
                     "The system volume is sealed, and a whole volume, a home "
                         + "folder and the folder a scan started from are not for "
-                        + "removing. Their rows have no box to tick: only a dash, "
-                        + "when something inside is marked."
+                        + "removing. Their rows have no box to tick; a dash "
+                        + "there says something inside is marked."
                 ),
             ]
         case .keys:
