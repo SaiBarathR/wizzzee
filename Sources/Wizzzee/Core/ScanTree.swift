@@ -257,6 +257,11 @@ final class DirNode {
     var subdirs: [DirNode] = []
     var files: [FileEntry] = []
 
+    /// Inode number, or zero for a node no scan made. What a folder is,
+    /// as against where it is: a mark carried over to the next scan goes
+    /// back on the folder it was on, not on another that has its name.
+    var fileID: UInt64 = 0
+
     /// Logical size of this subtree, including all descendants.
     var totalSize: UInt64 = 0
     /// Size on disk of this subtree.
@@ -614,9 +619,10 @@ final class ScanResult {
     }
 
     /// Which of `inodes` have a name in the tree that their bytes are
-    /// counted under. One pass over every file, for when something
-    /// hard-linked is coming back and has to be told whether it is the name
-    /// that carries the bytes or a second one.
+    /// counted under. A pass over the files, for when something hard-linked
+    /// is coming back and has to be told whether it is the name that
+    /// carries the bytes or a second one. It stops when it has an answer
+    /// for each of them.
     func countedNames(among inodes: Set<UInt64>) -> Set<UInt64> {
         var counted: Set<UInt64> = []
         guard !inodes.isEmpty else { return counted }
@@ -626,6 +632,7 @@ final class ScanResult {
             where !file.isRemoved && !file.isDuplicateLink && inodes.contains(file.fileID) {
                 counted.insert(file.fileID)
             }
+            if counted.count == inodes.count { break }
             stack.append(contentsOf: dir.subdirs)
         }
         return counted

@@ -283,6 +283,10 @@ final class AppModel: ObservableObject {
 
     // File View
     @Published private(set) var fileRows: [FileRow] = []
+    /// The search and the type `fileRows` were found for. They stay on
+    /// screen while the walk for another comes back, which on a big scan is
+    /// long enough to act in: see `isOnShow`.
+    private var fileRowsAnswer: (query: String, type: String?) = ("", nil)
     @Published var fileQuery: String = ""
     /// What the search in hand found, listed or not, once it has come back.
     /// Nil with nothing asked for: the list is then the largest files, and
@@ -451,7 +455,10 @@ final class AppModel: ObservableObject {
         /// The space it took as the scan had it, for sharing out what the
         /// batch took off the totals among what it moved.
         let weight: UInt64
-        let wasMarked: Bool
+        /// The marks that went with it: its own, or for a folder those on
+        /// what was inside it. Only the first was kept, and a folder that
+        /// came back came back with everything in it unmarked.
+        let marks: [NodeRef]
     }
 
     /// What the last move to the Trash moved, for as long as it can be
@@ -476,8 +483,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var bytesInTrash: UInt64 = 0
 
     /// The window's undo manager, so that Edit ▸ Undo and ⌘Z offer the move
-    /// back. Nil in the self-test, which calls `undoTrash` itself.
-    weak var undoManager: UndoManager?
+    /// back.
+    ///
+    /// A window that is shut and opened again has a stack of its own with
+    /// nothing on it, so a move still waiting to be undone is put on that
+    /// one too: the Undo button in the status bar offered it and ⌘Z did not.
+    weak var undoManager: UndoManager? {
+        didSet {
+            if undoManager !== oldValue { registerUndo() }
+        }
+    }
 
     /// Brings the Trash line up to date when the app comes to the front: the
     /// Trash is emptied from Finder, not from here.
@@ -488,6 +503,18 @@ final class AppModel: ObservableObject {
     /// emptied from a script, or from the Dock's menu with this window still
     /// in front, and the line then went on quoting what was no longer there.
     private var trashWatch: AnyCancellable?
+
+    /// How a batch moves one thing to the Trash. A property so the
+    /// self-test can stand in a Trash that does not say where things went,
+    /// and one that is inside the folder being scanned.
+    var trashMover: @Sendable (String) throws -> FileActions.TrashReceipt? = {
+        try FileActions.moveToTrash($0)
+    }
+
+    /// Asks the disk whether what is at a path is with a cloud provider.
+    /// A property for the reason `readCapacity` is one: a file can't be
+    /// made online only to order.
+    var isOnlineOnlyNow: (String) -> Bool = FileActions.isOnlineOnly
 
     /// How the scanned volume's capacity is read back after a delete.
     ///
@@ -512,14 +539,31 @@ final class AppModel: ObservableObject {
     private struct Spot {
         let path: String
         let isDirectory: Bool
+        /// Its number on the volume, or zero where none was taken.
+        let fileID: UInt64
 
         init(_ ref: NodeRef) {
             path = ref.path
             isDirectory = ref.isDirectory
+            fileID = Self.number(of: ref)
         }
 
+        private static func number(of ref: NodeRef) -> UInt64 {
+            ref.isDirectory ? ref.dir.fileID : ref.file?.fileID ?? 0
+        }
+
+        /// What is there now, if it is the same thing. A file or a folder
+        /// is known by its number as well as its name: another put in its
+        /// place since is not what was marked, and the list of marks is
+        /// moved to the Trash without asking.
         func find(in scan: ScanResult) -> NodeRef? {
-            isDirectory ? scan.directory(at: path).map { NodeRef($0) } : scan.file(at: path)
+            guard
+                let found = isDirectory
+                    ? scan.directory(at: path).map({ NodeRef($0) })
+                    : scan.file(at: path)
+            else { return nil }
+            let now = Self.number(of: found)
+            return fileID == 0 || now == 0 || now == fileID ? found : nil
         }
     }
 
@@ -646,6 +690,16 @@ final class AppModel: ObservableObject {
                     let new = note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL
                 {
                     Preferences.volumeMoved(from: old.path, to: new.path)
+                    // And the folder this session is set to scan, or the
+                    // next Scan throws the tree away and then fails at a
+                    // path that is no longer there.
+                    if let folder = self.customFolder {
+                        self.customFolder = Preferences.path(
+                            folder,
+                            movedFrom: old.path,
+                            to: new.path
+                        )
+                    }
                 }
                 self.refreshVolumes()
             }
@@ -819,7 +873,7 @@ final class AppModel: ObservableObject {
     /// looked at.
     func preview(_ ref: NodeRef) {
         guard !ref.isStale else { return }
-        if isOnlineOnly(ref) {
+        if isOnlineOnly(ref, askingTheDisk: true) {
             actionError = "“\(ref.name)” is online only"
             actionErrorDetail =
                 "Its contents are with a cloud provider and not on this disk. "
@@ -834,16 +888,20 @@ final class AppModel: ObservableObject {
     /// Whether Quick Look would have to download `ref` to show it. A folder
     /// is shown as its icon and is not read.
     ///
-    /// The scan's own note of it, for a file. Only a link has the disk
+    /// The scan's own note of it, for a file. A link always has the disk
     /// asked as well, since the note is of the link and what reads a link
     /// reads what it is to. Asking for every file would be a look at the
     /// disk, on the main thread, for each row the selection passes over
     /// with the panel up — and a disk that is slow to answer, one spinning
     /// up or a share that has dropped, would hold the window until it did.
-    private func isOnlineOnly(_ ref: NodeRef) -> Bool {
+    ///
+    /// `askingTheDisk` is for the one look that was asked for by name. The
+    /// note is as old as the scan, and a file sent back to the cloud since —
+    /// Remove Download, to make room — was still down in it as all here.
+    private func isOnlineOnly(_ ref: NodeRef, askingTheDisk: Bool = false) -> Bool {
         guard let file = ref.file else { return false }
         if file.storage == .dataless { return true }
-        return file.isSymlink && FileActions.isOnlineOnly(ref.path)
+        return (askingTheDisk || file.isSymlink) && isOnlineOnlyNow(ref.path)
     }
 
     /// Points the panel at `ref`, or shuts it if `ref` is not something it
@@ -1042,14 +1100,16 @@ final class AppModel: ObservableObject {
         guard canChooseFolder else { return }
         // The panel has a ⌘⌫ of its own, for the file selected in it.
         isChoosingFolder = true
-        defer { isChoosingFolder = false }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Scan"
         panel.message = "Choose a folder to analyze"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let answer = panel.runModal()
+        // Before the scan is asked for, which is refused while this is set.
+        isChoosingFolder = false
+        guard answer == .OK, let url = panel.url else { return }
         scanFolder(url.path)
     }
 
@@ -1070,7 +1130,11 @@ final class AppModel: ObservableObject {
     /// hard-link counts matched by inode in a tree it never touched, and totals
     /// subtracted along a parent chain the rescan has freed. The scan itself
     /// would be reading folders in the middle of being removed.
-    var canStartScan: Bool { phase != .scanning && !isDeleting }
+    ///
+    /// Nor with the folder picker up. A key reaches the menu from under it,
+    /// and ⌘R there scanned what was being left: the folder then chosen
+    /// was named in the header over a tree that was not of it.
+    var canStartScan: Bool { phase != .scanning && !isDeleting && !isChoosingFolder }
 
     func startScan() {
         guard canStartScan else { return }
@@ -1079,7 +1143,12 @@ final class AppModel: ObservableObject {
         // The tree a move to the Trash would be put back into is about to go.
         forgetUndo()
         // Taken before anything below lets go of the tree it describes.
-        placeToRestore = place(forScanOf: path)
+        // With no tree to take it from — the last scan of this folder was
+        // stopped, or failed — what that scan was to put back still stands.
+        let held = placeToRestore.flatMap {
+            $0.rootPath == ScanEngine.normalize(path) ? $0 : nil
+        }
+        placeToRestore = place(forScanOf: path) ?? held
         marksLostToRescan = 0
 
         result = nil
@@ -1152,9 +1221,12 @@ final class AppModel: ObservableObject {
         // `progress` outside `.scanning` describing a scan that has ended.
         progress = ScanEngine.Progress()
 
-        // Whatever the outcome, the place was for this scan and no other.
+        // Kept when the scan did not land. It is paths and no part of any
+        // tree, so it is as good for the next scan of the same folder: let
+        // go of here, ⌘R and then Stop emptied the marks for good, which is
+        // what keeping a place across a rescan was to put an end to.
         let place = placeToRestore
-        placeToRestore = nil
+        if case .completed = outcome { placeToRestore = nil }
 
         let scanned: ScanResult
         switch outcome {
@@ -1173,6 +1245,22 @@ final class AppModel: ObservableObject {
 
         result = scanned
         phase = .complete
+        // What this scan found in the Trash is in its totals, and is no
+        // longer space that has left them: a scan of a home folder reads
+        // its Trash, and the line went on counting it a second time.
+        if !sessionTrash.isEmpty {
+            sessionTrash.removeAll { entry in
+                // Spelled as the scan spells it: with every link in the
+                // folders above it followed, and it itself left as it is.
+                let inTrash = entry.receipt.inTrash as NSString
+                let path = ScanEngine.join(
+                    ScanEngine.normalize(inTrash.deletingLastPathComponent),
+                    inTrash.lastPathComponent
+                )
+                return scanned.file(at: path) != nil || scanned.directory(at: path) != nil
+            }
+            refreshTrashLine()
+        }
         treemapRoot = scanned.root
         selection = [NodeRef(scanned.root)]
         // Open the root so the biggest folders are visible immediately.
@@ -1281,20 +1369,27 @@ final class AppModel: ObservableObject {
         revealCount += 1
     }
 
-    /// Whether `ref` is still the row last asked for, and still what is
-    /// selected: the test a scroll that was put off has to pass when its
-    /// time comes. A rescan, a delete of the row, another reveal or a click
-    /// elsewhere all fail it.
+    /// Whether `ref` is still the row last asked for, and still selected:
+    /// the test a scroll that was put off has to pass when its time comes.
+    /// A rescan, a delete of the row, another reveal or a click elsewhere
+    /// all fail it. Selected, not all that is: several things put back at
+    /// once are all selected, and one of them is scrolled to.
     func isStillRevealing(_ ref: NodeRef) -> Bool {
-        revealTarget == ref && selection == [ref] && !ref.isStale
+        revealTarget == ref && selection.contains(ref) && !ref.isStale
     }
 
     /// The row waiting to be scrolled to, if one is. Asking is answering: it
     /// stops waiting.
+    ///
+    /// Put to the same test as a scroll that was put off. One asked for
+    /// with the Tree View out of sight waits for it to come back, which can
+    /// be many clicks later, and the tree then opened scrolled to a row
+    /// that was no longer what was selected.
     func takeRevealTarget() -> NodeRef? {
         guard revealIsWaiting else { return nil }
         revealIsWaiting = false
-        return revealTarget
+        guard let ref = revealTarget, isStillRevealing(ref) else { return nil }
+        return ref
     }
 
     /// Selects a tile clicked on the treemap, and brings its row into view
@@ -1500,6 +1595,7 @@ final class AppModel: ObservableObject {
                     self.fileQuery == query, self.focusedType == type,
                     self.treeRevision == revision, self.result === source
                 else { return }
+                self.fileRowsAnswer = (query, type)
                 self.fileRows = self.inFileOrder(rows)
                 self.fileTally = tally
                 self.isFilteringFiles = false
@@ -1836,6 +1932,14 @@ final class AppModel: ObservableObject {
                     && !ref.isStale
             }
         case .files:
+            // Rows left over from the search before, or from another type,
+            // are on screen and are not what the bar above them says is
+            // listed: the chip already read ".dmg only" over a folder a
+            // search had found, still selected, and ⌘⌫ took the folder.
+            // Until the walk comes back there is nothing on show to act on.
+            guard fileRowsAnswer.query == fileQuery,
+                fileRowsAnswer.type == focusedType
+            else { return { _ in false } }
             let rows = Set(fileRows.lazy.map(\.ref))
             return { ref in !ref.isStale && rows.contains(ref) }
         case .about:
@@ -2126,6 +2230,7 @@ final class AppModel: ObservableObject {
         )
         let attempted = targets.count
         let onTheirWayOut = Set(allowed.map(\.ref))
+        let mover = trashMover
 
         deleteTask = Task { [weak self] in
             // The rows are set back only once the batch has outlasted a
@@ -2143,6 +2248,7 @@ final class AppModel: ObservableObject {
             var failures: [(title: String, detail: String)] = []
             var finished = Removal.Tally()
             var trashed: [(target: Target, receipt: FileActions.TrashReceipt)] = []
+            var beyondUndo: [String] = []
 
             for (index, target) in allowed.enumerated() {
                 // Checked between items as well as inside one: a move to the
@@ -2151,7 +2257,7 @@ final class AppModel: ObservableObject {
 
                 let before = finished
                 let disposed = await Task.detached(priority: .userInitiated) {
-                    Self.dispose(of: target, as: disposal, stop: stop) { tally in
+                    Self.dispose(of: target, as: disposal, by: mover, stop: stop) { tally in
                         let total = Removal.Tally(
                             items: before.items + tally.items,
                             bytes: before.bytes + tally.bytes
@@ -2163,7 +2269,11 @@ final class AppModel: ObservableObject {
                 }.value
 
                 gone.append(contentsOf: disposed.gone)
-                if let receipt = disposed.receipt { trashed.append((target, receipt)) }
+                if let receipt = disposed.receipt {
+                    trashed.append((target, receipt))
+                } else if disposal == .trash, !disposed.gone.isEmpty {
+                    beyondUndo.append((target.path as NSString).lastPathComponent)
+                }
                 if let failure = disposed.failure { failures.append(failure) }
                 finished.items += disposed.tally.items
                 finished.bytes += disposed.tally.bytes
@@ -2208,7 +2318,33 @@ final class AppModel: ObservableObject {
                 refusals: refusals,
                 attempted: attempted
             )
+            self.report(beyondUndo: beyondUndo)
         }
+    }
+
+    /// Says so when something has gone to the Trash and can't be brought
+    /// back from here: the Trash did not say where it went, or what is there
+    /// can't be seen to be it. ⌘⌫ asks nothing on the understanding that it
+    /// can be undone, and these went with no Undo offered and not a word
+    /// said.
+    private func report(beyondUndo names: [String]) {
+        guard let first = names.first else { return }
+        let title =
+            names.count == 1
+            ? "Undo can’t bring back “\(first)”"
+            : "Undo can’t bring back \(ByteFormat.count(names.count)) items"
+        let detail =
+            "The move to the Trash went through, but where in the Trash "
+            + "could not be confirmed, so Undo is not offered for it. What "
+            + "was moved can still be taken back out of the Trash by hand."
+        guard actionError != nil else {
+            actionError = title
+            actionErrorDetail = detail
+            return
+        }
+        // Under whatever else the batch had to say, not in place of it.
+        actionErrorDetail = [actionErrorDetail, "\(title). \(detail)"]
+            .compactMap { $0 }.joined(separator: "\n\n")
     }
 
     // MARK: - Undoing a move to the Trash
@@ -2224,6 +2360,12 @@ final class AppModel: ObservableObject {
     ) -> [Trashed] {
         trashed.map { item in
             let ref = item.target.ref
+            var held: [NodeRef] = []
+            if marks.contains(ref) {
+                held = [ref]
+            } else if ref.isDirectory, marksBeneath[ref.dir.id, default: 0] > 0 {
+                held = marks.filter { Self.isWithin($0, ref.dir) }
+            }
             return Trashed(
                 ref: ref,
                 path: item.target.path,
@@ -2231,7 +2373,7 @@ final class AppModel: ObservableObject {
                 entry: ref.file,
                 parent: ref.isDirectory ? ref.dir.parent : nil,
                 weight: ref.alloc,
-                wasMarked: marks.contains(ref)
+                marks: held
             )
         }
     }
@@ -2247,6 +2389,11 @@ final class AppModel: ObservableObject {
     /// frees nothing, and between them were all of it.
     private func offerUndo(of moved: [Trashed], taking left: UInt64, of weight: UInt64) {
         guard !moved.isEmpty else { return }
+        // What was already there is looked at before this move joins it. A
+        // name that has gone hands what it was down for to another name of
+        // the same file, and that is told by number: something new must not
+        // arrive holding the number of something that has just gone.
+        refreshTrashLine()
         lastTrash = moved
         lastTrashTook = left
         canUndoTrash = true
@@ -2272,7 +2419,7 @@ final class AppModel: ObservableObject {
 
     /// Puts the move back on the window's undo stack, as "Move to Trash".
     private func registerUndo() {
-        guard let undoManager else { return }
+        guard canUndoTrash, let undoManager else { return }
         undoManager.registerUndo(withTarget: self) { model in
             MainActor.assumeIsolated { model.undoFromTheMenu() }
         }
@@ -2306,9 +2453,39 @@ final class AppModel: ObservableObject {
     /// Adds up what is still where it was put in the Trash. Something that
     /// is not has been put back or emptied out, and is forgotten.
     func refreshTrashLine() {
-        sessionTrash.removeAll { !$0.receipt.isStillInTrash }
+        var held: [(receipt: FileActions.TrashReceipt, bytes: UInt64)] = []
+        var left: [(item: FileActions.FileIdentity, bytes: UInt64)] = []
+        for entry in sessionTrash {
+            // Kept unless it is known to have gone. A disk that does not
+            // answer has not said so, and letting go here lets go of the
+            // Undo below as well.
+            if !entry.receipt.hasLeftTrash {
+                held.append(entry)
+            } else if entry.bytes > 0 {
+                left.append((entry.receipt.item, entry.bytes))
+            }
+        }
+        // Another name of the same file that is still in the Trash holds
+        // all of it. Two names moved together were each put down for half,
+        // and deleting one of them there took its half off the line with
+        // every byte still on the disk under the other.
+        for gone in left {
+            if let other = held.firstIndex(where: { $0.receipt.item == gone.item }) {
+                held[other].bytes += gone.bytes
+            }
+        }
+        sessionTrash = held
         let total = sessionTrash.reduce(UInt64(0)) { $0 + $1.bytes }
         if total != bytesInTrash { bytesInTrash = total }
+
+        // With none of the last move left in the Trash there is nothing for
+        // Undo to bring back, and the button went on offering to.
+        if canUndoTrash {
+            let places = Set(held.map(\.receipt.inTrash))
+            if !lastTrash.contains(where: { places.contains($0.receipt.inTrash) }) {
+                forgetUndo()
+            }
+        }
 
         // A look at a handful of paths, and only while there are any.
         if sessionTrash.isEmpty {
@@ -2342,11 +2519,13 @@ final class AppModel: ObservableObject {
 
         var back: [Trashed] = []
         var failures: [(name: String, reason: String)] = []
+        var unreached = 0
         for item in batch {
             do {
                 try FileActions.putBack(item.receipt, to: item.path)
                 back.append(item)
             } catch {
+                if case FileActions.PutBackError.unreachable = error { unreached += 1 }
                 failures.append(
                     ((item.path as NSString).lastPathComponent, error.localizedDescription)
                 )
@@ -2373,6 +2552,17 @@ final class AppModel: ObservableObject {
         )
         refreshTrashLine()
         rereadCapacity()
+
+        // None of it could be reached, which is neither a move undone nor
+        // one that can't be: it is still the move to undo, once the disk
+        // answers. Put back on the stack a turn later, since anything
+        // registered while an undo is under way is taken for a redo.
+        if unreached == batch.count {
+            lastTrash = batch
+            lastTrashTook = took
+            canUndoTrash = true
+            DispatchQueue.main.async { [weak self] in self?.registerUndo() }
+        }
 
         guard let first = failures.first else { return }
         actionError =
@@ -2471,7 +2661,7 @@ final class AppModel: ObservableObject {
         // What came back is what is selected, so it can be seen to be back,
         // and it has the marks it left with.
         let refs = Set(restored.map(\.ref))
-        setMarked(Set(restored.filter(\.wasMarked).map(\.ref)), true)
+        setMarked(Set(restored.flatMap(\.marks)), true)
         if !refs.isEmpty {
             selection = refs
             if let shown = restored.map(\.ref).first(where: isTreeRow) {
@@ -2565,6 +2755,7 @@ final class AppModel: ObservableObject {
     private nonisolated static func dispose(
         of target: Target,
         as disposal: Disposal,
+        by mover: (String) throws -> FileActions.TrashReceipt?,
         stop: Removal.Stop,
         onProgress: (Removal.Tally) -> Void
     ) -> Disposed {
@@ -2573,7 +2764,7 @@ final class AppModel: ObservableObject {
         do {
             switch disposal {
             case .trash:
-                disposed.receipt = try FileActions.moveToTrash(target.path)
+                disposed.receipt = try mover(target.path)
                 disposed.gone = [target.ref]
                 // A move is one step, so it counts for all of it at once.
                 disposed.tally = scanned(target.ref)

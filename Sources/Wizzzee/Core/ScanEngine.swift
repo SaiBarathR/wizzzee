@@ -264,6 +264,7 @@ final class ScanEngine {
             parent: nil,
             mtime: Double(rootStat.st_mtimespec.tv_sec)
         )
+        root.fileID = UInt64(rootStat.st_ino)
 
         let stack = WorkStack()
         stack.seed(WorkItem(node: root, path: normalized, dev: rootDev))
@@ -410,6 +411,7 @@ final class ScanEngine {
                         parent: node,
                         mtime: entry.mtime
                     )
+                    child.fileID = entry.fileID
                     node.subdirs.append(child)
 
                     let childPath = Self.join(item.path, entry.name)
