@@ -89,6 +89,7 @@ Wizzzee --uishot --tab files --path /System/Library \
 | `--metric size\|disk` | `disk` | Which measure is on show, as the Size / On Disk control sets it |
 | `--select-largest` | off | Select the biggest item before rendering |
 | `--mark N` | `0` | Mark N items for removal and open the list of them |
+| `--no-marks-list` | off | With `--mark`, leave the list shut: the bar alone, as it is until Show List is clicked |
 | `--filter TEXT` | none | What to type into the File View's filter, e.g. `"node_modules kind:folder"` |
 | `--type EXT` | none | Put one file type in focus, as clicking its row in File Types does. With or without the dot; `none` is the files that have no extension |
 | `--no-access-banner` | off | Hide the Full Disk Access warning |

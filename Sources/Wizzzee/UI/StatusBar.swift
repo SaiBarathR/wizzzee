@@ -10,9 +10,6 @@ struct StatusBar: View {
             // A delete takes over the strip while it runs. It is the only thing
             // happening, it can take minutes on a large tree, and the Stop has
             // to be somewhere the user is already looking.
-            // Ahead of everything else, and there whatever the rest of the
-            // strip is showing: it is the way back to what has been marked.
-            if !model.marks.isEmpty { MarksChip(model: model) }
             if let progress = model.deleteProgress {
                 deleting(progress)
             } else {
@@ -21,11 +18,16 @@ struct StatusBar: View {
             }
             treemapToggle
         }
-        .font(.system(size: 10).monospacedDigit())
+        // The size the tables are set in. A point smaller, on a strip a few
+        // points high, was the hardest thing in the window to read.
+        .font(.system(size: 11).monospacedDigit())
         .foregroundStyle(.secondary)
         .lineLimit(1)
         .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        // One height whatever is in it. Sized by its contents it grew by a
+        // few points whenever Undo or Stop was showing, and everything above
+        // it moved up to make the room.
+        .frame(height: 28)
         .background(.bar)
     }
 
@@ -42,7 +44,7 @@ struct StatusBar: View {
                 systemName: model.showsTreemap
                     ? "rectangle.3.group.fill" : "rectangle.3.group"
             )
-            .font(.system(size: 11))
+            .font(.system(size: 12))
         }
         .buttonStyle(.borderless)
         .disabled(model.tab != .tree)

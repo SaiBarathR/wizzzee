@@ -23,6 +23,7 @@ enum UIShot {
         var showTreemap = true
         var metric = SizeMetric.allocated
         var markCount = 0
+        var opensMarksList = true
         var focusType: String?
         var filter = ""
 
@@ -79,6 +80,11 @@ enum UIShot {
                 // them needs some put on for it.
                 markCount = Int(next ?? "1") ?? 1
                 index += 2
+            case "--no-marks-list":
+                // The bar the marks bring up, as it is before Show List is
+                // clicked.
+                opensMarksList = false
+                index += 1
             case "--zoom":
                 zoomDepth = Int(next ?? "1") ?? 1
                 index += 2
@@ -193,7 +199,7 @@ enum UIShot {
             model.setExpanded(folder, true)
             // Not the largest, so the marked tiles are not most of the map.
             model.setMarked(Set(children.dropFirst().prefix(markCount)), true)
-            model.showsMarks = true
+            model.showsMarks = opensMarksList
         }
         if let focusType {
             model.focusType(focusType)

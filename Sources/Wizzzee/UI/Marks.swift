@@ -72,93 +72,115 @@ struct MarkBox: View {
     }
 }
 
-/// The status bar's count of what is marked, which opens the list of it.
-struct MarksChip: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        Button {
-            model.showsMarks.toggle()
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.square.fill")
-                Text(model.marksSummary)
-                Image(systemName: model.showsMarks ? "chevron.down" : "chevron.up")
-                    .font(.system(size: 8, weight: .semibold))
-            }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.accentColor.opacity(0.22))
-            )
-            .foregroundStyle(.primary)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(model.showsMarks ? "Hide the marked items" : "Show the marked items")
-        .accessibilityLabel(
-            (model.showsMarks ? "Hide" : "Show") + " marked items, "
-                + model.marksSummary
-        )
-    }
-}
-
-/// The marked items, each with its size, and what to do with the lot.
+/// What is marked, what removing it would free, and what to do about it.
 ///
-/// Above the status bar on every tab, since marks are gathered from all of
-/// them: the tree, the file list and the treemap.
-struct MarksDrawer: View {
+/// Across the foot of the window on every tab, from the first mark to the
+/// last. It was a chip in the status bar's small type, with the buttons in a
+/// list that the chip had to be clicked to open: someone new to the app
+/// ticked three boxes and could find nothing to do with them.
+struct MarksBar: View {
     @ObservedObject var model: AppModel
+    /// False for the moment the bar is first put up, which it spends lit.
+    @State private var hasSettled = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(model.markedItems) { ref in
-                        MarkedRow(model: model, ref: ref)
-                    }
-                }
-            }
-        }
-        .background(.background)
-    }
-
-    private var header: some View {
         HStack(spacing: 10) {
-            Text("Marked for removal")
-                .font(.system(size: 11, weight: .semibold))
-            Text(total)
-                .font(.system(size: 11).monospacedDigit())
+            // The box that was ticked, so the bar reads as being about those.
+            Image(systemName: "checkmark.square.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(Color.accentColor)
+                .accessibilityHidden(true)
+            Text(model.marksHeadline)
+                .font(.system(size: 13, weight: .semibold))
+            Text(ByteFormat.decimal(model.markedBytes) + " on disk")
+                .font(.system(size: 12).monospacedDigit())
                 .foregroundStyle(.secondary)
                 .help(
                     "The space on disk that removing all of these gives back. "
                         + "A hard link whose data has another name on disk "
                         + "counts for nothing."
                 )
+            listToggle
 
-            Spacer()
+            Spacer(minLength: 12)
 
-            Button("Clear") { model.clearMarks() }
-                .help("Take every mark off. Nothing is removed.")
-            Button("Move to Trash") { model.trashMarked() }
-            Button("Delete…") { model.confirmDeletingMarked() }
+            // Off while a batch runs, like every other way of starting one.
+            Group {
+                Button("Clear Marks") { model.clearMarks() }
+                    .help("Take every mark off. Nothing is removed.")
+                // The one that can be taken back, so the one put forward.
+                Button("Move to Trash") { model.trashMarked() }
+                    .buttonStyle(.borderedProminent)
+                    .help("Move everything marked to the Trash. ⌘Z puts it back.")
+                Button("Delete…") { model.confirmDeletingMarked() }
+                    .help("Delete everything marked for good, after asking")
+            }
+            .disabled(model.isDeleting)
         }
-        .controlSize(.small)
-        // Off while a batch runs, like every other way of starting one.
-        .disabled(model.isDeleting)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .lineLimit(1)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        // Tinted, and under a line of the same colour in place of a divider.
+        // It arrives lit and fades to that: it comes and goes, and has to be
+        // seen arriving by someone looking at a checkbox at the other end of
+        // the window.
+        .background(Color.accentColor.opacity(hasSettled ? 0.14 : 0.5))
         .background(.bar)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.5))
+                .frame(height: 1)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.9)) { hasSettled = true }
+        }
     }
 
-    /// The figure the status bar gives, named here for what it is: space on
-    /// disk, whichever measure the rows below are showing.
-    private var total: String {
-        ByteFormat.counted(model.marks.count, "item") + "  •  "
-            + ByteFormat.decimal(model.markedBytes) + " on disk"
+    /// Opens the list of what is marked, and shuts it. The list opens
+    /// upwards and the bar stays put, so this is under the pointer for both.
+    private var listToggle: some View {
+        Button {
+            model.showsMarks.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Text(model.showsMarks ? "Hide List" : "Show List")
+                Image(systemName: model.showsMarks ? "chevron.down" : "chevron.up")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+        }
+        .help(
+            model.showsMarks
+                ? "Hide the marked items"
+                : "Show each marked item, with its size and where it is"
+        )
+        .accessibilityLabel(
+            model.showsMarks ? "Hide the marked items" : "Show the marked items"
+        )
+    }
+}
+
+/// The marked items, each with its size and a way to take its mark back off.
+///
+/// Above the bar that counts them, on every tab, since marks are gathered
+/// from all of them: the tree, the file list and the treemap.
+struct MarksList: View {
+    @ObservedObject var model: AppModel
+
+    /// Tall enough for a handful and no taller than a third of a small
+    /// window: past that the list scrolls.
+    static func height(for count: Int) -> CGFloat {
+        min(220, CGFloat(count) * 22 + 2)
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(model.markedItems) { ref in
+                    MarkedRow(model: model, ref: ref)
+                }
+            }
+        }
+        .background(.background)
     }
 }
 

@@ -135,6 +135,7 @@ enum SelfTest {
         testASearchFindsFoldersAndCountsWhatItFinds()
         testTheFileViewSearches()
         testARevealedRowIsScrolledIntoView()
+        testTheMarksBarIsThereFromTheFirstMark()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
 
@@ -3189,10 +3190,8 @@ enum SelfTest {
         check(
             "the total is the sum of what each would free",
             model.markedBytes == aRef.alloc + cRef.alloc + mRef.alloc
-                && model.marksSummary
-                    == "3 marked  •  "
-                    + ByteFormat.decimal(aRef.alloc + cRef.alloc + mRef.alloc),
-            model.marksSummary
+                && model.marksHeadline == "3 items marked for removal",
+            "\(model.marksHeadline), \(ByteFormat.decimal(model.markedBytes))"
         )
         check(
             "the list runs largest first",
@@ -9236,6 +9235,117 @@ enum SelfTest {
                 && model.fileRows.count == 4
                 && model.fileRows.allSatisfy { !$0.ref.isDirectory },
             "\(model.fileRows.count) rows, tally \(String(describing: model.fileTally))"
+        )
+    }
+
+    /// What is marked, and the buttons that act on it, are across the foot
+    /// of the window from the first mark. They were in a list that a chip in
+    /// the status bar had to be clicked to open, and someone who had ticked
+    /// three boxes had nothing on screen to do with them.
+    @MainActor
+    private static func testTheMarksBarIsThereFromTheFirstMark() {
+        let base = scratch("marks-bar")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            for i in 0..<6 {
+                try write(base.appendingPathComponent("f\(i).dat"), bytes: 4_096 * (i + 1))
+            }
+        } catch {
+            check("the marks bar fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        model.dismissedAccessPrompt = true
+        model.tab = .files
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        guard let result = loadSynchronously(into: model) else { return }
+        model.refreshFileRows(immediately: true)
+        // The File View's table is everything between the filter and the
+        // foot of the window, so whatever is put at the foot comes out of
+        // its height and nowhere else.
+        func tableHeight() -> CGFloat {
+            tables(under: hosting).first { $0.numberOfRows == 6 }?
+                .enclosingScrollView?.frame.height ?? -1
+        }
+        guard pumpUntil(10, { tableHeight() > 0 }) else {
+            check(
+                "the File View's table can be found to ask how tall it is",
+                false,
+                "\(tables(under: hosting).map(\.numberOfRows)) rows in the tables found"
+            )
+            return
+        }
+        pump(0.3)
+        let bare = tableHeight()
+
+        let first = NodeRef(dir: result.root, fileIndex: 0)
+        let second = NodeRef(dir: result.root, fileIndex: 1)
+        model.setMarked([first], true)
+        pumpUntil { tableHeight() < bare }
+        let underBar = tableHeight()
+        check(
+            "the first mark puts the bar up, without the list being asked for",
+            !model.showsMarks && underBar < bare && bare - underBar < 60,
+            "table \(bare) high before, \(underBar) with one mark"
+        )
+        check(
+            "it says how many, in the singular for one",
+            model.marksHeadline == "1 item marked for removal",
+            model.marksHeadline
+        )
+        model.setMarked([second], true)
+        pump(0.3)
+        check(
+            "a second mark changes the count and not the height",
+            tableHeight() == underBar
+                && model.marksHeadline == "2 items marked for removal",
+            "table \(tableHeight()) high; \(model.marksHeadline)"
+        )
+
+        model.showsMarks = true
+        pumpUntil { tableHeight() < underBar }
+        let underList = tableHeight()
+        check(
+            "the list opens above the bar, a row for each mark",
+            underBar - underList >= MarksList.height(for: 2)
+                && underBar - underList <= MarksList.height(for: 2) + 2,
+            "table \(underBar) high with the bar, \(underList) with the list; "
+                + "the list is \(MarksList.height(for: 2))"
+        )
+        model.showsMarks = false
+        pumpUntil { tableHeight() == underBar }
+        check(
+            "and shuts again under a bar that has not gone",
+            tableHeight() == underBar && model.marks.count == 2,
+            "table \(tableHeight()) high, \(model.marks.count) marked"
+        )
+
+        model.clearMarks()
+        pumpUntil { tableHeight() == bare }
+        check(
+            "the bar goes with the last mark",
+            tableHeight() == bare,
+            "table \(tableHeight()) high, \(bare) to begin with"
         )
     }
 
