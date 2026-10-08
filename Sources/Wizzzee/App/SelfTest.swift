@@ -9532,9 +9532,13 @@ enum SelfTest {
         // The shortest the window goes.
         let frame = NSRect(x: 0, y: 0, width: 1160, height: 660)
         hosting.frame = frame
+        // With no title bar. A window that has one is held to the height of
+        // the screen when it is made taller, and a build runner's screen is
+        // shorter than the window this goes on to ask for: there the window
+        // stayed as it was, and the list with it.
         let window = NSWindow(
             contentRect: frame,
-            styleMask: [.titled, .resizable],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
@@ -9592,7 +9596,8 @@ enum SelfTest {
         check(
             "given the room, the list is as tall as its rows ask for",
             settled(listHeight) == asked,
-            "the list is \(listHeight()) high; its rows ask for \(asked)"
+            "the list is \(listHeight()) high; its rows ask for \(asked), in a "
+                + "window that was made 940 high and is \(hosting.frame.height)"
         )
         check(
             "a list of one is one row, however short the window",
