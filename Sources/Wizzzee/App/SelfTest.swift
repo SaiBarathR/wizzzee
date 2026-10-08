@@ -136,6 +136,7 @@ enum SelfTest {
         testTheFileViewSearches()
         testARevealedRowIsScrolledIntoView()
         testARevealLeavesANarrowTableWhereItWasAcross()
+        testAClickInATableGivesItTheKeyboard()
         testTheMarksBarIsThereFromTheFirstMark()
         testALongListOfMarksLeavesTheFootOfTheWindowInSight()
         testTheGuideOpensAtLaunchUntilAskedNotTo()
@@ -9654,6 +9655,110 @@ enum SelfTest {
             went,
             "still attached"
         )
+    }
+
+    /// A click on a row has to leave the table with the keyboard, or ↑, ↓,
+    /// →, ← and Space do nothing to the row that was just clicked. Built
+    /// against the newer SDK the table no longer takes it for itself.
+    @MainActor
+    private static func testAClickInATableGivesItTheKeyboard() {
+        let model = AppModel()
+        guard let (base, _) = loadWalkabout("table-focus", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        model.dismissedAccessPrompt = true
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        func treeTable() -> NSTableView? {
+            tables(under: hosting).first { $0.numberOfRows == model.treeRows.count }
+        }
+        guard pumpUntil(10, { treeTable() != nil }), let table = treeTable() else {
+            check("the tree's table can be found to click in", false, "")
+            return
+        }
+        pump(0.3)
+        /// A press of the mouse at `point`, in the window's coordinates. It
+        /// is handed to the code that looks at a click, and not sent: a
+        /// table that is sent one waits for the button to come back up.
+        func click(at point: NSPoint) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: point,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        }
+        let rowRect = table.convert(table.rect(ofRow: 0), to: nil)
+        let onRow = NSPoint(x: rowRect.midX, y: rowRect.midY)
+        // The top of the window is the header, which is no table.
+        let hostingTop = hosting.convert(hosting.bounds, to: nil)
+        let onHeader = NSPoint(x: hostingTop.midX, y: hostingTop.maxY - 20)
+        guard let rowClick = click(at: onRow), let headerClick = click(at: onHeader)
+        else {
+            check("a click can be made up to hand over", false, "")
+            return
+        }
+
+        window.makeFirstResponder(nil)
+        check(
+            "a click in the header is not a click in a table",
+            TableFocus.table(clickedBy: headerClick) == nil,
+            "found a table under \(onHeader)"
+        )
+        TableFocus.giveKeyboard(for: headerClick)
+        check(
+            "and leaves the keyboard where it was",
+            window.firstResponder !== table,
+            "the table has it"
+        )
+        check(
+            "a click on a row is a click in the tree's table",
+            TableFocus.table(clickedBy: rowClick) === table,
+            "under \(onRow): \(String(describing: TableFocus.table(clickedBy: rowClick)))"
+        )
+        TableFocus.giveKeyboard(for: rowClick)
+        check(
+            "and gives that table the keyboard",
+            window.firstResponder === table,
+            "the keyboard is with \(String(describing: window.firstResponder))"
+        )
+        check(
+            "a table that has the keyboard already is left alone",
+            TableFocus.table(clickedBy: rowClick) == nil,
+            "asked to be given it again"
+        )
+
+        // Under the guide the click is not going to arrive, and the keyboard
+        // is the guide's.
+        window.makeFirstResponder(nil)
+        model.showWelcome()
+        let came = pumpUntil(10, { window.attachedSheet != nil })
+        TableFocus.giveKeyboard(for: rowClick)
+        check(
+            "a click on the window under the guide moves the keyboard nowhere",
+            came && window.firstResponder !== table,
+            "sheet \(came); the table has the keyboard: "
+                + "\(window.firstResponder === table)"
+        )
+        model.showsWelcome = false
+        pumpUntil(10, { window.attachedSheet == nil })
     }
 
     /// What is marked, and the buttons that act on it, are across the foot
