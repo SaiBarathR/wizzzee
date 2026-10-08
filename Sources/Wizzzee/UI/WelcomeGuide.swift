@@ -79,8 +79,7 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
             return "Gather things from anywhere in the scan, look the list over, "
                 + "and remove them together."
         case .keys:
-            return "Everything in the menus has a key, and so do a few things "
-                + "that are not in them."
+            return "Every key the app answers, in one place."
         }
     }
 
@@ -104,7 +103,7 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
         case .scan: return [.header]
         case .tree: return [.table, .types]
         case .treemap: return [.treemap]
-        case .search: return [.tabs, .table, .types]
+        case .search: return [.tabs, .filter, .table]
         case .look: return [.table, .treemap]
         case .remove: return [.marks, .status]
         case .keys: return []
@@ -130,9 +129,9 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                 ),
                 WelcomeTip(
                     3, "Scan again, and keep your place",
-                    "**Rescan** brings the figures up to date and leaves the open "
-                        + "folders, the zoom, the selection and the marks as they "
-                        + "were.",
+                    "**Rescan** brings the figures up to date and keeps the open "
+                        + "folders, the zoom, the selection and the marks, wherever "
+                        + "they are still there.",
                     keys: [["⌘", "R"]]
                 ),
                 WelcomeTip(
@@ -164,8 +163,8 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                 WelcomeTip(
                     4, "File Types",
                     "The list beside the tree ranks the scan by type. Click a "
-                        + "type to light its tiles on the treemap and list only "
-                        + "its files. Esc in the list lets go.",
+                        + "type to light its tiles on the treemap; File View then "
+                        + "lists only its files. Esc in the list lets go.",
                     keys: [["esc"]]
                 ),
             ]
@@ -173,8 +172,8 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
             return [
                 WelcomeTip(
                     1, "Click to select",
-                    "Click a tile to select it. The tree scrolls to its row, and "
-                        + "the top of the window names it."
+                    "Click a tile to select it. The top of the window names it, "
+                        + "and the tree scrolls to its row if its folder is open."
                 ),
                 WelcomeTip(
                     2, "Zoom in, and back out",
@@ -207,7 +206,8 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                 ),
                 WelcomeTip(
                     2, "By size",
-                    "`>1gb` finds what is bigger, and `<500kb` what is smaller."
+                    "`>1gb` finds what is bigger and `<500kb` what is smaller, "
+                        + "in the measure on show: On Disk, unless Size is chosen."
                 ),
                 WelcomeTip(
                     3, "By age, type and kind",
@@ -217,8 +217,8 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                 WelcomeTip(
                     4, "What it found",
                     "The line at the right counts everything that matched, "
-                        + "listed or not, and what it takes up. Esc empties the "
-                        + "filter.",
+                        + "listed or not, and what it takes up. Esc in the filter "
+                        + "empties it.",
                     keys: [["esc"]]
                 ),
             ]
@@ -227,18 +227,20 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                 WelcomeTip(
                     1, "Quick Look",
                     "⌘Y previews the selected item and follows the selection, so "
-                        + "a list can be worked down with the preview open.",
+                        + "a list can be worked down with it open. A file that is "
+                        + "online only is not shown: that would download it.",
                     keys: [["⌘", "Y"]]
                 ),
                 WelcomeTip(
                     2, "Right-click anything",
-                    "Reveal in Finder, Open, Open in Terminal, Copy Path, Show "
-                        + "in Tree and Zoom Treemap Here, on a row or on a tile."
+                    "Reveal in Finder, Open, Quick Look, Open in Terminal and "
+                        + "Copy Path, on a row or on a tile. A folder adds Zoom "
+                        + "Treemap Here, and a file Show in Tree."
                 ),
                 WelcomeTip(
-                    3, "Double-click a file",
-                    "It is shown in Finder. Double-clicking a folder in the "
-                        + "tree opens it there."
+                    3, "Double-click",
+                    "A file’s row is shown in Finder. A folder’s row in the tree "
+                        + "opens or shuts, and a tile on the treemap zooms in."
                 ),
                 WelcomeTip(
                     4, "The notes beside a name",
@@ -276,15 +278,16 @@ enum WelcomePage: Int, CaseIterable, Identifiable {
                 ),
                 WelcomeTip(
                     5, "Or one thing at a time",
-                    "Finder’s keys act on the selected rows: ⌘⌫ moves them to "
-                        + "the Trash, and ⌥⌘⌫ deletes them for good after asking.",
+                    "Finder’s keys act on what is selected, rows or the tile "
+                        + "outlined on the map: ⌘⌫ moves it to the Trash, and ⌥⌘⌫ "
+                        + "deletes it for good after asking.",
                     keys: [["⌘", "⌫"], ["⌥", "⌘", "⌫"]]
                 ),
                 WelcomeTip(
                     6, "What can’t be removed",
-                    "The system volume is sealed, and the folder a scan started "
-                        + "from is not for removing. Their rows have no box to "
-                        + "tick."
+                    "The system volume is sealed, and a whole volume, a home "
+                        + "folder and the folder a scan started from are not for "
+                        + "removing. Their rows have no box to tick."
                 ),
             ]
         case .keys:
@@ -339,7 +342,7 @@ struct WelcomeShortcutGroup: Identifiable {
         WelcomeShortcutGroup(
             title: "Scanning",
             shortcuts: [
-                WelcomeShortcut([["↩"]], "Scan"),
+                WelcomeShortcut([["↩"]], "Scan (not while typing in the filter)"),
                 WelcomeShortcut([["⌘", "O"]], "Choose a folder to scan"),
                 WelcomeShortcut([["⌘", "."]], "Stop a scan"),
                 WelcomeShortcut([["⌘", "R"]], "Rescan, keeping your place"),
@@ -359,7 +362,7 @@ struct WelcomeShortcutGroup: Identifiable {
                 WelcomeShortcut([["⌘", "F"]], "Search: go to the File View’s filter"),
                 WelcomeShortcut(
                     [["esc"]],
-                    "Empty the filter, or let go of a file type"
+                    "In the filter, empty it; in File Types, let go of the type"
                 ),
                 WelcomeShortcut([["⌘", "Y"]], "Quick Look, or shut it"),
             ]
@@ -619,7 +622,7 @@ struct WelcomePageView: View {
             Spacer(minLength: 0)
             if let place = page.place {
                 VStack(spacing: 4) {
-                    WindowMap(lit: page.regions)
+                    WindowMap(lit: page.regions, showsFileView: page == .search)
                     Text(place)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
@@ -803,21 +806,30 @@ struct GuideBadge: View {
 /// The window, drawn small, with the part a page is about lit.
 struct WindowMap: View {
     enum Region: Hashable {
-        case header, tabs, table, types, treemap, marks, status
+        case header, tabs, table, types, treemap, filter, marks, status
     }
 
     let lit: Set<Region>
+    /// The window as it is with File View in front: the filter over one
+    /// table, where Tree View has the tree, the types beside it and the
+    /// treemap below.
+    var showsFileView = false
 
     var body: some View {
         VStack(spacing: 2) {
             part(.header).frame(height: 11)
             part(.tabs).frame(height: 4)
-            HStack(spacing: 2) {
-                part(.table)
-                part(.types).frame(width: 24)
+            if showsFileView {
+                part(.filter).frame(height: 4)
+                part(.table).frame(height: 28)
+            } else {
+                HStack(spacing: 2) {
+                    part(.table)
+                    part(.types).frame(width: 24)
+                }
+                .frame(height: 17)
+                part(.treemap).frame(height: 15)
             }
-            .frame(height: 17)
-            part(.treemap).frame(height: 15)
             part(.marks).frame(height: 4)
             part(.status).frame(height: 3)
         }

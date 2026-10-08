@@ -659,37 +659,54 @@ private struct LookArt: View {
 private struct RemoveArt: View {
     var body: some View {
         VStack(spacing: 5) {
-            row(.partly, "Projects", "38.2 GB")
-            row(.on, "node_modules", "1.9 GB", depth: 1)
+            // The folder the scan started from: no box, since it can't go.
+            row(nil, "/Users/you", "232 GB")
+                .guideBadge(6, at: .leading, outset: 20)
+            row(.partly, "Projects", "38.2 GB", depth: 1)
+            row(.on, "node_modules", "1.9 GB", depth: 2)
                 .guideBadge(1, at: .leading, outset: 20)
-            row(.on, "DerivedData", "8.4 GB")
-            row(.off, "Documents", "21.7 GB")
+            // Selected and not marked, which is what the Finder keys act on.
+            row(.off, "Documents", "21.7 GB", depth: 1, isSelected: true)
+                .guideBadge(5, at: .trailing, outset: 20)
             Spacer(minLength: 0)
             bar.guideBadge(2, at: .topLeading)
             status
         }
+        // Room at the sides for the dots that sit beside a row.
+        .padding(.horizontal, 12)
     }
 
     private func row(
-        _ mark: ArtCheckbox.Mark, _ name: String, _ size: String, depth: Int = 0
+        _ mark: ArtCheckbox.Mark?, _ name: String, _ size: String, depth: Int = 0,
+        isSelected: Bool = false
     ) -> some View {
         HStack(spacing: 5) {
-            ArtCheckbox(mark: mark)
+            if let mark {
+                ArtCheckbox(mark: mark)
+            } else {
+                Color.clear.frame(width: 13, height: 1)
+            }
             Color.clear.frame(width: CGFloat(depth) * 12, height: 1)
             ArtIcon()
             artText(name)
             Spacer(minLength: 6)
             artText(size, .secondary)
         }
+        .background(
+            RoundedRectangle(cornerRadius: 3)
+                .fill(isSelected ? Color.accentColor.opacity(0.3) : Color.clear)
+                .padding(.horizontal, -3)
+                .padding(.vertical, -1)
+        )
     }
 
     private var bar: some View {
         HStack(spacing: 6) {
             ArtCheckbox(mark: .on)
-            Text("2 items marked for removal")
+            Text("1 item marked for removal")
                 .font(.system(size: 10, weight: .semibold))
                 .lineLimit(1)
-            artText("10.3 GB on disk", .secondary)
+            artText("1.9 GB on disk", .secondary)
             ArtButton(title: "Show List")
             Spacer(minLength: 4)
             ArtButton(title: "Move to Trash", isProminent: true).guideBadge(3)
@@ -705,7 +722,8 @@ private struct RemoveArt: View {
 
     private var status: some View {
         HStack(spacing: 6) {
-            artText("Nothing selected", .secondary)
+            // What the row above has selected, as the real one names it.
+            artText("/Users/you/Documents  •  21.7 GB", .secondary)
             Spacer(minLength: 6)
             Image(systemName: "trash")
                 .font(.system(size: 9))

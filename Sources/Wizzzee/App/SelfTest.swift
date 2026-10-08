@@ -9504,6 +9504,19 @@ enum SelfTest {
             "delete \(model.canUseDeleteKeys), mark \(model.canMarkSelection)"
         )
 
+        // Quick Look's panel floats over a sheet, and its key is one of
+        // those the guide holds off.
+        model.togglePreview()
+        let wasLooking = model.previewURL != nil
+        model.showWelcome()
+        check(
+            "the guide shuts Quick Look as it opens, and is not put up beside it",
+            wasLooking && model.showsWelcome && model.previewURL == nil,
+            "looking before \(wasLooking), after \(model.previewURL != nil); "
+                + "guide up \(model.showsWelcome)"
+        )
+        model.showsWelcome = false
+
         // Two sheets on one window are shown one after the other: the guide
         // would come up when the question under it had been answered.
         model.confirmDeletingSelection()

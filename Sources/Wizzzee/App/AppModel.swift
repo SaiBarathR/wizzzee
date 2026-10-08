@@ -957,8 +957,12 @@ final class AppModel: ObservableObject {
     }
 
     /// Puts the guide up, at `page`. Already up, it turns to that page.
+    ///
+    /// Quick Look is shut first. Its panel floats over the guide, and ⌘Y,
+    /// which would shut it, is off for as long as the guide is up.
     func showWelcome(at page: WelcomePage = .scan) {
         guard showsWelcome || canShowWelcome else { return }
+        if previewURL != nil { previewURL = nil }
         welcomePage = page
         showsWelcome = true
     }
