@@ -108,12 +108,15 @@ struct MarksBar: View {
             Group {
                 Button("Clear Marks") { model.clearMarks() }
                     .help("Take every mark off. Nothing is removed.")
+                    .placed(as: .clearMarks)
                 // The one that can be taken back, so the one put forward.
                 Button("Move to Trash") { model.trashMarked() }
                     .buttonStyle(.borderedProminent)
                     .help("Move everything marked to the Trash. ⌘Z puts it back.")
+                    .placed(as: .trashMarked)
                 Button("Delete…") { model.confirmDeletingMarked() }
                     .help("Delete everything marked for good, after asking")
+                    .placed(as: .deleteMarked)
             }
             .disabled(model.isDeleting)
         }
@@ -156,6 +159,7 @@ struct MarksBar: View {
         .accessibilityLabel(
             model.showsMarks ? "Hide the marked items" : "Show the marked items"
         )
+        .placed(as: .showMarksList)
     }
 }
 

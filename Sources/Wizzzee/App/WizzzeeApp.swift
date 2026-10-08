@@ -6,6 +6,7 @@ struct WizzzeeApp: App {
 
     init() {
         WindowTabbing.disable()
+        TableFocus.install()
     }
 
     var body: some Scene {
@@ -157,6 +158,62 @@ enum TextEntry {
             to: nil,
             from: nil
         )
+    }
+}
+
+/// Gives a table the keyboard when it is clicked.
+///
+/// A table takes it on a click everywhere on the Mac, and these did until
+/// the app was built against the newer SDK. In the build that ships, a click
+/// selects the row and leaves the keyboard with the window: ↑ and ↓ move
+/// nothing, and →, ← and Space do nothing, until Tab has been pressed to put
+/// the focus there by hand. A local build is stamped with the older SDK and
+/// behaves as it always did, which is how 0.5.0 went out like this.
+enum TableFocus {
+    @MainActor
+    static func install() {
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            MainActor.assumeIsolated { giveKeyboard(for: event) }
+            return event
+        }
+    }
+
+    /// Makes the table `event` is a click in the first responder of its
+    /// window, ahead of the click, so that the row it selects is drawn as
+    /// selected in a table that has the keyboard.
+    @MainActor
+    static func giveKeyboard(for event: NSEvent) {
+        guard let table = table(clickedBy: event) else { return }
+        table.window?.makeFirstResponder(table)
+    }
+
+    /// The table `event` is a click in, when it is one of the window's own
+    /// and does not have the keyboard already.
+    ///
+    /// Not in a panel: the folder picker has a list of its own, and looks
+    /// after it. Not under a sheet, either. The click is not going to
+    /// arrive, and the keyboard is the sheet's.
+    @MainActor
+    static func table(clickedBy event: NSEvent) -> NSTableView? {
+        guard event.type == .leftMouseDown, let window = event.window,
+            !(window is NSPanel), window.attachedSheet == nil,
+            let content = window.contentView
+        else { return nil }
+        // Asked of the view above the contents, which is in the window's
+        // own coordinates, as the click is.
+        let point = content.superview?.convert(event.locationInWindow, from: nil)
+            ?? event.locationInWindow
+        var view = content.hitTest(point)
+        while let candidate = view, !(candidate is NSTableView) {
+            view = candidate.superview
+        }
+        guard let table = view as? NSTableView, table.acceptsFirstResponder else {
+            return nil
+        }
+        if let holder = window.firstResponder as? NSView, holder.isDescendant(of: table) {
+            return nil
+        }
+        return table
     }
 }
 

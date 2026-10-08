@@ -69,7 +69,7 @@ last page is every keyboard shortcut. **Don’t show this again** at its foot st
 it opening with the app; it stays under **Help ▸ Welcome to Wizzzee**, in the
 About tab, and on `⌘/`, which opens it at the shortcuts.
 
-![The guide's page on marking and removing: a picture of the foot of the window with four numbered points, and a card for each](docs/images/welcome.png)
+![The guide's page on marking and removing: a picture of the foot of the window with six numbered points, and a card for each](docs/images/welcome.png)
 
 - **Tree View** — folder hierarchy, sorted by size. Click a column to re-sort;
   sorting applies within each parent, so the hierarchy stays intact. `→` opens
@@ -275,7 +275,8 @@ Sources/Wizzzee/
   Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer,
               TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,
-              StatusBar, ItemContextMenu, Marks, WelcomeGuide, WelcomeArt
+              StatusBar, ItemContextMenu, Marks, WelcomeGuide, WelcomeArt,
+              WindowParts
   App/        Main, WizzzeeApp, AppModel, AppInfo, Preferences, CLI, SelfTest,
               UIShot
 scripts/      build-app.sh, validate-release.sh, make-icon.swift

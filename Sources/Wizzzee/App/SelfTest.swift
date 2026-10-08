@@ -136,6 +136,7 @@ enum SelfTest {
         testTheFileViewSearches()
         testARevealedRowIsScrolledIntoView()
         testARevealLeavesANarrowTableWhereItWasAcross()
+        testAClickInATableGivesItTheKeyboard()
         testTheMarksBarIsThereFromTheFirstMark()
         testALongListOfMarksLeavesTheFootOfTheWindowInSight()
         testTheGuideOpensAtLaunchUntilAskedNotTo()
@@ -1790,6 +1791,13 @@ enum SelfTest {
             "asking for one anyway leaves the tree the batch is working on",
             model.phase == .complete && model.result === result,
             "phase \(model.phase), same result: \(model.result === result)"
+        )
+        // The guide would cover the status bar, which is where Stop is.
+        model.showWelcome()
+        check(
+            "nor is the guide put up over a delete that is running",
+            model.isDeleting && !model.canShowWelcome && !model.showsWelcome,
+            "deleting=\(model.isDeleting), guide up=\(model.showsWelcome)"
         )
 
         pumpUntilDeleteSettles(model)
@@ -5588,18 +5596,30 @@ enum SelfTest {
         return found
     }
 
-    /// The push buttons under `view`, as AppKit has them: the ones SwiftUI
-    /// draws with a border, and not the plain ones in a table's rows.
-    private static func pushButtons(under view: NSView) -> [NSButton] {
-        var found: [NSButton] = []
-        var pending: [NSView] = [view]
-        while let next = pending.popLast() {
-            if let button = next as? NSButton, !(next is NSPopUpButton) {
-                found.append(button)
-            }
-            pending.append(contentsOf: next.subviews)
+    /// Where the parts of a window say they are.
+    private final class Layout: @unchecked Sendable {
+        var parts: [WindowPart: CGRect] = [:]
+
+        /// The bar's four buttons, of the ones on screen.
+        var marksBarButtons: [CGRect] {
+            [WindowPart.showMarksList, .clearMarks, .trashMarked, .deleteMarked]
+                .compactMap { parts[$0] }
         }
-        return found
+    }
+
+    /// The real window's contents for `model`, telling `layout` where its
+    /// parts are put.
+    ///
+    /// Not by looking for AppKit's buttons under it. Built against the SDK
+    /// the release is built against, SwiftUI draws a button without one, and
+    /// a check that counted them passed here and failed in the build that
+    /// ships.
+    @MainActor
+    private static func host(_ model: AppModel, tellingLayoutTo layout: Layout) -> NSView {
+        NSHostingView(
+            rootView: ContentView(model: model)
+                .onPreferenceChange(WindowPartFrames.self) { layout.parts = $0 }
+        )
     }
 
     /// What `measure` comes to once it has stopped changing: the same for
@@ -9644,6 +9664,110 @@ enum SelfTest {
         )
     }
 
+    /// A click on a row has to leave the table with the keyboard, or ↑, ↓,
+    /// →, ← and Space do nothing to the row that was just clicked. Built
+    /// against the newer SDK the table no longer takes it for itself.
+    @MainActor
+    private static func testAClickInATableGivesItTheKeyboard() {
+        let model = AppModel()
+        guard let (base, _) = loadWalkabout("table-focus", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        model.dismissedAccessPrompt = true
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        func treeTable() -> NSTableView? {
+            tables(under: hosting).first { $0.numberOfRows == model.treeRows.count }
+        }
+        guard pumpUntil(10, { treeTable() != nil }), let table = treeTable() else {
+            check("the tree's table can be found to click in", false, "")
+            return
+        }
+        pump(0.3)
+        /// A press of the mouse at `point`, in the window's coordinates. It
+        /// is handed to the code that looks at a click, and not sent: a
+        /// table that is sent one waits for the button to come back up.
+        func click(at point: NSPoint) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: point,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        }
+        let rowRect = table.convert(table.rect(ofRow: 0), to: nil)
+        let onRow = NSPoint(x: rowRect.midX, y: rowRect.midY)
+        // The top of the window is the header, which is no table.
+        let hostingTop = hosting.convert(hosting.bounds, to: nil)
+        let onHeader = NSPoint(x: hostingTop.midX, y: hostingTop.maxY - 20)
+        guard let rowClick = click(at: onRow), let headerClick = click(at: onHeader)
+        else {
+            check("a click can be made up to hand over", false, "")
+            return
+        }
+
+        window.makeFirstResponder(nil)
+        check(
+            "a click in the header is not a click in a table",
+            TableFocus.table(clickedBy: headerClick) == nil,
+            "found a table under \(onHeader)"
+        )
+        TableFocus.giveKeyboard(for: headerClick)
+        check(
+            "and leaves the keyboard where it was",
+            window.firstResponder !== table,
+            "the table has it"
+        )
+        check(
+            "a click on a row is a click in the tree's table",
+            TableFocus.table(clickedBy: rowClick) === table,
+            "under \(onRow): \(String(describing: TableFocus.table(clickedBy: rowClick)))"
+        )
+        TableFocus.giveKeyboard(for: rowClick)
+        check(
+            "and gives that table the keyboard",
+            window.firstResponder === table,
+            "the keyboard is with \(String(describing: window.firstResponder))"
+        )
+        check(
+            "a table that has the keyboard already is left alone",
+            TableFocus.table(clickedBy: rowClick) == nil,
+            "asked to be given it again"
+        )
+
+        // Under the guide the click is not going to arrive, and the keyboard
+        // is the guide's.
+        window.makeFirstResponder(nil)
+        model.showWelcome()
+        let came = pumpUntil(10, { window.attachedSheet != nil })
+        TableFocus.giveKeyboard(for: rowClick)
+        check(
+            "a click on the window under the guide moves the keyboard nowhere",
+            came && window.firstResponder !== table,
+            "sheet \(came); the table has the keyboard: "
+                + "\(window.firstResponder === table)"
+        )
+        model.showsWelcome = false
+        pumpUntil(10, { window.attachedSheet == nil })
+    }
+
     /// What is marked, and the buttons that act on it, are across the foot
     /// of the window from the first mark. They were in a list that a chip in
     /// the status bar had to be clicked to open, and someone who had ticked
@@ -9669,12 +9793,17 @@ enum SelfTest {
         model.customFolder = base.path
         model.dismissedAccessPrompt = true
         model.tab = .files
-        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let layout = Layout()
+        let hosting = host(model, tellingLayoutTo: layout)
         let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
         hosting.frame = frame
+        // With no title bar. The parts say where they are from the top of
+        // the window, and the table from the top of its contents: under a
+        // title bar the two are that bar's height apart, and a button could
+        // have overlapped the table by as much and passed.
         let window = NSWindow(
             contentRect: frame,
-            styleMask: [.titled, .resizable],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
@@ -9702,7 +9831,7 @@ enum SelfTest {
             return
         }
         let bare = settled(tableHeight)
-        let bareButtons = pushButtons(under: hosting)
+        let buttonsBefore = layout.marksBarButtons.count
 
         let first = NodeRef(dir: result.root, fileIndex: 0)
         let second = NodeRef(dir: result.root, fileIndex: 1)
@@ -9716,23 +9845,21 @@ enum SelfTest {
             "table \(bare) high before, \(underBar) with one mark"
         )
         // What the strip is for: Show List, Clear Marks, Move to Trash and
-        // Delete…, on screen without anything having been opened. A button
-        // SwiftUI draws does not give its title up to be read, so they are
-        // told by where they are.
+        // Delete…, on screen without anything having been opened.
         let tableFoot = tableScroll().map { $0.convert($0.bounds, to: hosting).maxY } ?? -1
-        let added = pushButtons(under: hosting).filter { button in
-            !bareButtons.contains { $0 === button }
-        }
-        let frames = added.map { $0.convert($0.bounds, to: hosting) }
+        pumpUntil { layout.marksBarButtons.count == 4 }
+        let frames = layout.marksBarButtons
         check(
             "and in it are the four buttons that act on the marks",
-            added.count == 4
+            buttonsBefore == 0 && frames.count == 4
                 && frames.allSatisfy {
-                    $0.minY >= tableFoot - 1 && hosting.bounds.contains($0)
+                    $0.width > 0 && $0.minY >= tableFoot - 1
+                        && hosting.bounds.contains($0)
                         && abs($0.midY - (frames.first?.midY ?? 0)) < 1
                 },
-            "\(added.count) new buttons at \(frames.map { Int($0.midY) }), "
-                + "under a table ending at \(Int(tableFoot))"
+            "\(buttonsBefore) before the mark and \(frames.count) after, at "
+                + "\(frames.map { Int($0.midY) }), under a table ending at "
+                + "\(Int(tableFoot))"
         )
         check(
             "it says how many, in the singular for one",
@@ -9762,20 +9889,18 @@ enum SelfTest {
         check(
             "and shuts again under a bar that has not gone",
             settled(tableHeight) == underBar && model.marks.count == 2
-                && pushButtons(under: hosting).count == bareButtons.count + 4,
+                && layout.marksBarButtons.count == 4,
             "table \(tableHeight()) high, \(model.marks.count) marked, "
-                + "\(pushButtons(under: hosting).count) buttons"
+                + "\(layout.marksBarButtons.count) of the bar's buttons"
         )
 
         model.clearMarks()
-        pumpUntil { tableHeight() == bare }
+        pumpUntil { tableHeight() == bare && layout.marksBarButtons.isEmpty }
         check(
             "the bar goes with the last mark, and its buttons with it",
-            settled(tableHeight) == bare
-                && pushButtons(under: hosting).count == bareButtons.count,
+            settled(tableHeight) == bare && layout.marksBarButtons.isEmpty,
             "table \(tableHeight()) high, \(bare) to begin with; "
-                + "\(pushButtons(under: hosting).count) buttons, "
-                + "\(bareButtons.count) to begin with"
+                + "\(layout.marksBarButtons.count) of the bar's buttons left"
         )
     }
 
@@ -9807,7 +9932,8 @@ enum SelfTest {
         model.hasFullDiskAccess = false
         model.dismissedAccessPrompt = false
         model.showsTreemap = true
-        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let layout = Layout()
+        let hosting = host(model, tellingLayoutTo: layout)
         // The shortest the window goes.
         let frame = NSRect(x: 0, y: 0, width: 1160, height: 660)
         hosting.frame = frame
@@ -9828,22 +9954,18 @@ enum SelfTest {
         defer { window.close() }
 
         guard let result = loadSynchronously(into: model) else { return }
-        /// The list of marks: the one scroll view that is not a table's.
-        func list() -> NSScrollView? {
-            var pending: [NSView] = [hosting]
-            while let view = pending.popLast() {
-                if let scroll = view as? NSScrollView {
-                    if !(scroll.documentView is NSTableView) { return scroll }
-                    continue
-                }
-                pending.append(contentsOf: view.subviews)
-            }
-            return nil
-        }
-        func listHeight() -> CGFloat { list()?.frame.height ?? -1 }
-        func strays() -> [NSRect] {
-            pushButtons(under: hosting).map { $0.convert($0.bounds, to: hosting) }
-                .filter { !hosting.bounds.contains($0) }
+        // Again: a scan asks afresh, and run from a terminal that has Full
+        // Disk Access it takes the banner down and leaves the window roomier
+        // than the one this is about.
+        model.hasFullDiskAccess = false
+        func listHeight() -> CGFloat { layout.parts[.marksList]?.height ?? -1 }
+        /// The parts that are not wholly inside the window. Half a point is
+        /// let go: a frame that ends on the window's edge can end a hair
+        /// past it.
+        func strays() -> [String] {
+            let inside = hosting.bounds.insetBy(dx: -0.5, dy: -0.5)
+            return layout.parts.filter { !inside.contains($0.value) }
+                .map { "\($0.key) at \($0.value)" }.sorted()
         }
 
         let twelve = Set((0..<12).map { NodeRef(dir: result.root, fileIndex: $0) })
@@ -9863,11 +9985,15 @@ enum SelfTest {
                 && short >= MarksList.height(for: 2, inWindow: frame.height),
             "the list is \(short) high; its rows ask for \(asked)"
         )
+        // The header at the top and the status bar at the foot, where a
+        // delete's Stop is, and the bar's buttons between: all of them, and
+        // all of each.
         check(
             "and nothing is pushed out of the window to make room for it",
-            strays().isEmpty && !pushButtons(under: hosting).isEmpty,
-            "\(pushButtons(under: hosting).count) buttons, out of the window at "
-                + "\(strays())"
+            strays().isEmpty && layout.parts[.header] != nil
+                && layout.parts[.statusBar] != nil
+                && layout.marksBarButtons.count == 4,
+            "\(layout.parts.count) parts placed; out of the window: \(strays())"
         )
 
         window.setContentSize(NSSize(width: 1160, height: 940))

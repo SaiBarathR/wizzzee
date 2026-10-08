@@ -269,7 +269,8 @@ Sources/Wizzzee/
   Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer,
               TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,
-              StatusBar, ItemContextMenu, Marks
+              StatusBar, ItemContextMenu, Marks, WelcomeGuide, WelcomeArt,
+              WindowParts
   App/        Main, WizzzeeApp, AppModel, AppInfo, Preferences, CLI, SelfTest,
               UIShot
 scripts/      build-app.sh, validate-release.sh, make-icon.swift
