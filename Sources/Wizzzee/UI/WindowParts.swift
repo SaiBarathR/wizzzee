@@ -2,7 +2,7 @@ import SwiftUI
 
 /// A part of the window that says where it has been put.
 enum WindowPart: Hashable {
-    case header, statusBar
+    case header, tabs, statusBar
     case marksList
     case showMarksList, clearMarks, trashMarked, deleteMarked
 }

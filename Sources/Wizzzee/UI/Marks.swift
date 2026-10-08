@@ -185,8 +185,10 @@ struct MarksList: View {
     /// points to spare.
     static let restOfWindow: CGFloat = 510
 
-    /// A row for each mark up to ten of them, and no more than a window
-    /// `window` high can spare: past either the list scrolls.
+    /// A row for each of `count` up to ten, and no more than a window
+    /// `window` high can spare: past either the list scrolls. `count` is how
+    /// many were marked when the list was opened, which is what keeps the
+    /// table under it still while more are.
     ///
     /// Given the height its rows asked for whatever the window's, a long
     /// list took room the window did not have. At its shortest, what was

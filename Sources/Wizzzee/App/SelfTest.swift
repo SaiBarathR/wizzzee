@@ -9861,6 +9861,19 @@ enum SelfTest {
                 + "\(frames.map { Int($0.midY) }), over a table starting at "
                 + "\(Int(tableFrame().minY))"
         )
+        // Which row above the table: the tabs', and to the right of them.
+        // Over the tabs, or down in the filter's row, the buttons would be
+        // above the table all the same.
+        let tabs = layout.parts[.tabs] ?? .zero
+        check(
+            "and that row is the tabs', with the buttons after the last of them",
+            tabs.width > 0
+                && frames.allSatisfy {
+                    abs($0.midY - tabs.midY) <= 1 && $0.minX >= tabs.maxX
+                },
+            "tabs at \(tabs); buttons from \(frames.map { Int($0.minX) }) "
+                + "across, \(frames.map { Int($0.midY) }) down"
+        )
         check(
             "and moves nothing to make room for them",
             settled(tableHeight) == bare && tableFrame().minY == bareTop,
@@ -9897,15 +9910,57 @@ enum SelfTest {
                 + "\(list.maxY), under a bar ending at \(barFoot) and over a "
                 + "table starting at \(tableFrame().minY)"
         )
+        // With the list open, the table is under it. A list that grew with
+        // every mark moved the table down a row under the pointer, and the
+        // next click in the same place was on another row's box.
+        let third = NodeRef(dir: result.root, fileIndex: 2)
+        let openTop = tableFrame().minY
+        model.setMarked([third], true)
+        pump(0.3)
+        check(
+            "a mark made with the list open moves nothing: the list keeps "
+                + "the height it opened with",
+            model.marks.count == 3 && settled(tableHeight) == underList
+                && tableFrame().minY == openTop
+                && layout.parts[.marksList]?.height == twoRows,
+            "\(model.marks.count) marked; table \(tableHeight()) high at "
+                + "\(tableFrame().minY), \(underList) at \(openTop) before; the "
+                + "list is \(layout.parts[.marksList]?.height ?? -1) of \(twoRows)"
+        )
+        // Down to fewer than it opened with, which a list sized by the
+        // marks as they stand would shrink for.
+        model.setMarked([first, second], false)
+        pump(0.3)
+        check(
+            "nor do marks taken off, down to fewer than it opened with",
+            model.marks.count == 1 && settled(tableHeight) == underList
+                && tableFrame().minY == openTop
+                && layout.parts[.marksList]?.height == twoRows,
+            "\(model.marks.count) marked; table \(tableHeight()) high at "
+                + "\(tableFrame().minY); the list is "
+                + "\(layout.parts[.marksList]?.height ?? -1) of \(twoRows)"
+        )
+        model.setMarked([first, second], true)
+
         model.showsMarks = false
         pumpUntil { tableHeight() == bare }
         check(
             "and shuts again under a bar that has not gone",
-            settled(tableHeight) == bare && model.marks.count == 2
+            settled(tableHeight) == bare && model.marks.count == 3
                 && layout.marksBarButtons.count == 4,
             "table \(tableHeight()) high, \(model.marks.count) marked, "
                 + "\(layout.marksBarButtons.count) of the bar's buttons"
         )
+        model.showsMarks = true
+        let threeRows = MarksList.height(for: 3, inWindow: frame.height)
+        pumpUntil { layout.parts[.marksList]?.height == threeRows }
+        check(
+            "opened again, it is as tall as what is marked by then",
+            layout.parts[.marksList]?.height == threeRows && threeRows > twoRows,
+            "the list is \(layout.parts[.marksList]?.height ?? -1) of \(threeRows)"
+        )
+        model.showsMarks = false
+        pumpUntil { tableHeight() == bare }
 
         model.clearMarks()
         pumpUntil { layout.marksBarButtons.isEmpty }

@@ -355,7 +355,22 @@ final class AppModel: ObservableObject {
     /// looking through everything it holds.
     private var marksBeneath: [UInt64: Int] = [:]
     /// Whether the list of marks is open under the bar that counts them.
-    @Published var showsMarks = false
+    @Published var showsMarks = false {
+        didSet {
+            if showsMarks && !oldValue { marksListRows = marks.count }
+        }
+    }
+    /// How many rows the open list of marks is given room for: as many as
+    /// were marked when it was opened, and no more or fewer until it is
+    /// opened again.
+    ///
+    /// The list is above the table the boxes are ticked in. Sized by what is
+    /// marked from one moment to the next, it grew a row with every box
+    /// ticked while it was open, and moved the table down a row under the
+    /// pointer: a second click in the same place was on the box of the row
+    /// above. Held at the height it opened with, a mark made after that is
+    /// one more row to scroll to, and nothing moves.
+    @Published private(set) var marksListRows = 0
 
     // The guide
     /// Whether the guide to the app is up, over the window.
@@ -1913,6 +1928,9 @@ final class AppModel: ObservableObject {
         // Nothing left to list, so the list is put away and starts shut the
         // next time something is marked.
         if next.isEmpty { showsMarks = false }
+        // Asked for before there was anything to list, it is given its room
+        // when there is.
+        if showsMarks && marksListRows == 0 { marksListRows = next.count }
     }
 
     /// Whether `ref` is somewhere inside `dir`.
