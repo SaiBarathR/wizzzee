@@ -539,23 +539,30 @@ final class AppModel: ObservableObject {
     private struct Spot {
         let path: String
         let isDirectory: Bool
-        /// A file's number on the volume, or zero where none was taken.
+        /// Its number on the volume, or zero where none was taken.
         let fileID: UInt64
 
         init(_ ref: NodeRef) {
             path = ref.path
             isDirectory = ref.isDirectory
-            fileID = ref.file?.fileID ?? 0
+            fileID = Self.number(of: ref)
         }
 
-        /// What is there now, if it is the same thing. A file is known by
-        /// its number as well as its name: another put in its place since
-        /// is not what was marked, and the list of marks is moved to the
-        /// Trash without asking.
+        private static func number(of ref: NodeRef) -> UInt64 {
+            ref.isDirectory ? ref.dir.fileID : ref.file?.fileID ?? 0
+        }
+
+        /// What is there now, if it is the same thing. A file or a folder
+        /// is known by its number as well as its name: another put in its
+        /// place since is not what was marked, and the list of marks is
+        /// moved to the Trash without asking.
         func find(in scan: ScanResult) -> NodeRef? {
-            if isDirectory { return scan.directory(at: path).map { NodeRef($0) } }
-            guard let found = scan.file(at: path) else { return nil }
-            let now = found.file?.fileID ?? 0
+            guard
+                let found = isDirectory
+                    ? scan.directory(at: path).map({ NodeRef($0) })
+                    : scan.file(at: path)
+            else { return nil }
+            let now = Self.number(of: found)
             return fileID == 0 || now == 0 || now == fileID ? found : nil
         }
     }
@@ -2382,6 +2389,11 @@ final class AppModel: ObservableObject {
     /// frees nothing, and between them were all of it.
     private func offerUndo(of moved: [Trashed], taking left: UInt64, of weight: UInt64) {
         guard !moved.isEmpty else { return }
+        // What was already there is looked at before this move joins it. A
+        // name that has gone hands what it was down for to another name of
+        // the same file, and that is told by number: something new must not
+        // arrive holding the number of something that has just gone.
+        refreshTrashLine()
         lastTrash = moved
         lastTrashTook = left
         canUndoTrash = true
@@ -2444,7 +2456,10 @@ final class AppModel: ObservableObject {
         var held: [(receipt: FileActions.TrashReceipt, bytes: UInt64)] = []
         var left: [(item: FileActions.FileIdentity, bytes: UInt64)] = []
         for entry in sessionTrash {
-            if entry.receipt.isStillInTrash {
+            // Kept unless it is known to have gone. A disk that does not
+            // answer has not said so, and letting go here lets go of the
+            // Undo below as well.
+            if !entry.receipt.hasLeftTrash {
                 held.append(entry)
             } else if entry.bytes > 0 {
                 left.append((entry.receipt.item, entry.bytes))

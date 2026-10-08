@@ -6949,10 +6949,18 @@ enum SelfTest {
             check("y.dat and new.dat are still in a", false, "\(fourth.root.files.map(\.name))")
             return
         }
+        guard let empty4 = fourth.root.subdir(named: "empty") else {
+            check("a/empty is still there", false, "\(fourth.root.subdirs.map(\.name))")
+            return
+        }
         model.setMarked(
-            [NodeRef(dir: fourth.root, fileIndex: y4), NodeRef(dir: fourth.root, fileIndex: new4)],
+            [
+                NodeRef(dir: fourth.root, fileIndex: y4),
+                NodeRef(dir: fourth.root, fileIndex: new4), NodeRef(empty4),
+            ],
             true
         )
+        check("two files and a folder are marked", model.marks.count == 3, "\(model.marks.count)")
         // Made beside it and then moved over it, so that the two are files
         // at once and can't be given the same number.
         let stand = base.appendingPathComponent("a/stand-in")
@@ -6967,11 +6975,33 @@ enum SelfTest {
             check("the stand-in can take y.dat's place", false, String(cString: strerror(errno)))
             return
         }
-        _ = loadSynchronously(into: model)
+        // And the folder: another made beside it, then given its name.
+        let standIn = base.appendingPathComponent("a/empty-too")
+        do {
+            try FileManager.default.createDirectory(at: standIn, withIntermediateDirectories: true)
+            try FileManager.default.removeItem(at: base.appendingPathComponent("a/empty"))
+            try FileManager.default.moveItem(
+                at: standIn,
+                to: base.appendingPathComponent("a/empty")
+            )
+        } catch {
+            check("another folder can take a/empty's place", false, "\(error)")
+            return
+        }
+        guard let fifth = loadSynchronously(into: model) else { return }
         check(
-            "a mark is not put back on another file that has taken the name",
-            model.marks.map(\.name) == ["new.dat"] && model.marksLostToRescan == 1,
+            "a mark is not put back on another file, or folder, that has taken the name",
+            model.marks.map(\.name) == ["new.dat"] && model.marksLostToRescan == 2
+                && fifth.root.subdir(named: "empty") != nil
+                && fifth.root.files.contains { $0.name == "y.dat" },
             "marked \(model.marks.map(\.name)), \(model.marksLostToRescan) lost"
+        )
+        // What was open is still told by where it is, as is the folder the
+        // map was zoomed to: nothing is removed by a folder being open.
+        check(
+            "the scan's own root is still itself, and still open",
+            model.isExpanded(fifth.root) && fifth.root.fileID != 0,
+            "root number \(fifth.root.fileID)"
         )
     }
 
@@ -7511,6 +7541,74 @@ enum SelfTest {
             model.bytesInTrash == 0 && model.trashedLocations.isEmpty,
             "\(model.bytesInTrash) bytes in the Trash"
         )
+
+        // What a name that has gone was down for passes to another name of
+        // the same file, and the same file is told by its number. So
+        // something new must not arrive holding the number of something
+        // that has just gone: some volumes hand a number out again. Here a
+        // Trash is stood in that says the plain file went to where a second
+        // name of the film is, which is that happening.
+        let aside = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wizzzee-selftest-trash-aside-\(getpid())")
+        defer { try? FileManager.default.removeItem(at: aside) }
+        do {
+            try FileManager.default.createDirectory(at: aside, withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: lnk)
+            if !FileManager.default.fileExists(atPath: dat.path) {
+                try write(dat, bytes: 90_000)
+            }
+            // The film's second name, outside the scan.
+            try FileManager.default.linkItem(at: dat, to: aside.appendingPathComponent("kept"))
+        } catch {
+            check("the film can be given a name outside the scan", false, "\(error)")
+            return
+        }
+        guard let result = loadSynchronously(into: model),
+            let filmAt = result.root.files.firstIndex(where: { $0.name == "film.dat" }),
+            let plainAt = result.root.files.firstIndex(where: { $0.name == "plain.dat" })
+        else {
+            check("film.dat and plain.dat scanned", false, "")
+            return
+        }
+        let filmRef = NodeRef(dir: result.root, fileIndex: filmAt)
+        let plainRef = NodeRef(dir: result.root, fileIndex: plainAt)
+        let (filmTakes, plainTakes) = (filmRef.alloc, plainRef.alloc)
+        let binned = aside.appendingPathComponent("film.dat").path
+        let kept = aside.appendingPathComponent("kept").path
+        model.trashMover = { path in
+            guard let item = FileActions.FileIdentity(atPath: path),
+                let folder = FileActions.FileIdentity(
+                    atPath: (path as NSString).deletingLastPathComponent
+                )
+            else { throw FileActions.ActionError.failed(path, "It would not go.") }
+            if path.hasSuffix("/film.dat") {
+                guard Darwin.rename(path, binned) == 0 else {
+                    throw FileActions.ActionError.failed(path, "It would not go.")
+                }
+                return FileActions.TrashReceipt(inTrash: binned, item: item, folder: folder)
+            }
+            // The plain file goes, and is said to be where the film's other
+            // name is: a place holding the film's number.
+            try FileManager.default.removeItem(atPath: path)
+            guard let reused = FileActions.FileIdentity(atPath: kept) else {
+                throw FileActions.ActionError.failed(path, "It would not go.")
+            }
+            return FileActions.TrashReceipt(inTrash: kept, item: reused, folder: folder)
+        }
+        trash(model, [filmRef])
+        check(
+            "the film, moved on its own, is all in the Trash",
+            model.bytesInTrash == filmTakes && filmTakes > plainTakes && plainTakes > 0,
+            "\(model.bytesInTrash) bytes in the Trash, the film takes \(filmTakes)"
+        )
+        try? FileManager.default.removeItem(atPath: binned)
+        trash(model, [plainRef])
+        check(
+            "something arriving with the number of what has just gone is not given its share",
+            model.bytesInTrash == plainTakes,
+            "\(model.bytesInTrash) bytes in the Trash; the plain file takes \(plainTakes), "
+                + "the film took \(filmTakes)"
+        )
     }
 
     /// ⌘⌫ asks nothing, on the understanding that it can be undone. A move
@@ -7608,6 +7706,17 @@ enum SelfTest {
             model.bytesInTrash == zOnDisk && zOnDisk > 0 && model.canUndoTrash,
             "\(model.bytesInTrash) bytes in the Trash, z.dat takes \(zOnDisk)"
         )
+        // A Trash that can't be looked into for a moment — a share that has
+        // dropped — has not been emptied. The line and the Undo stay.
+        chmod(bin.path, 0)
+        model.refreshTrashLine()
+        let kept = (undo: model.canUndoTrash, bytes: model.bytesInTrash)
+        chmod(bin.path, 0o755)
+        check(
+            "a Trash that can't be looked into is not taken for an empty one",
+            getuid() == 0 || (kept.undo && kept.bytes == zOnDisk),
+            "can undo \(kept.undo), \(kept.bytes) bytes in the Trash"
+        )
         guard let third = loadSynchronously(into: model) else { return }
         let counted = third.root.subdir(named: "bin")?.files.contains { $0.name == "z.dat" }
         check(
@@ -7666,8 +7775,19 @@ enum SelfTest {
         }
         check(
             "something in the Trash is known to be there",
-            plain.isStillInTrash,
+            plain.isStillInTrash && !plain.hasLeftTrash,
             ""
+        )
+        // A Trash that can't be looked into has not said the thing is gone.
+        // Taken for gone, a share that dropped for a moment was the end of
+        // the Undo for what was still sitting in it.
+        chmod(bin.path, 0)
+        let unseen = (there: plain.isStillInTrash, gone: plain.hasLeftTrash)
+        chmod(bin.path, 0o755)
+        check(
+            "one that can't be looked into is neither seen to be there nor known to be gone",
+            getuid() == 0 || (!unseen.there && !unseen.gone),
+            "seen there \(unseen.there), known gone \(unseen.gone)"
         )
         check(
             "and goes back where it was",
@@ -7682,14 +7802,14 @@ enum SelfTest {
         try? manager.removeItem(atPath: binned)
         check(
             "what has been emptied out of the Trash is not there to bring back",
-            !emptied.isStillInTrash
+            !emptied.isStillInTrash && emptied.hasLeftTrash
                 && outcome(emptied, to: original) == "It is no longer in the Trash.",
             outcome(emptied, to: original)
         )
         try? Data("somebody else's".utf8).write(to: URL(fileURLWithPath: binned))
         check(
             "nor is something else that has been given its place there",
-            !emptied.isStillInTrash
+            !emptied.isStillInTrash && emptied.hasLeftTrash
                 && outcome(emptied, to: original) == "It is no longer in the Trash."
                 && text(binned) == "somebody else's" && !manager.fileExists(atPath: original),
             "\(outcome(emptied, to: original)); the Trash holds “\(text(binned))”"

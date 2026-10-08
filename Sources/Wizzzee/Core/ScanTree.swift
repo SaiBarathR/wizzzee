@@ -257,6 +257,11 @@ final class DirNode {
     var subdirs: [DirNode] = []
     var files: [FileEntry] = []
 
+    /// Inode number, or zero for a node no scan made. What a folder is,
+    /// as against where it is: a mark carried over to the next scan goes
+    /// back on the folder it was on, not on another that has its name.
+    var fileID: UInt64 = 0
+
     /// Logical size of this subtree, including all descendants.
     var totalSize: UInt64 = 0
     /// Size on disk of this subtree.

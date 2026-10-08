@@ -187,6 +187,16 @@ enum FileActions {
 
         /// Whether it is still where it was put, and still it.
         var isStillInTrash: Bool { FileIdentity(atPath: inTrash) == item }
+
+        /// Whether it is known to be there no longer: nothing is at its
+        /// place, or something else is. Not the reverse of the above. A
+        /// place that can't be looked at — a share that has dropped, a disk
+        /// that is slow to answer — is neither.
+        var hasLeftTrash: Bool {
+            var info = stat()
+            if lstat(inTrash, &info) == 0 { return FileIdentity(info) != item }
+            return errno == ENOENT || errno == ENOTDIR
+        }
     }
 
     /// Moves the item at `path` to the Trash, and says where in the Trash it
