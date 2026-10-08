@@ -11,6 +11,10 @@ struct WizzzeeApp: App {
     var body: some Scene {
         WindowGroup("Wizzzee") {
             ContentView(model: model)
+                // Here and not in the view: the same view is put together
+                // off screen to be drawn and to be tested, and neither of
+                // those is someone opening the app.
+                .onAppear { model.offerWelcome() }
         }
         // Without an explicit default the window opens at whatever SwiftUI
         // infers from ideal sizes, which is far too small for a table plus a
@@ -29,79 +33,103 @@ struct WizzzeeApp: App {
             // so ⌘⌫ did nothing on a row picked straight afterwards. Greyed
             // out is enough — a key that matches a disabled item goes on to
             // whatever has the keyboard.
+            // All of it off while the guide is over the window. A menu's
+            // keys go on working under a sheet, and these were acting on a
+            // window behind it: with the guide up, ⌘R ran a scan and ⌘2
+            // changed the tab.
             CommandGroup(replacing: .newItem) {
-                // The header's Folder… button, on the key every app opens
-                // something with.
-                Button("Scan Folder…") { model.chooseFolder() }
-                    .keyboardShortcut("o", modifiers: .command)
-                    .disabled(!model.canChooseFolder)
-                Divider()
-                // On Finder's other key for it. Space, its first, marks a
-                // row here.
-                Button(model.previewURL == nil ? "Quick Look" : "Close Quick Look") {
-                    model.togglePreview()
-                }
-                .keyboardShortcut("y", modifiers: .command)
-                .disabled(!model.canTogglePreview)
-                Divider()
-                // Space does the same on a row. That one is the table's own,
-                // so it can't be shown here; this is the one that can.
-                Button(model.selectionIsMarked ? "Unmark" : "Mark for Removal") {
-                    model.markSelection()
-                }
-                    .keyboardShortcut("m", modifiers: [.command, .shift])
-                    .disabled(!model.canMarkSelection)
-                Divider()
-                Button("Move to Trash") {
-                    if TextEntry.isUnderWay {
-                        TextEntry.deleteToBeginningOfLine()
-                    } else {
-                        model.trashSelection()
+                Group {
+                    // The header's Folder… button, on the key every app opens
+                    // something with.
+                    Button("Scan Folder…") { model.chooseFolder() }
+                        .keyboardShortcut("o", modifiers: .command)
+                        .disabled(!model.canChooseFolder)
+                    Divider()
+                    // On Finder's other key for it. Space, its first, marks a
+                    // row here.
+                    Button(model.previewURL == nil ? "Quick Look" : "Close Quick Look") {
+                        model.togglePreview()
                     }
+                    .keyboardShortcut("y", modifiers: .command)
+                    .disabled(!model.canTogglePreview)
+                    Divider()
+                    // Space does the same on a row. That one is the table's own,
+                    // so it can't be shown here; this is the one that can.
+                    Button(model.selectionIsMarked ? "Unmark" : "Mark for Removal") {
+                        model.markSelection()
+                    }
+                        .keyboardShortcut("m", modifiers: [.command, .shift])
+                        .disabled(!model.canMarkSelection)
+                    Divider()
+                    Button("Move to Trash") {
+                        if TextEntry.isUnderWay {
+                            TextEntry.deleteToBeginningOfLine()
+                        } else {
+                            model.trashSelection()
+                        }
+                    }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(!model.canUseDeleteKeys)
+                    Button("Delete Permanently…") {
+                        if !TextEntry.isUnderWay { model.confirmDeletingSelection() }
+                    }
+                    .keyboardShortcut(.delete, modifiers: [.command, .option])
+                    .disabled(!model.canUseDeleteKeys)
                 }
-                .keyboardShortcut(.delete, modifiers: .command)
-                .disabled(!model.canUseDeleteKeys)
-                Button("Delete Permanently…") {
-                    if !TextEntry.isUnderWay { model.confirmDeletingSelection() }
-                }
-                .keyboardShortcut(.delete, modifiers: [.command, .option])
-                .disabled(!model.canUseDeleteKeys)
+                .disabled(model.showsWelcome)
             }
             CommandGroup(after: .pasteboard) {
                 Divider()
                 // The filter is on one tab of three; this is on all of them.
                 Button("Find…") { model.beginSearch() }
                     .keyboardShortcut("f", modifiers: .command)
+                    .disabled(model.showsWelcome)
             }
             CommandGroup(after: .toolbar) {
-                // The tab strip, which only ever answered a click.
-                ForEach(MainTab.allCases, id: \.self) { tab in
-                    Button(tab.rawValue) { model.show(tab) }
-                        .keyboardShortcut(
-                            KeyEquivalent(tab.key),
-                            modifiers: .command
-                        )
+                Group {
+                    // The tab strip, which only ever answered a click.
+                    ForEach(MainTab.allCases, id: \.self) { tab in
+                        Button(tab.rawValue) { model.show(tab) }
+                            .keyboardShortcut(
+                                KeyEquivalent(tab.key),
+                                modifiers: .command
+                            )
+                    }
+                    Divider()
+                    // Disabled rather than silently ignored: `startScan` refuses
+                    // while a scan or a delete is running, so ⌘R then looked like a
+                    // broken shortcut or a wedged app.
+                    Button("Rescan") { model.startScan() }
+                        .keyboardShortcut("r", modifiers: .command)
+                        .disabled(!model.canStartScan)
+                    Divider()
+                    // One item with a changing verb rather than a checkmark, which
+                    // is how the system apps title a pane they can hide.
+                    Button(model.showsTreemap ? "Hide Treemap" : "Show Treemap") {
+                        model.toggleTreemap()
+                    }
+                    .keyboardShortcut("t", modifiers: .command)
+                    Button("Zoom Treemap Out") { model.zoomOut() }
+                        .keyboardShortcut("[", modifiers: .command)
+                        .disabled(!model.canZoomOut || !model.showsTreemap)
+                    Button("Reset Treemap Zoom") { model.resetZoom() }
+                        .keyboardShortcut("0", modifiers: .command)
+                        .disabled(!model.showsTreemap)
                 }
-                Divider()
-                // Disabled rather than silently ignored: `startScan` refuses
-                // while a scan or a delete is running, so ⌘R then looked like a
-                // broken shortcut or a wedged app.
-                Button("Rescan") { model.startScan() }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .disabled(!model.canStartScan)
-                Divider()
-                // One item with a changing verb rather than a checkmark, which
-                // is how the system apps title a pane they can hide.
-                Button(model.showsTreemap ? "Hide Treemap" : "Show Treemap") {
-                    model.toggleTreemap()
-                }
-                .keyboardShortcut("t", modifiers: .command)
-                Button("Zoom Treemap Out") { model.zoomOut() }
-                    .keyboardShortcut("[", modifiers: .command)
-                    .disabled(!model.canZoomOut || !model.showsTreemap)
-                Button("Reset Treemap Zoom") { model.resetZoom() }
-                    .keyboardShortcut("0", modifiers: .command)
-                    .disabled(!model.showsTreemap)
+                .disabled(model.showsWelcome)
+            }
+            // In place of "Wizzzee Help", which opened a window to say there
+            // was none.
+            //
+            // The first has no key. ⌘? is the one a Help item is given, and
+            // it never arrives: the system takes it to open this menu, with
+            // its search field ready and this item under it.
+            CommandGroup(replacing: .help) {
+                Button("Welcome to Wizzzee") { model.showWelcome() }
+                    .disabled(!model.showsWelcome && !model.canShowWelcome)
+                Button("Keyboard Shortcuts") { model.showWelcome(at: .keys) }
+                    .keyboardShortcut("/", modifiers: .command)
+                    .disabled(!model.showsWelcome && !model.canShowWelcome)
             }
         }
     }

@@ -94,11 +94,14 @@ Wizzzee --uishot --tab files --path /System/Library \
 | `--type EXT` | none | Put one file type in focus, as clicking its row in File Types does. With or without the dot; `none` is the files that have no extension |
 | `--no-access-banner` | off | Hide the Full Disk Access warning |
 | `--no-treemap` | off | Hide the treemap, as the View menu's Hide Treemap does |
+| `--welcome N` | none | Draw page N of the guide (1–7) in place of the window. It is a sheet over the window, and so is in no picture of the window. Nothing is scanned, and the other flags but `--out` and `--appearance` are not used |
+| `--appearance light\|dark` | the system's | Which appearance to draw in |
 
 `--tab` accepts either the short name or the display title, matched by prefix,
 so `files`, `file`, and `"file view"` all select the File View. An unrecognized
 value exits with status 2 rather than silently falling back, and so does an
-unrecognized `--metric`, or a `--type` the scan has no files of.
+unrecognized `--metric` or `--appearance`, a `--type` the scan has no files of,
+or a `--welcome` page the guide does not have.
 
 A command-line build can never hold Full Disk Access, so the warning banner is
 always up; `--no-access-banner` produces the layout a user who has granted it
@@ -116,6 +119,7 @@ showsTreemap: false (stored)
 sizeMetric: disk (default)
 lastFolder: none
 lastVolume: /
+showsWelcome: true (default)
 ```
 
 `stored` means someone chose it; `default` means nothing was ever written and the
@@ -135,6 +139,14 @@ Accessibility and Screen Recording permissions a CI runner does not have:
 ```bash
 defaults write com.wizzzee.diskanalyzer showsTreemap -bool false
 Wizzzee.app/Contents/MacOS/Wizzzee --prefs | grep -q 'showsTreemap: false'
+```
+
+`showsWelcome` is whether the guide opens with the app. It is `true (default)`
+until **Don’t show this again** is ticked in the guide, and can be put back from
+a shell, to see the guide as a first launch does:
+
+```bash
+defaults delete com.wizzzee.diskanalyzer showsWelcome
 ```
 
 ## `--selftest`

@@ -62,6 +62,15 @@ rebuilding.
 
 ## Using it
 
+The first time it is opened, Wizzzee puts up a guide: seven pages, one for each
+part of the app, each with a small picture of that part of the window, numbered,
+and a card for every number saying what can be done there and on which keys. The
+last page is every keyboard shortcut. **Don’t show this again** at its foot stops
+it opening with the app; it stays under **Help ▸ Welcome to Wizzzee**, in the
+About tab, and on `⌘/`, which opens it at the shortcuts.
+
+![The guide's page on marking and removing: a picture of the foot of the window with four numbered points, and a card for each](docs/images/welcome.png)
+
 - **Tree View** — folder hierarchy, sorted by size. Click a column to re-sort;
   sorting applies within each parent, so the hierarchy stays intact. `→` opens
   the selected folder and `←` shuts it, as in Finder's list view; pressed again
@@ -162,6 +171,7 @@ rebuilding.
 | `⌘T` | Show or hide the treemap |
 | `⌘[` | Zoom the treemap out |
 | `⌘0` | Reset the treemap zoom |
+| `⌘/` | The guide, at its page of keyboard shortcuts |
 
 ![File View, showing the biggest files in the scan](docs/images/file-view.png)
 
@@ -265,7 +275,7 @@ Sources/Wizzzee/
   Treemap/    TreemapLayout (squarify + cushions), TreemapRenderer,
               TreemapView, TreemapPalette
   UI/         ContentView, HeaderBar, TreeViewTab, FileViewTab, TreemapPane,
-              StatusBar, ItemContextMenu, Marks
+              StatusBar, ItemContextMenu, Marks, WelcomeGuide, WelcomeArt
   App/        Main, WizzzeeApp, AppModel, AppInfo, Preferences, CLI, SelfTest,
               UIShot
 scripts/      build-app.sh, validate-release.sh, make-icon.swift
