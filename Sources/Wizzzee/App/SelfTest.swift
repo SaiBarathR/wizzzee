@@ -135,6 +135,9 @@ enum SelfTest {
         testASearchFindsFoldersAndCountsWhatItFinds()
         testTheFileViewSearches()
         testARevealedRowIsScrolledIntoView()
+        testARevealLeavesANarrowTableWhereItWasAcross()
+        testTheMarksBarIsThereFromTheFirstMark()
+        testALongListOfMarksLeavesTheFootOfTheWindowInSight()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
 
@@ -3189,10 +3192,8 @@ enum SelfTest {
         check(
             "the total is the sum of what each would free",
             model.markedBytes == aRef.alloc + cRef.alloc + mRef.alloc
-                && model.marksSummary
-                    == "3 marked  •  "
-                    + ByteFormat.decimal(aRef.alloc + cRef.alloc + mRef.alloc),
-            model.marksSummary
+                && model.marksHeadline == "3 items marked for removal",
+            "\(model.marksHeadline), \(ByteFormat.decimal(model.markedBytes))"
         )
         check(
             "the list runs largest first",
@@ -5581,6 +5582,37 @@ enum SelfTest {
             pending.append(contentsOf: next.subviews)
         }
         return found
+    }
+
+    /// The push buttons under `view`, as AppKit has them: the ones SwiftUI
+    /// draws with a border, and not the plain ones in a table's rows.
+    private static func pushButtons(under view: NSView) -> [NSButton] {
+        var found: [NSButton] = []
+        var pending: [NSView] = [view]
+        while let next = pending.popLast() {
+            if let button = next as? NSButton, !(next is NSPopUpButton) {
+                found.append(button)
+            }
+            pending.append(contentsOf: next.subviews)
+        }
+        return found
+    }
+
+    /// What `measure` comes to once it has stopped changing: the same for
+    /// ten turns of the run loop together. A length read while the window is
+    /// still being laid out is a length it is passing through.
+    @MainActor
+    private static func settled(_ measure: () -> CGFloat) -> CGFloat {
+        var last = measure()
+        var steady = 0
+        let deadline = Date().addingTimeInterval(10)
+        while steady < 10, Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            let now = measure()
+            steady = now == last ? steady + 1 : 0
+            last = now
+        }
+        return last
     }
 
     /// Runs the main run loop until it has nothing left to do.
@@ -9236,6 +9268,346 @@ enum SelfTest {
                 && model.fileRows.count == 4
                 && model.fileRows.allSatisfy { !$0.ref.isDirectory },
             "\(model.fileRows.count) rows, tally \(String(describing: model.fileTally))"
+        )
+    }
+
+    /// A window opened at its narrowest gives the tree's table less room
+    /// than its columns take, so the table scrolls sideways as well as down.
+    /// A row brought to the middle of it both ways took the marks' column,
+    /// and the start of every name, off the left-hand edge.
+    @MainActor
+    private static func testARevealLeavesANarrowTableWhereItWasAcross() {
+        let base = scratch("reveal-narrow")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("many"),
+                withIntermediateDirectories: true
+            )
+            for i in 0..<80 {
+                try write(base.appendingPathComponent("many/f\(i).dat"), bytes: 10)
+            }
+        } catch {
+            check("the narrow reveal fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        model.dismissedAccessPrompt = true
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        // The narrowest the window goes, from the start: columns that have
+        // once had room are squeezed to fit when it is taken away, and ones
+        // that never had it are not.
+        let frame = NSRect(x: 0, y: 0, width: 1160, height: 660)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        guard let result = loadSynchronously(into: model),
+            let many = result.root.subdir(named: "many")
+        else { return }
+        model.treeSort = [TreeSort(.name, order: .forward)]
+        model.setExpanded(many, true)
+        pumpUntil {
+            tables(under: hosting).contains { $0.numberOfRows == model.treeRows.count }
+        }
+        guard let last = many.files.firstIndex(where: { $0.name == "f79.dat" }),
+            let table = tables(under: hosting).first(where: {
+                $0.numberOfRows == model.treeRows.count
+            })
+        else {
+            check("the narrow tree's table can be found", false, "")
+            return
+        }
+        let target = NodeRef(dir: many, fileIndex: last)
+        guard let row = model.treeRows.firstIndex(where: { $0.ref == target }) else {
+            check("the narrow reveal fixture scanned", false, "no f79.dat")
+            return
+        }
+        pump(0.3)
+        // How wide the columns come out is the system's business. Where they
+        // happen to fit, the name's is pulled wider, as a drag on its edge
+        // would: a table that cannot scroll sideways passes whatever the
+        // reveal does.
+        if table.rect(ofRow: 0).width <= table.visibleRect.width,
+            let name = table.tableColumns.dropFirst().first
+        {
+            name.width += 400
+            pump(0.3)
+        }
+        let rowWidth = table.rect(ofRow: 0).width
+        check(
+            "the narrow table's rows are wider than the room it has for them",
+            rowWidth > table.visibleRect.width && table.visibleRect.minX == 0,
+            "rows \(rowWidth) wide in \(table.visibleRect.width), showing "
+                + "from \(table.visibleRect.minX) across"
+        )
+        model.revealInTree(target)
+        pumpUntil { table.rows(in: table.visibleRect).contains(row) }
+        pump(0.2)
+        check(
+            "a row revealed in it is brought into view without the table "
+                + "moving sideways",
+            table.rows(in: table.visibleRect).contains(row)
+                && table.visibleRect.minX == 0,
+            "rows \(rowWidth) wide in \(table.visibleRect.width); showing "
+                + "from \(table.visibleRect.minX) across"
+        )
+    }
+
+    /// What is marked, and the buttons that act on it, are across the foot
+    /// of the window from the first mark. They were in a list that a chip in
+    /// the status bar had to be clicked to open, and someone who had ticked
+    /// three boxes had nothing on screen to do with them.
+    @MainActor
+    private static func testTheMarksBarIsThereFromTheFirstMark() {
+        let base = scratch("marks-bar")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            for i in 0..<6 {
+                try write(base.appendingPathComponent("f\(i).dat"), bytes: 4_096 * (i + 1))
+            }
+        } catch {
+            check("the marks bar fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        model.dismissedAccessPrompt = true
+        model.tab = .files
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        guard let result = loadSynchronously(into: model) else { return }
+        model.refreshFileRows(immediately: true)
+        // The File View's table is everything between the filter and the
+        // foot of the window, so whatever is put at the foot comes out of
+        // its height and nowhere else.
+        func tableScroll() -> NSScrollView? {
+            tables(under: hosting).first { $0.numberOfRows == 6 }?.enclosingScrollView
+        }
+        func tableHeight() -> CGFloat { tableScroll()?.frame.height ?? -1 }
+        guard pumpUntil(10, { tableHeight() > 0 }) else {
+            check(
+                "the File View's table can be found to ask how tall it is",
+                false,
+                "\(tables(under: hosting).map(\.numberOfRows)) rows in the tables found"
+            )
+            return
+        }
+        let bare = settled(tableHeight)
+        let bareButtons = pushButtons(under: hosting)
+
+        let first = NodeRef(dir: result.root, fileIndex: 0)
+        let second = NodeRef(dir: result.root, fileIndex: 1)
+        model.setMarked([first], true)
+        pumpUntil { tableHeight() < bare }
+        let underBar = settled(tableHeight)
+        check(
+            "the first mark takes a strip off the foot of the table, without "
+                + "the list being asked for",
+            !model.showsMarks && underBar < bare && bare - underBar < 60,
+            "table \(bare) high before, \(underBar) with one mark"
+        )
+        // What the strip is for: Show List, Clear Marks, Move to Trash and
+        // Delete…, on screen without anything having been opened. A button
+        // SwiftUI draws does not give its title up to be read, so they are
+        // told by where they are.
+        let tableFoot = tableScroll().map { $0.convert($0.bounds, to: hosting).maxY } ?? -1
+        let added = pushButtons(under: hosting).filter { button in
+            !bareButtons.contains { $0 === button }
+        }
+        let frames = added.map { $0.convert($0.bounds, to: hosting) }
+        check(
+            "and in it are the four buttons that act on the marks",
+            added.count == 4
+                && frames.allSatisfy {
+                    $0.minY >= tableFoot - 1 && hosting.bounds.contains($0)
+                        && abs($0.midY - (frames.first?.midY ?? 0)) < 1
+                },
+            "\(added.count) new buttons at \(frames.map { Int($0.midY) }), "
+                + "under a table ending at \(Int(tableFoot))"
+        )
+        check(
+            "it says how many, in the singular for one",
+            model.marksHeadline == "1 item marked for removal",
+            model.marksHeadline
+        )
+        model.setMarked([second], true)
+        check(
+            "a second mark changes the count and not the height",
+            settled(tableHeight) == underBar
+                && model.marksHeadline == "2 items marked for removal",
+            "table \(tableHeight()) high; \(model.marksHeadline)"
+        )
+
+        model.showsMarks = true
+        pumpUntil { tableHeight() < underBar }
+        let underList = settled(tableHeight)
+        let twoRows = MarksList.height(for: 2, inWindow: frame.height)
+        check(
+            "the list opens above the bar, a row for each mark",
+            underBar - underList >= twoRows && underBar - underList <= twoRows + 2,
+            "table \(underBar) high with the bar, \(underList) with the list; "
+                + "the list is \(twoRows)"
+        )
+        model.showsMarks = false
+        pumpUntil { tableHeight() == underBar }
+        check(
+            "and shuts again under a bar that has not gone",
+            settled(tableHeight) == underBar && model.marks.count == 2
+                && pushButtons(under: hosting).count == bareButtons.count + 4,
+            "table \(tableHeight()) high, \(model.marks.count) marked, "
+                + "\(pushButtons(under: hosting).count) buttons"
+        )
+
+        model.clearMarks()
+        pumpUntil { tableHeight() == bare }
+        check(
+            "the bar goes with the last mark, and its buttons with it",
+            settled(tableHeight) == bare
+                && pushButtons(under: hosting).count == bareButtons.count,
+            "table \(tableHeight()) high, \(bare) to begin with; "
+                + "\(pushButtons(under: hosting).count) buttons, "
+                + "\(bareButtons.count) to begin with"
+        )
+    }
+
+    /// A list of marks longer than the window has room for scrolls. Held at
+    /// the height its rows asked for, it took the room from everything else:
+    /// in a window at its shortest the header went off the top and the
+    /// status bar — where a delete's Stop is — off the foot.
+    @MainActor
+    private static func testALongListOfMarksLeavesTheFootOfTheWindowInSight() {
+        let base = scratch("marks-long")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            for i in 0..<14 {
+                try write(base.appendingPathComponent("f\(i).dat"), bytes: 4_096 * (i + 1))
+            }
+        } catch {
+            check("the long list fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        // With everything that can be above the list above it: the tree and
+        // the map, and the banner about Full Disk Access.
+        model.hasFullDiskAccess = false
+        model.dismissedAccessPrompt = false
+        model.showsTreemap = true
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        // The shortest the window goes.
+        let frame = NSRect(x: 0, y: 0, width: 1160, height: 660)
+        hosting.frame = frame
+        // With no title bar. A window that has one is held to the height of
+        // the screen when it is made taller, and a build runner's screen is
+        // shorter than the window this goes on to ask for: there the window
+        // stayed as it was, and the list with it.
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        guard let result = loadSynchronously(into: model) else { return }
+        /// The list of marks: the one scroll view that is not a table's.
+        func list() -> NSScrollView? {
+            var pending: [NSView] = [hosting]
+            while let view = pending.popLast() {
+                if let scroll = view as? NSScrollView {
+                    if !(scroll.documentView is NSTableView) { return scroll }
+                    continue
+                }
+                pending.append(contentsOf: view.subviews)
+            }
+            return nil
+        }
+        func listHeight() -> CGFloat { list()?.frame.height ?? -1 }
+        func strays() -> [NSRect] {
+            pushButtons(under: hosting).map { $0.convert($0.bounds, to: hosting) }
+                .filter { !hosting.bounds.contains($0) }
+        }
+
+        let twelve = Set((0..<12).map { NodeRef(dir: result.root, fileIndex: $0) })
+        model.setMarked(twelve, true)
+        model.showsMarks = true
+        guard pumpUntil(10, { listHeight() > 0 }) else {
+            check("the list of marks can be found to ask how tall it is", false, "")
+            return
+        }
+        let short = settled(listHeight)
+        // What twelve rows come to with all the room there could be.
+        let asked = MarksList.height(for: 12, inWindow: 10_000)
+        check(
+            "in the shortest window a long list of marks gives way and scrolls",
+            model.marks.count == 12 && short < asked
+                && short == MarksList.height(for: 12, inWindow: frame.height)
+                && short >= MarksList.height(for: 2, inWindow: frame.height),
+            "the list is \(short) high; its rows ask for \(asked)"
+        )
+        check(
+            "and nothing is pushed out of the window to make room for it",
+            strays().isEmpty && !pushButtons(under: hosting).isEmpty,
+            "\(pushButtons(under: hosting).count) buttons, out of the window at "
+                + "\(strays())"
+        )
+
+        window.setContentSize(NSSize(width: 1160, height: 940))
+        pumpUntil { listHeight() > short }
+        check(
+            "given the room, the list is as tall as its rows ask for",
+            settled(listHeight) == asked,
+            "the list is \(listHeight()) high; its rows ask for \(asked), in a "
+                + "window that was made 940 high and is \(hosting.frame.height)"
+        )
+        check(
+            "a list of one is one row, however short the window",
+            MarksList.height(for: 1, inWindow: 660) == 24
+                && MarksList.height(for: 1, inWindow: 100) == 24
+                && MarksList.height(for: 40, inWindow: 100) == 46
+                && MarksList.height(for: 40, inWindow: 2_000) == 220,
+            "\(MarksList.height(for: 1, inWindow: 660)), "
+                + "\(MarksList.height(for: 40, inWindow: 100)), "
+                + "\(MarksList.height(for: 40, inWindow: 2_000))"
         )
     }
 

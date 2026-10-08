@@ -42,9 +42,14 @@ struct TreeTable: View {
         }
     }
 
+    /// Half-way down, and hard against the left. A table too narrow for its
+    /// columns scrolls sideways as well, and centred there it put the marks'
+    /// column and the start of every name out of sight.
+    private static let revealAnchor = UnitPoint.leading
+
     private func scrollIfAsked(_ proxy: ScrollViewProxy, isNewTable: Bool = false) {
         guard let target = model.takeRevealTarget() else { return }
-        proxy.scrollTo(target, anchor: .center)
+        proxy.scrollTo(target, anchor: Self.revealAnchor)
         guard isNewTable else { return }
         // A table that has only just been put on screen may have no rows
         // laid out yet for that to land on, so it is asked again as it
@@ -55,7 +60,7 @@ struct TreeTable: View {
         for delay in [0.1, 0.3, 0.8] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard model.isStillRevealing(target) else { return }
-                proxy.scrollTo(target, anchor: .center)
+                proxy.scrollTo(target, anchor: Self.revealAnchor)
             }
         }
     }

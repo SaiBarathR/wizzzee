@@ -354,7 +354,7 @@ final class AppModel: ObservableObject {
     /// folder's row can say there is something marked inside it without
     /// looking through everything it holds.
     private var marksBeneath: [UInt64: Int] = [:]
-    /// Whether the list of marks is open above the status bar.
+    /// Whether the list of marks is open above the bar that counts them.
     @Published var showsMarks = false
 
     // Errors surfaced as a sheet
@@ -1902,14 +1902,14 @@ final class AppModel: ObservableObject {
     /// occupies a fraction of it.
     var markedBytes: UInt64 { reclaimableSpace(marks) }
 
-    /// The status bar's line for the marks.
-    var marksSummary: String {
-        "\(ByteFormat.count(marks.count)) marked  •  "
-            + ByteFormat.decimal(markedBytes)
+    /// How many are marked, as the bar across the foot of the window says it.
+    var marksHeadline: String {
+        ByteFormat.counted(marks.count, "item") + " marked for removal"
     }
 
-    /// Moves every marked item to the Trash. Unasked, like ⌘⌫: the list of
-    /// them, open beside the button, is the looking-over.
+    /// Moves every marked item to the Trash. Unasked, like ⌘⌫: each was
+    /// marked by hand, the bar beside the button says how many and how much,
+    /// and ⌘Z brings them back.
     func trashMarked() {
         guard !isDeleting, !marks.isEmpty else { return }
         moveToTrash(marks)
