@@ -190,9 +190,11 @@ enum FileActions {
     }
 
     /// Moves the item at `path` to the Trash, and says where in the Trash it
-    /// went and what it was — or nil, when there is nothing to bring it back
-    /// by. A volume with no Trash of its own removes the item outright and
-    /// has nowhere to say it went.
+    /// went and what it was — or nil, when it has gone there and there is
+    /// nothing to bring it back by: the Trash did not say where it put it,
+    /// or what is there now can't be seen to be the thing that was moved.
+    /// (A volume with no Trash at all is an error, not a nil: nothing is
+    /// removed.)
     ///
     /// That was thrown away, and with it any way of bringing the item back:
     /// ⌘⌫ asks nothing, on the understanding that the Trash is not the end,

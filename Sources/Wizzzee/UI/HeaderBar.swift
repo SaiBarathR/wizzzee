@@ -64,9 +64,16 @@ struct HeaderBar: View {
                         .fixedSize()
                         .keyboardShortcut(".", modifiers: .command)
                 } else {
+                    // Return, except while the File View's filter has the
+                    // keyboard. A field passes Return on to the window's
+                    // default button, so the key that ends a search began a
+                    // scan: the list emptied, and with it went the Undo.
                     Button("Scan") { model.startScan() }
                         .fixedSize()
-                        .keyboardShortcut(.return, modifiers: [])
+                        .keyboardShortcut(
+                            model.isEditingFilter
+                                ? nil : KeyboardShortcut(.return, modifiers: [])
+                        )
                         .buttonStyle(.borderedProminent)
                         .disabled(!model.canStartScan)
                 }
@@ -133,9 +140,9 @@ struct HeaderBar: View {
                     )
                     .foregroundStyle(.orange)
                     .help(
-                        "What these marks were on has gone since the last scan, "
-                            + "or can no longer be removed. The other marks "
-                            + "were put back."
+                        "What these marks were on has gone or been replaced "
+                            + "since the last scan, or can no longer be removed. "
+                            + "The other marks were put back."
                     )
                 }
             }

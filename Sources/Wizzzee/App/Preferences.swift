@@ -64,12 +64,17 @@ enum Preferences {
     static func volumeMoved(from old: String, to new: String) {
         if lastVolume == old { lastVolume = new }
         if let folder = lastFolder {
-            if folder == old {
-                lastFolder = new
-            } else if folder.hasPrefix(old + "/") {
-                lastFolder = new + folder.dropFirst(old.count)
-            }
+            let moved = path(folder, movedFrom: old, to: new)
+            if moved != folder { lastFolder = moved }
         }
+    }
+
+    /// `path` as it is spelled once the volume that was at `old` is at
+    /// `new`: unchanged, when it is not on that volume.
+    static func path(_ path: String, movedFrom old: String, to new: String) -> String {
+        if path == old { return new }
+        if path.hasPrefix(old + "/") { return new + path.dropFirst(old.count) }
+        return path
     }
 
     private static func set(_ value: String?, forKey key: String) {

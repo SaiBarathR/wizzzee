@@ -124,6 +124,8 @@ enum SelfTest {
         testAMoveToTheTrashCanBeUndone()
         testWhatCannotBePutBackStaysInTheTrash()
         testPuttingBackMovesOnlyWhatWasPutThere()
+        testTheTrashLineCountsAFileUnderWhicheverNameIsLeft()
+        testAMoveBeyondUndoIsSaidToBe()
         testUndoingATrashPutsHardLinksRight()
         testChoicesOutlastALaunch()
         testAVolumeScanSaysHowFarItHasGot()
@@ -6296,6 +6298,28 @@ enum SelfTest {
             ) == before.path,
             "an unmount carrying the same paths moved the selection"
         )
+        // The folder this session is set to scan is on that volume too. Left
+        // where it was, the next Scan threw the tree away and then failed.
+        model.customFolder = before.path + "/Projects/old"
+        NSWorkspace.shared.notificationCenter.post(renameNote)
+        pump { model.customFolder == renamed.path + "/Projects/old" }
+        check(
+            "a folder chosen on a renamed volume is followed to where it is now",
+            model.customFolder == renamed.path + "/Projects/old",
+            "at \(model.customFolder ?? "nil")"
+        )
+        model.customFolder = nil
+        check(
+            "one that is not on that volume, or only begins like it, is left alone",
+            Preferences.path("/Users/Shared", movedFrom: before.path, to: renamed.path)
+                == "/Users/Shared"
+                && Preferences.path(before.path + "2/x", movedFrom: before.path, to: renamed.path)
+                    == before.path + "2/x"
+                && Preferences.path(before.path, movedFrom: before.path, to: renamed.path)
+                    == renamed.path,
+            ""
+        )
+
         // Through the model, onto a volume that is really mounted — the last in
         // the list, so that where there is more than one it can't be mistaken
         // for the fallback to the first.
@@ -6876,17 +6900,78 @@ enum SelfTest {
             "marked \(model.marks.count), map at \(model.treemapRoot?.name ?? "nil")"
         )
 
-        // A scan that is stopped has no place to put back, and the next one
-        // has nothing to take a place from.
+        // A scan that is stopped puts nothing back, having no tree to put
+        // it into, and does not throw it away either: ⌘R and then Stop used
+        // to be the end of every mark. The next scan of the same folder is
+        // as good a place for them.
+        let kept = third.root.files[0].name
         model.setMarked([NodeRef(dir: third.root, fileIndex: 0)], true)
         model.startScan()
         model.cancelScan()
         pumpUntilSettled(model)
+        check(
+            "a scan that was stopped leaves nothing marked, and no tree to mark in",
+            model.phase == .cancelled && model.marks.isEmpty && model.result == nil,
+            "phase \(model.phase), marked \(model.marks.count)"
+        )
         _ = loadSynchronously(into: model)
         check(
-            "a scan that was stopped does not hand its place on to the next",
+            "the next scan of the same folder puts back what the stopped one was to",
+            model.marks.map(\.name) == [kept] && model.marksLostToRescan == 0,
+            "marked \(model.marks.map(\.name)), \(model.marksLostToRescan) lost"
+        )
+        // But only of the same folder. Stopped, and then somewhere else is
+        // scanned: nothing is carried there, or back from there.
+        model.startScan()
+        model.cancelScan()
+        pumpUntilSettled(model)
+        model.customFolder = base.path
+        _ = loadSynchronously(into: model)
+        check(
+            "a scan of somewhere else after a stopped one starts afresh",
             model.marks.isEmpty && model.marksLostToRescan == 0,
-            "marked \(model.marks.count), \(model.marksLostToRescan) lost"
+            "marked \(model.marks.map(\.name))"
+        )
+        model.customFolder = base.appendingPathComponent("a").path
+        guard let fourth = loadSynchronously(into: model) else { return }
+        check(
+            "and the place the stopped one held is not waiting on the way back",
+            model.marks.isEmpty && model.marksLostToRescan == 0,
+            "marked \(model.marks.map(\.name))"
+        )
+
+        // A mark is on a file and not on a name. Another file put where a
+        // marked one was is not what was marked, and the list of marks is
+        // moved to the Trash without asking.
+        guard let y4 = fourth.root.files.firstIndex(where: { $0.name == "y.dat" }),
+            let new4 = fourth.root.files.firstIndex(where: { $0.name == "new.dat" })
+        else {
+            check("y.dat and new.dat are still in a", false, "\(fourth.root.files.map(\.name))")
+            return
+        }
+        model.setMarked(
+            [NodeRef(dir: fourth.root, fileIndex: y4), NodeRef(dir: fourth.root, fileIndex: new4)],
+            true
+        )
+        // Made beside it and then moved over it, so that the two are files
+        // at once and can't be given the same number.
+        let stand = base.appendingPathComponent("a/stand-in")
+        do {
+            try write(stand, bytes: 10_000)
+        } catch {
+            check("a stand-in for y.dat can be written", false, "\(error)")
+            return
+        }
+        guard Darwin.rename(stand.path, base.appendingPathComponent("a/y.dat").path) == 0
+        else {
+            check("the stand-in can take y.dat's place", false, String(cString: strerror(errno)))
+            return
+        }
+        _ = loadSynchronously(into: model)
+        check(
+            "a mark is not put back on another file that has taken the name",
+            model.marks.map(\.name) == ["new.dat"] && model.marksLostToRescan == 1,
+            "marked \(model.marks.map(\.name)), \(model.marksLostToRescan) lost"
         )
     }
 
@@ -7120,6 +7205,54 @@ enum SelfTest {
         )
         model.clearMarks()
 
+        // Marks on what is inside a folder leave with it. Only the folder's
+        // own was taken down, and it came back with everything in it
+        // unmarked — nothing on screen to say a list had got shorter.
+        model.setMarked([yRef, NodeRef(b)], true)
+        trash(model, [NodeRef(a)])
+        check(
+            "marks on what is inside a folder go when it goes",
+            model.marks.isEmpty && !onDisk("a"),
+            "marked \(model.marks.map(\.name))"
+        )
+        model.undoTrash()
+        check(
+            "and are back on what they were on when it comes back",
+            model.marks == [yRef, NodeRef(b)] && model.selection == [NodeRef(a)],
+            "marked \(model.marks.map(\.name)), selected \(model.selection.map(\.name))"
+        )
+        model.clearMarks()
+
+        // Edit ▸ Undo is the window's undo stack. A window that is shut and
+        // opened again has a new one, with nothing on it: the button in the
+        // status bar offered the move back, and ⌘Z did not.
+        let stack = UndoManager()
+        model.undoManager = stack
+        trash(model, [yRef])
+        check(
+            "a move to the Trash goes on the window's undo stack, by name",
+            stack.canUndo && stack.undoActionName == "Move to Trash",
+            "can undo \(stack.canUndo), as “\(stack.undoActionName)”"
+        )
+        let reopened = UndoManager()
+        model.undoManager = reopened
+        drainMainQueue()
+        check(
+            "a window opened afterwards has it on its own stack",
+            reopened.canUndo && reopened.undoActionName == "Move to Trash",
+            "can undo \(reopened.canUndo), as “\(reopened.undoActionName)”"
+        )
+        reopened.undo()
+        drainMainQueue()
+        check(
+            "and undoing it there brings the file back, once",
+            onDisk("a/y.dat") && !yRef.isStale && !model.canUndoTrash && !reopened.canUndo
+                && ledger(result.root) == before,
+            "on disk \(onDisk("a/y.dat")), can undo \(model.canUndoTrash), "
+                + "stack \(reopened.canUndo)"
+        )
+        model.undoManager = nil
+
         // Two things from different folders in one move.
         trash(model, [yRef, NodeRef(c)])
         check("a file and a folder go together", !onDisk("a/y.dat") && !onDisk("c"), "")
@@ -7160,6 +7293,22 @@ enum SelfTest {
             "what has been emptied out of the Trash stops being said to be in it",
             model.bytesInTrash == 0 && model.trashedLocations.isEmpty,
             "\(model.bytesInTrash) bytes in the Trash"
+        )
+
+        // Emptied while it could still be undone: there is then nothing for
+        // Undo to bring back, and the button went on offering to.
+        guard let empty = a.subdir(named: "empty") else {
+            check("a/empty is still there to be moved", false, "\(a.subdirs.map(\.name))")
+            return
+        }
+        trash(model, [NodeRef(empty)])
+        let offered = model.canUndoTrash
+        for url in model.trashedLocations { try? FileManager.default.removeItem(at: url) }
+        model.refreshTrashLine()
+        check(
+            "with none of a move left in the Trash there is nothing to undo",
+            offered && !model.canUndoTrash && model.trashedLocations.isEmpty,
+            "offered \(offered), can undo \(model.canUndoTrash)"
         )
 
         trash(model, [NodeRef(b)])
@@ -7255,6 +7404,217 @@ enum SelfTest {
             FileManager.default.fileExists(atPath: base.appendingPathComponent("c/z.dat").path)
                 && !zRef.isStale,
             "c/z.dat is not back"
+        )
+    }
+
+    /// Two names of one file moved to the Trash are each put down for part
+    /// of it. Deleting one of them there took its part off the line, with
+    /// all of the file still on the disk under the other name.
+    @MainActor
+    private static func testTheTrashLineCountsAFileUnderWhicheverNameIsLeft() {
+        let base = scratch("trash-links")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true
+            )
+            try write(base.appendingPathComponent("film.dat"), bytes: 90_000)
+            try FileManager.default.linkItem(
+                at: base.appendingPathComponent("film.dat"),
+                to: base.appendingPathComponent("film.lnk")
+            )
+            try write(base.appendingPathComponent("plain.dat"), bytes: 2_000)
+        } catch {
+            check("the trash-links fixture can be built", false, "\(error)")
+            return
+        }
+        let model = AppModel()
+        model.customFolder = base.path
+
+        /// Both names of the film in a fresh scan, and what it takes up.
+        func names() -> (refs: [NodeRef], onDisk: UInt64)? {
+            guard let result = loadSynchronously(into: model) else { return nil }
+            var refs: [NodeRef] = []
+            for index in result.root.files.indices
+            where result.root.files[index].name.hasPrefix("film") {
+                refs.append(NodeRef(dir: result.root, fileIndex: index))
+            }
+            let onDisk = result.root.files.first { $0.name == "film.dat" }?.alloc ?? 0
+            guard refs.count == 2, onDisk > 0 else {
+                check("both names of the film scanned", false, "\(refs.map(\.name))")
+                return nil
+            }
+            return (refs, onDisk)
+        }
+        /// Deletes one thing from the Trash, as Finder would, and looks again.
+        func empty(_ which: Int) {
+            let places = model.trashedLocations
+            guard which < places.count else { return }
+            try? FileManager.default.removeItem(at: places[which])
+            model.refreshTrashLine()
+        }
+
+        // Both names in one move.
+        guard let (together, film) = names() else { return }
+        trash(model, Set(together))
+        check(
+            "both names of a file in the Trash are said to hold it once",
+            model.bytesInTrash == film && model.trashedLocations.count == 2,
+            "\(model.bytesInTrash) bytes in the Trash, the file takes \(film)"
+        )
+        empty(0)
+        check(
+            "with one of them deleted there, the other is holding all of it",
+            model.bytesInTrash == film && model.trashedLocations.count == 1,
+            "\(model.bytesInTrash) bytes in the Trash, the file takes \(film)"
+        )
+        model.undoTrash()
+        check(
+            "and the one that is left can still be brought back",
+            model.bytesInTrash == 0
+                && (FileManager.default.fileExists(atPath: base.path + "/film.dat")
+                    || FileManager.default.fileExists(atPath: base.path + "/film.lnk")),
+            "\(model.bytesInTrash) bytes in the Trash"
+        )
+
+        // One name and then the other. The first takes nothing off the
+        // totals, since the second still holds the file, and so is put down
+        // for nothing: all of it is against the second.
+        //
+        // The name deleted out of the Trash above is given back first.
+        let (dat, lnk) = (base.appendingPathComponent("film.dat"), base.appendingPathComponent("film.lnk"))
+        let isThere = FileManager.default.fileExists(atPath: dat.path)
+        do {
+            try FileManager.default.linkItem(at: isThere ? dat : lnk, to: isThere ? lnk : dat)
+        } catch {
+            check("the film can be given its second name back", false, "\(error)")
+            return
+        }
+        guard let (apart, again) = names() else { return }
+        trash(model, [apart[0]])
+        trash(model, [apart[1]])
+        check(
+            "moved one after the other they come to the same",
+            model.bytesInTrash == again && model.trashedLocations.count == 2,
+            "\(model.bytesInTrash) bytes in the Trash, the file takes \(again)"
+        )
+        empty(1)
+        check(
+            "and deleting the second leaves the first holding it",
+            model.bytesInTrash == again && model.trashedLocations.count == 1,
+            "\(model.bytesInTrash) bytes in the Trash, the file takes \(again)"
+        )
+        empty(0)
+        check(
+            "until that goes too, and nothing is",
+            model.bytesInTrash == 0 && model.trashedLocations.isEmpty,
+            "\(model.bytesInTrash) bytes in the Trash"
+        )
+    }
+
+    /// ⌘⌫ asks nothing, on the understanding that it can be undone. A move
+    /// that went through and left nothing to undo it by — the Trash did not
+    /// say where the thing went — was taken for any other: gone from the
+    /// tree, no Undo, and not a word.
+    @MainActor
+    private static func testAMoveBeyondUndoIsSaidToBe() {
+        let model = AppModel()
+        guard let (base, result) = loadWalkabout("beyond-undo", into: model) else { return }
+        defer { try? FileManager.default.removeItem(at: base) }
+        guard let a = result.root.subdir(named: "a"),
+            let b = a.subdir(named: "b"),
+            let c = result.root.subdir(named: "c"),
+            let x = b.files.firstIndex(where: { $0.name == "x.dat" }),
+            let y = a.files.firstIndex(where: { $0.name == "y.dat" }),
+            let z = c.files.firstIndex(where: { $0.name == "z.dat" })
+        else {
+            check("the beyond-undo fixture scanned", false, "missing folders")
+            return
+        }
+        let xRef = NodeRef(dir: b, fileIndex: x)
+        let yRef = NodeRef(dir: a, fileIndex: y)
+        let zRef = NodeRef(dir: c, fileIndex: z)
+        let zOnDisk = zRef.alloc
+
+        // A Trash that takes the thing and does not say where it has gone.
+        model.trashMover = { path in
+            if path.hasSuffix("/x.dat") {
+                throw FileActions.ActionError.failed(path, "It would not go.")
+            }
+            try FileManager.default.removeItem(atPath: path)
+            return nil
+        }
+        trash(model, [yRef])
+        check(
+            "what has gone leaves the tree, whatever became of it",
+            yRef.isStale && !FileManager.default.fileExists(atPath: base.path + "/a/y.dat"),
+            ""
+        )
+        check(
+            "and is said to be beyond Undo, which is not offered",
+            model.actionError == "Undo can’t bring back “y.dat”"
+                && model.actionErrorDetail?.contains("could not be confirmed") == true
+                && !model.canUndoTrash && model.bytesInTrash == 0,
+            "\(model.actionError ?? "nothing said"); can undo \(model.canUndoTrash)"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+
+        // With one that would not go at all in the same move, both are said.
+        trash(model, [xRef, zRef])
+        check(
+            "said under whatever else the move has to say, not in place of it",
+            model.actionError?.contains("x.dat") == true
+                && model.actionErrorDetail?.contains("Undo can’t bring back “z.dat”") == true
+                && !xRef.isStale && zRef.isStale,
+            "\(model.actionError ?? "nothing said"): \(model.actionErrorDetail ?? "")"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+
+        // A Trash inside the folder being scanned, as a home folder's is.
+        // The next scan reads it: what is in it is back in the totals, and
+        // the line went on counting it as space that had left them.
+        let bin = base.appendingPathComponent("bin")
+        do {
+            try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            try write(base.appendingPathComponent("c/z.dat"), bytes: 5_000)
+        } catch {
+            check("a Trash can be made inside the fixture", false, "\(error)")
+            return
+        }
+        model.trashMover = { path in
+            let name = (path as NSString).lastPathComponent
+            let inTrash = bin.appendingPathComponent(name).path
+            guard let item = FileActions.FileIdentity(atPath: path),
+                let folder = FileActions.FileIdentity(
+                    atPath: (path as NSString).deletingLastPathComponent
+                ),
+                Darwin.rename(path, inTrash) == 0
+            else { throw FileActions.ActionError.failed(path, "It would not go.") }
+            return FileActions.TrashReceipt(inTrash: inTrash, item: item, folder: folder)
+        }
+        guard let second = loadSynchronously(into: model),
+            let c2 = second.root.subdir(named: "c"),
+            let index = c2.files.firstIndex(where: { $0.name == "z.dat" })
+        else {
+            check("z.dat is back in c for the scan to find", false, "")
+            return
+        }
+        trash(model, [NodeRef(dir: c2, fileIndex: index)])
+        check(
+            "what is moved to a Trash is said to be in it",
+            model.bytesInTrash == zOnDisk && zOnDisk > 0 && model.canUndoTrash,
+            "\(model.bytesInTrash) bytes in the Trash, z.dat takes \(zOnDisk)"
+        )
+        guard let third = loadSynchronously(into: model) else { return }
+        let counted = third.root.subdir(named: "bin")?.files.contains { $0.name == "z.dat" }
+        check(
+            "a scan that reads the Trash has counted it, and the line stops counting it",
+            model.bytesInTrash == 0 && counted == true
+                && FileManager.default.fileExists(atPath: bin.path + "/z.dat"),
+            "\(model.bytesInTrash) bytes in the Trash, in the scan \(counted ?? false)"
         )
     }
 
@@ -7863,6 +8223,26 @@ enum SelfTest {
                 && !FileActions.isOnlineOnly(base.path + "/no-such-file"),
             ""
         )
+
+        // A file sent back to the cloud since the scan — Remove Download,
+        // to make room — is still down in the scan as all here. A look that
+        // is asked for by name asks the disk as well.
+        model.previewURL = nil
+        model.preview(yRef)
+        let wasShown = model.previewURL != nil
+        model.previewURL = nil
+        model.isOnlineOnlyNow = { $0.hasSuffix("/y.dat") }
+        model.preview(yRef)
+        check(
+            "a file that has gone online only since the scan is not opened either",
+            wasShown && !yRef.isStale && model.previewURL == nil
+                && model.actionError?.contains("online only") == true,
+            "shown before \(wasShown); showing \(showing()), "
+                + "said \(model.actionError ?? "nothing")"
+        )
+        model.actionError = nil
+        model.actionErrorDetail = nil
+        model.isOnlineOnlyNow = FileActions.isOnlineOnly
 
         _ = loadSynchronously(into: model)
         check("a rescan shuts it", model.previewURL == nil, showing())
@@ -8480,6 +8860,53 @@ enum SelfTest {
         )
         model.fileSort = [KeyPathComparator(\FileRow.alloc, order: .reverse)]
 
+        // The rows on screen stay there while the walk for another search,
+        // or another type, comes back — which on a big scan is long enough
+        // to press a key in. They are not what the bar above them says is
+        // listed, and ⌘⌫ asks nothing.
+        model.selection = [proj2]
+        let before = model.fileRows.map(\.name)
+        check(
+            "a row the search found is something the delete keys act on",
+            model.canUseDeleteKeys && model.selectionOnShow == [proj2],
+            "on show \(model.selectionOnShow.map(\.name))"
+        )
+        model.fileQuery = "kind:file"
+        model.refreshFileRows()
+        check(
+            "but not once something else is asked for, though its row is still listed",
+            !model.canUseDeleteKeys && model.selectionOnShow.isEmpty
+                && !model.canMarkSelection && model.fileRows.map(\.name) == before,
+            "on show \(model.selectionOnShow.map(\.name)), rows \(model.fileRows.map(\.name))"
+        )
+        model.trashSelection()
+        check(
+            "and ⌘⌫ then does nothing",
+            !model.isDeleting && !proj2.isStale
+                && FileManager.default.fileExists(atPath: base.path + "/proj2"),
+            "deleting \(model.isDeleting)"
+        )
+        model.fileQuery = "kind:folder"
+        model.refreshFileRows(immediately: true)
+        pumpUntilFileRowsSettle(model, expecting: 2)
+        check(
+            "asked for again, it is on show again",
+            model.canUseDeleteKeys && model.selectionOnShow == [proj2],
+            "on show \(model.selectionOnShow.map(\.name))"
+        )
+        // The same for a type picked out in the legend, which the File View
+        // lists and nothing else: the chip said ".js only" over a folder.
+        model.focusType("js")
+        check(
+            "nor once a type is put in focus, until its files are listed",
+            model.focusedType == "js" && !model.canUseDeleteKeys
+                && model.selectionOnShow.isEmpty,
+            "focus \(model.focusedType ?? "none"), on show "
+                + "\(model.selectionOnShow.map(\.name))"
+        )
+        model.focusType(nil)
+        pumpUntilFileRowsSettle(model, expecting: 2)
+
         model.fileQuery = "js >zz"
         model.refreshFileRows(immediately: true)
         pumpUntilFileRowsSettle(model, expecting: 0)
@@ -8628,6 +9055,33 @@ enum SelfTest {
             "row \(row); showing \(visible.location)–"
                 + "\(visible.location + visible.length - 1)"
         )
+
+        // Asked for with the tree out of sight, and something else selected
+        // before it is looked at again: the tree used to come back scrolled
+        // to the row that had been asked for, away from what was selected.
+        model.show(.files)
+        model.revealInTree(target)
+        model.selection = [NodeRef(result.root)]
+        check(
+            "a row asked for and then left for another is not handed to the tree",
+            model.takeRevealTarget() == nil,
+            ""
+        )
+        model.revealInTree(target)
+        check(
+            "one that is still selected is, once",
+            model.takeRevealTarget() == target && model.takeRevealTarget() == nil,
+            ""
+        )
+        // Several put back at once are all selected, and one is scrolled to.
+        model.revealInTree(target)
+        model.selection = [target, NodeRef(result.root)]
+        check(
+            "one of several selected is still one to scroll to",
+            model.isStillRevealing(target) && model.takeRevealTarget() == target,
+            ""
+        )
+        model.show(.tree)
 
         deletePermanently(model, [target])
         check(
