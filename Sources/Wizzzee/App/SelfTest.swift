@@ -135,6 +135,7 @@ enum SelfTest {
         testASearchFindsFoldersAndCountsWhatItFinds()
         testTheFileViewSearches()
         testARevealedRowIsScrolledIntoView()
+        testARevealLeavesANarrowTableWhereItWasAcross()
         testTheMarksBarIsThereFromTheFirstMark()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
@@ -9235,6 +9236,88 @@ enum SelfTest {
                 && model.fileRows.count == 4
                 && model.fileRows.allSatisfy { !$0.ref.isDirectory },
             "\(model.fileRows.count) rows, tally \(String(describing: model.fileTally))"
+        )
+    }
+
+    /// A window opened at its narrowest gives the tree's table less room
+    /// than its columns take, so the table scrolls sideways as well as down.
+    /// A row brought to the middle of it both ways took the marks' column,
+    /// and the start of every name, off the left-hand edge.
+    @MainActor
+    private static func testARevealLeavesANarrowTableWhereItWasAcross() {
+        let base = scratch("reveal-narrow")
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(
+                at: base.appendingPathComponent("many"),
+                withIntermediateDirectories: true
+            )
+            for i in 0..<80 {
+                try write(base.appendingPathComponent("many/f\(i).dat"), bytes: 10)
+            }
+        } catch {
+            check("the narrow reveal fixture can be built", false, "\(error)")
+            return
+        }
+
+        let model = AppModel()
+        model.customFolder = base.path
+        model.dismissedAccessPrompt = true
+        let hosting = NSHostingView(rootView: ContentView(model: model))
+        // The narrowest the window goes, from the start: columns that have
+        // once had room are squeezed to fit when it is taken away, and ones
+        // that never had it are not.
+        let frame = NSRect(x: 0, y: 0, width: 1160, height: 660)
+        hosting.frame = frame
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+        window.orderFront(nil)
+        defer { window.close() }
+
+        guard let result = loadSynchronously(into: model),
+            let many = result.root.subdir(named: "many")
+        else { return }
+        model.treeSort = [TreeSort(.name, order: .forward)]
+        model.setExpanded(many, true)
+        pumpUntil {
+            tables(under: hosting).contains { $0.numberOfRows == model.treeRows.count }
+        }
+        guard let last = many.files.firstIndex(where: { $0.name == "f79.dat" }),
+            let table = tables(under: hosting).first(where: {
+                $0.numberOfRows == model.treeRows.count
+            })
+        else {
+            check("the narrow tree's table can be found", false, "")
+            return
+        }
+        let target = NodeRef(dir: many, fileIndex: last)
+        guard let row = model.treeRows.firstIndex(where: { $0.ref == target }) else {
+            check("the narrow reveal fixture scanned", false, "no f79.dat")
+            return
+        }
+        pump(0.3)
+        // Not a check: how wide a table's columns come out is the system's
+        // business, and where they fit there is nothing here to hold.
+        let scrollsAcross = table.rect(ofRow: 0).width > table.visibleRect.width
+        model.revealInTree(target)
+        pumpUntil { table.rows(in: table.visibleRect).contains(row) }
+        pump(0.2)
+        check(
+            "a row revealed in a table too narrow for its columns is brought "
+                + "into view without the table moving sideways",
+            table.rows(in: table.visibleRect).contains(row)
+                && table.visibleRect.minX == 0,
+            "rows \(table.rect(ofRow: 0).width) wide in "
+                + "\(table.visibleRect.width), which "
+                + (scrollsAcross ? "scrolls" : "does not scroll")
+                + " sideways; showing from \(table.visibleRect.minX) across"
         )
     }
 
