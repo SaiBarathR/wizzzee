@@ -11,6 +11,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             HeaderBar(model: model)
+                .placed(as: .header)
             Divider()
 
             if !model.hasFullDiskAccess && !model.dismissedAccessPrompt {
@@ -42,12 +43,14 @@ struct ContentView: View {
                                 inWindow: windowHeight
                             )
                         )
+                        .placed(as: .marksList)
                 }
                 MarksBar(model: model)
             }
 
             Divider()
             StatusBar(model: model)
+                .placed(as: .statusBar)
         }
         // Eight tree columns need ~830pt and the legend's four need ~240pt.
         // Anything narrower and SwiftUI's Table silently clips its rightmost

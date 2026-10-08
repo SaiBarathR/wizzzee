@@ -5588,18 +5588,30 @@ enum SelfTest {
         return found
     }
 
-    /// The push buttons under `view`, as AppKit has them: the ones SwiftUI
-    /// draws with a border, and not the plain ones in a table's rows.
-    private static func pushButtons(under view: NSView) -> [NSButton] {
-        var found: [NSButton] = []
-        var pending: [NSView] = [view]
-        while let next = pending.popLast() {
-            if let button = next as? NSButton, !(next is NSPopUpButton) {
-                found.append(button)
-            }
-            pending.append(contentsOf: next.subviews)
+    /// Where the parts of a window say they are.
+    private final class Layout: @unchecked Sendable {
+        var parts: [WindowPart: CGRect] = [:]
+
+        /// The bar's four buttons, of the ones on screen.
+        var marksBarButtons: [CGRect] {
+            [WindowPart.showMarksList, .clearMarks, .trashMarked, .deleteMarked]
+                .compactMap { parts[$0] }
         }
-        return found
+    }
+
+    /// The real window's contents for `model`, telling `layout` where its
+    /// parts are put.
+    ///
+    /// Not by looking for AppKit's buttons under it. Built against the SDK
+    /// the release is built against, SwiftUI draws a button without one, and
+    /// a check that counted them passed here and failed in the build that
+    /// ships.
+    @MainActor
+    private static func host(_ model: AppModel, tellingLayoutTo layout: Layout) -> NSView {
+        NSHostingView(
+            rootView: ContentView(model: model)
+                .onPreferenceChange(WindowPartFrames.self) { layout.parts = $0 }
+        )
     }
 
     /// What `measure` comes to once it has stopped changing: the same for
@@ -9669,7 +9681,8 @@ enum SelfTest {
         model.customFolder = base.path
         model.dismissedAccessPrompt = true
         model.tab = .files
-        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let layout = Layout()
+        let hosting = host(model, tellingLayoutTo: layout)
         let frame = NSRect(x: 0, y: 0, width: 1300, height: 760)
         hosting.frame = frame
         let window = NSWindow(
@@ -9702,7 +9715,7 @@ enum SelfTest {
             return
         }
         let bare = settled(tableHeight)
-        let bareButtons = pushButtons(under: hosting)
+        let buttonsBefore = layout.marksBarButtons.count
 
         let first = NodeRef(dir: result.root, fileIndex: 0)
         let second = NodeRef(dir: result.root, fileIndex: 1)
@@ -9716,23 +9729,21 @@ enum SelfTest {
             "table \(bare) high before, \(underBar) with one mark"
         )
         // What the strip is for: Show List, Clear Marks, Move to Trash and
-        // Delete…, on screen without anything having been opened. A button
-        // SwiftUI draws does not give its title up to be read, so they are
-        // told by where they are.
+        // Delete…, on screen without anything having been opened.
         let tableFoot = tableScroll().map { $0.convert($0.bounds, to: hosting).maxY } ?? -1
-        let added = pushButtons(under: hosting).filter { button in
-            !bareButtons.contains { $0 === button }
-        }
-        let frames = added.map { $0.convert($0.bounds, to: hosting) }
+        pumpUntil { layout.marksBarButtons.count == 4 }
+        let frames = layout.marksBarButtons
         check(
             "and in it are the four buttons that act on the marks",
-            added.count == 4
+            buttonsBefore == 0 && frames.count == 4
                 && frames.allSatisfy {
-                    $0.minY >= tableFoot - 1 && hosting.bounds.contains($0)
+                    $0.width > 0 && $0.minY >= tableFoot - 1
+                        && hosting.bounds.contains($0)
                         && abs($0.midY - (frames.first?.midY ?? 0)) < 1
                 },
-            "\(added.count) new buttons at \(frames.map { Int($0.midY) }), "
-                + "under a table ending at \(Int(tableFoot))"
+            "\(buttonsBefore) before the mark and \(frames.count) after, at "
+                + "\(frames.map { Int($0.midY) }), under a table ending at "
+                + "\(Int(tableFoot))"
         )
         check(
             "it says how many, in the singular for one",
@@ -9762,20 +9773,18 @@ enum SelfTest {
         check(
             "and shuts again under a bar that has not gone",
             settled(tableHeight) == underBar && model.marks.count == 2
-                && pushButtons(under: hosting).count == bareButtons.count + 4,
+                && layout.marksBarButtons.count == 4,
             "table \(tableHeight()) high, \(model.marks.count) marked, "
-                + "\(pushButtons(under: hosting).count) buttons"
+                + "\(layout.marksBarButtons.count) of the bar's buttons"
         )
 
         model.clearMarks()
-        pumpUntil { tableHeight() == bare }
+        pumpUntil { tableHeight() == bare && layout.marksBarButtons.isEmpty }
         check(
             "the bar goes with the last mark, and its buttons with it",
-            settled(tableHeight) == bare
-                && pushButtons(under: hosting).count == bareButtons.count,
+            settled(tableHeight) == bare && layout.marksBarButtons.isEmpty,
             "table \(tableHeight()) high, \(bare) to begin with; "
-                + "\(pushButtons(under: hosting).count) buttons, "
-                + "\(bareButtons.count) to begin with"
+                + "\(layout.marksBarButtons.count) of the bar's buttons left"
         )
     }
 
@@ -9807,7 +9816,8 @@ enum SelfTest {
         model.hasFullDiskAccess = false
         model.dismissedAccessPrompt = false
         model.showsTreemap = true
-        let hosting = NSHostingView(rootView: ContentView(model: model))
+        let layout = Layout()
+        let hosting = host(model, tellingLayoutTo: layout)
         // The shortest the window goes.
         let frame = NSRect(x: 0, y: 0, width: 1160, height: 660)
         hosting.frame = frame
@@ -9828,22 +9838,14 @@ enum SelfTest {
         defer { window.close() }
 
         guard let result = loadSynchronously(into: model) else { return }
-        /// The list of marks: the one scroll view that is not a table's.
-        func list() -> NSScrollView? {
-            var pending: [NSView] = [hosting]
-            while let view = pending.popLast() {
-                if let scroll = view as? NSScrollView {
-                    if !(scroll.documentView is NSTableView) { return scroll }
-                    continue
-                }
-                pending.append(contentsOf: view.subviews)
-            }
-            return nil
-        }
-        func listHeight() -> CGFloat { list()?.frame.height ?? -1 }
-        func strays() -> [NSRect] {
-            pushButtons(under: hosting).map { $0.convert($0.bounds, to: hosting) }
-                .filter { !hosting.bounds.contains($0) }
+        func listHeight() -> CGFloat { layout.parts[.marksList]?.height ?? -1 }
+        /// The parts that are not wholly inside the window. Half a point is
+        /// let go: a frame that ends on the window's edge can end a hair
+        /// past it.
+        func strays() -> [String] {
+            let inside = hosting.bounds.insetBy(dx: -0.5, dy: -0.5)
+            return layout.parts.filter { !inside.contains($0.value) }
+                .map { "\($0.key) at \($0.value)" }.sorted()
         }
 
         let twelve = Set((0..<12).map { NodeRef(dir: result.root, fileIndex: $0) })
@@ -9863,11 +9865,15 @@ enum SelfTest {
                 && short >= MarksList.height(for: 2, inWindow: frame.height),
             "the list is \(short) high; its rows ask for \(asked)"
         )
+        // The header at the top and the status bar at the foot, where a
+        // delete's Stop is, and the bar's buttons between: all of them, and
+        // all of each.
         check(
             "and nothing is pushed out of the window to make room for it",
-            strays().isEmpty && !pushButtons(under: hosting).isEmpty,
-            "\(pushButtons(under: hosting).count) buttons, out of the window at "
-                + "\(strays())"
+            strays().isEmpty && layout.parts[.header] != nil
+                && layout.parts[.statusBar] != nil
+                && layout.marksBarButtons.count == 4,
+            "\(layout.parts.count) parts placed; out of the window: \(strays())"
         )
 
         window.setContentSize(NSSize(width: 1160, height: 940))
