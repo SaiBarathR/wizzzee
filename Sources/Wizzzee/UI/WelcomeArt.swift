@@ -665,26 +665,49 @@ private struct LookArt: View {
     }
 }
 
-/// Rows with their boxes ticked, over the bar that counts them.
+/// Rows with their boxes ticked, under the bar that counts them.
 private struct RemoveArt: View {
     var body: some View {
         VStack(spacing: 5) {
+            tabsRow
+            Divider()
             // The folder the scan started from. It can't go, so it has no
             // box: the dash says something inside it is marked.
             row(.holds, "/Users/you", "232 GB")
                 .guideBadge(6, at: .leading, outset: 20)
-            row(.partly, "Projects", "38.2 GB", depth: 1)
-            row(.on, "node_modules", "1.9 GB", depth: 2)
+            row(.on, "node_modules", "1.9 GB", depth: 1)
                 .guideBadge(1, at: .leading, outset: 20)
             // Selected and not marked, which is what the Finder keys act on.
             row(.off, "Documents", "21.7 GB", depth: 1, isSelected: true)
                 .guideBadge(5, at: .trailing, outset: 20)
             Spacer(minLength: 0)
-            bar.guideBadge(2, at: .topLeading)
             status
         }
         // Room at the sides for the dots that sit beside a row.
         .padding(.horizontal, 12)
+    }
+
+    /// The tabs, and the bar that fills the rest of their row.
+    private var tabsRow: some View {
+        HStack(spacing: 4) {
+            tab("Tree View", isCurrent: true)
+            tab("File View")
+            bar.guideBadge(2, at: .topLeading)
+                .padding(.leading, 6)
+        }
+    }
+
+    private func tab(_ title: String, isCurrent: Bool = false) -> some View {
+        Text(title)
+            .font(.system(size: 10, weight: isCurrent ? .semibold : .regular))
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isCurrent ? Color.accentColor.opacity(0.22) : Color.clear)
+            )
     }
 
     private func row(
@@ -713,18 +736,19 @@ private struct RemoveArt: View {
             Text("1 item marked for removal")
                 .font(.system(size: 10, weight: .semibold))
                 .lineLimit(1)
-            artText("1.9 GB on disk", .secondary)
+                .fixedSize()
+            artText("1.9 GB", .secondary).fixedSize()
             ArtButton(title: "Show List")
-            Spacer(minLength: 4)
+            Spacer(minLength: 2)
             ArtButton(title: "Move to Trash", isProminent: true).guideBadge(3)
             ArtButton(title: "Delete…")
         }
         .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.16)))
-        .overlay(alignment: .top) {
-            Rectangle().fill(Color.accentColor.opacity(0.5)).frame(height: 1)
-        }
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.16)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor.opacity(0.45))
+        )
     }
 
     private var status: some View {

@@ -137,7 +137,7 @@ enum SelfTest {
         testARevealedRowIsScrolledIntoView()
         testARevealLeavesANarrowTableWhereItWasAcross()
         testAClickInATableGivesItTheKeyboard()
-        testTheMarksBarIsThereFromTheFirstMark()
+        testTheMarksBarIsBesideTheTabsFromTheFirstMark()
         testALongListOfMarksLeavesTheFootOfTheWindowInSight()
         testTheGuideOpensAtLaunchUntilAskedNotTo()
         testTheKeysWaitUnderTheGuide()
@@ -9768,12 +9768,17 @@ enum SelfTest {
         pumpUntil(10, { window.attachedSheet == nil })
     }
 
-    /// What is marked, and the buttons that act on it, are across the foot
-    /// of the window from the first mark. They were in a list that a chip in
-    /// the status bar had to be clicked to open, and someone who had ticked
-    /// three boxes had nothing on screen to do with them.
+    /// What is marked, and the buttons that act on it, are in the row the
+    /// tabs are in from the first mark. They were in a list that a chip in
+    /// the status bar had to be clicked to open, and then in a bar across
+    /// the foot of the window: someone who had ticked three boxes did not
+    /// look in either place.
+    ///
+    /// The row is there with the bar in it or not, so the first mark moves
+    /// nothing. A bar that pushed the table down by its own height would
+    /// take the box that was just ticked out from under the pointer.
     @MainActor
-    private static func testTheMarksBarIsThereFromTheFirstMark() {
+    private static func testTheMarksBarIsBesideTheTabsFromTheFirstMark() {
         let base = scratch("marks-bar")
         defer { try? FileManager.default.removeItem(at: base) }
         do {
@@ -9815,51 +9820,52 @@ enum SelfTest {
 
         guard let result = loadSynchronously(into: model) else { return }
         model.refreshFileRows(immediately: true)
-        // The File View's table is everything between the filter and the
-        // foot of the window, so whatever is put at the foot comes out of
-        // its height and nowhere else.
         func tableScroll() -> NSScrollView? {
             tables(under: hosting).first { $0.numberOfRows == 6 }?.enclosingScrollView
+        }
+        /// Where the File View's table is, column headings and all, in the
+        /// window's contents from the top.
+        func tableFrame() -> CGRect {
+            tableScroll().map { $0.convert($0.bounds, to: hosting) } ?? .zero
         }
         func tableHeight() -> CGFloat { tableScroll()?.frame.height ?? -1 }
         guard pumpUntil(10, { tableHeight() > 0 }) else {
             check(
-                "the File View's table can be found to ask how tall it is",
+                "the File View's table can be found to ask where it is",
                 false,
                 "\(tables(under: hosting).map(\.numberOfRows)) rows in the tables found"
             )
             return
         }
         let bare = settled(tableHeight)
+        let bareTop = tableFrame().minY
         let buttonsBefore = layout.marksBarButtons.count
 
         let first = NodeRef(dir: result.root, fileIndex: 0)
         let second = NodeRef(dir: result.root, fileIndex: 1)
         model.setMarked([first], true)
-        pumpUntil { tableHeight() < bare }
-        let underBar = settled(tableHeight)
-        check(
-            "the first mark takes a strip off the foot of the table, without "
-                + "the list being asked for",
-            !model.showsMarks && underBar < bare && bare - underBar < 60,
-            "table \(bare) high before, \(underBar) with one mark"
-        )
-        // What the strip is for: Show List, Clear Marks, Move to Trash and
-        // Delete…, on screen without anything having been opened.
-        let tableFoot = tableScroll().map { $0.convert($0.bounds, to: hosting).maxY } ?? -1
+        // Show List, Clear Marks, Move to Trash and Delete…, on screen
+        // without anything having been opened.
         pumpUntil { layout.marksBarButtons.count == 4 }
         let frames = layout.marksBarButtons
         check(
-            "and in it are the four buttons that act on the marks",
-            buttonsBefore == 0 && frames.count == 4
+            "the first mark puts the four buttons that act on the marks in "
+                + "the row above the table",
+            buttonsBefore == 0 && frames.count == 4 && !model.showsMarks
                 && frames.allSatisfy {
-                    $0.width > 0 && $0.minY >= tableFoot - 1
+                    $0.width > 0 && $0.maxY <= tableFrame().minY + 1
                         && hosting.bounds.contains($0)
                         && abs($0.midY - (frames.first?.midY ?? 0)) < 1
                 },
             "\(buttonsBefore) before the mark and \(frames.count) after, at "
-                + "\(frames.map { Int($0.midY) }), under a table ending at "
-                + "\(Int(tableFoot))"
+                + "\(frames.map { Int($0.midY) }), over a table starting at "
+                + "\(Int(tableFrame().minY))"
+        )
+        check(
+            "and moves nothing to make room for them",
+            settled(tableHeight) == bare && tableFrame().minY == bareTop,
+            "table \(bare) high at \(bareTop) before; \(tableHeight()) high at "
+                + "\(tableFrame().minY) with one mark"
         )
         check(
             "it says how many, in the singular for one",
@@ -9868,39 +9874,48 @@ enum SelfTest {
         )
         model.setMarked([second], true)
         check(
-            "a second mark changes the count and not the height",
-            settled(tableHeight) == underBar
+            "a second mark changes the count and still moves nothing",
+            settled(tableHeight) == bare && tableFrame().minY == bareTop
                 && model.marksHeadline == "2 items marked for removal",
-            "table \(tableHeight()) high; \(model.marksHeadline)"
+            "table \(tableHeight()) high at \(tableFrame().minY); "
+                + model.marksHeadline
         )
 
         model.showsMarks = true
-        pumpUntil { tableHeight() < underBar }
+        pumpUntil { tableHeight() < bare }
         let underList = settled(tableHeight)
         let twoRows = MarksList.height(for: 2, inWindow: frame.height)
+        let list = layout.parts[.marksList] ?? .zero
+        let barFoot = frames.map(\.maxY).max() ?? 0
         check(
-            "the list opens above the bar, a row for each mark",
-            underBar - underList >= twoRows && underBar - underList <= twoRows + 2,
-            "table \(underBar) high with the bar, \(underList) with the list; "
-                + "the list is \(twoRows)"
+            "the list drops down between the bar and the table, a row for each mark",
+            bare - underList >= twoRows && bare - underList <= twoRows + 2
+                && list.height == twoRows && list.minY >= barFoot
+                && list.maxY <= tableFrame().minY + 1,
+            "table \(bare) high without the list and \(underList) with it; the "
+                + "list is \(list.height) of \(twoRows), from \(list.minY) to "
+                + "\(list.maxY), under a bar ending at \(barFoot) and over a "
+                + "table starting at \(tableFrame().minY)"
         )
         model.showsMarks = false
-        pumpUntil { tableHeight() == underBar }
+        pumpUntil { tableHeight() == bare }
         check(
             "and shuts again under a bar that has not gone",
-            settled(tableHeight) == underBar && model.marks.count == 2
+            settled(tableHeight) == bare && model.marks.count == 2
                 && layout.marksBarButtons.count == 4,
             "table \(tableHeight()) high, \(model.marks.count) marked, "
                 + "\(layout.marksBarButtons.count) of the bar's buttons"
         )
 
         model.clearMarks()
-        pumpUntil { tableHeight() == bare && layout.marksBarButtons.isEmpty }
+        pumpUntil { layout.marksBarButtons.isEmpty }
         check(
-            "the bar goes with the last mark, and its buttons with it",
-            settled(tableHeight) == bare && layout.marksBarButtons.isEmpty,
-            "table \(tableHeight()) high, \(bare) to begin with; "
-                + "\(layout.marksBarButtons.count) of the bar's buttons left"
+            "the bar goes with the last mark, and the table has still not moved",
+            layout.marksBarButtons.isEmpty && settled(tableHeight) == bare
+                && tableFrame().minY == bareTop,
+            "\(layout.marksBarButtons.count) of the bar's buttons left; table "
+                + "\(tableHeight()) high at \(tableFrame().minY), \(bare) at "
+                + "\(bareTop) to begin with"
         )
     }
 

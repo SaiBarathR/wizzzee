@@ -69,7 +69,7 @@ last page is every keyboard shortcut. **Don’t show this again** at its foot st
 it opening with the app; it stays under **Help ▸ Welcome to Wizzzee**, in the
 About tab, and on `⌘/`, which opens it at the shortcuts.
 
-![The guide's page on marking and removing: a picture of the foot of the window with six numbered points, and a card for each](docs/images/welcome.png)
+![The guide's page on marking and removing: a picture of the tabs' row, the tree and the status bar with six numbered points, and a card for each](docs/images/welcome.png)
 
 - **Tree View** — folder hierarchy, sorted by size. Click a column to re-sort;
   sorting applies within each parent, so the hierarchy stays intact. `→` opens
@@ -126,11 +126,12 @@ About tab, and on `⌘/`, which opens it at the shortcuts.
   selection: it stays put while you open other folders, sort, filter or switch
   tabs, so you can gather items from anywhere in the scan. Marking a folder
   marks everything in it, and a folder with something marked inside shows a
-  dash. From the first mark a bar runs across the foot of the window, on
-  every tab: how many things are marked, what removing them would free, and
-  **Move to Trash**, **Delete…** and **Clear Marks** for the lot. **Show List**
-  on it opens the list of them, which gives each item's size and lets you
-  take a mark back off. Marked tiles are hatched on the treemap.
+  dash. From the first mark a bar fills the row the tabs are in, at the top
+  of the window and on every tab: how many things are marked, what removing
+  them would free, and **Move to Trash**, **Delete…** and **Clear Marks** for
+  the lot. **Show List** on it drops down the list of them, which gives each
+  item's size and lets you take a mark back off. Marked tiles are hatched on
+  the treemap.
 - **A rescan keeps your place.** `⌘R`, or Scan on the folder already on show,
   brings the figures up to date and leaves the window as it was: the same
   folders open, the map zoomed to the same folder, the same selection and the
@@ -179,7 +180,7 @@ About tab, and on `⌘/`, which opens it at the shortcuts.
 
 ![A search for folders by name and size, with the count of what it found](docs/images/search.png)
 
-![Two folders marked for removal: ticked in the table, hatched on the treemap, and listed with their sizes above the bar that counts them and removes them](docs/images/marks.png)
+![Two folders marked for removal: ticked in the table, hatched on the treemap, and listed with their sizes under the bar beside the tabs that counts them and removes them](docs/images/marks.png)
 
 ## Reading the numbers
 
