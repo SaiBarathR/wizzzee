@@ -23,12 +23,14 @@ struct ContentView: View {
             Divider()
 
             // The list of what is marked drops down from the bar that counts
-            // it, which is in the row above with the tabs.
+            // it, which is in the row above with the tabs. It is as tall as
+            // the rows it opened with, and not as the rows it has now:
+            // everything under it would move with every mark.
             if model.showsMarks && !model.marks.isEmpty {
                 MarksList(model: model)
                     .frame(
                         height: MarksList.height(
-                            for: model.marks.count,
+                            for: model.marksListRows,
                             inWindow: windowHeight
                         )
                     )
@@ -145,28 +147,36 @@ struct ContentView: View {
 
     private var tabBar: some View {
         HStack(spacing: 2) {
-            ForEach(MainTab.allCases, id: \.self) { tab in
-                Button {
-                    model.show(tab)
-                } label: {
-                    Text(tab.rawValue)
-                        .font(.system(size: 12, weight: model.tab == tab ? .semibold : .regular))
-                        .lineLimit(1)
-                        .fixedSize()
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(
-                                    model.tab == tab
-                                        ? Color.accentColor.opacity(0.18)
-                                        : Color.clear
+            HStack(spacing: 2) {
+                ForEach(MainTab.allCases, id: \.self) { tab in
+                    Button {
+                        model.show(tab)
+                    } label: {
+                        Text(tab.rawValue)
+                            .font(
+                                .system(
+                                    size: 12,
+                                    weight: model.tab == tab ? .semibold : .regular
                                 )
-                        )
+                            )
+                            .lineLimit(1)
+                            .fixedSize()
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(
+                                        model.tab == tab
+                                            ? Color.accentColor.opacity(0.18)
+                                            : Color.clear
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(tab.rawValue) (⌘\(tab.key))")
                 }
-                .buttonStyle(.plain)
-                .help("\(tab.rawValue) (⌘\(tab.key))")
             }
+            .placed(as: .tabs)
             // What is marked, and what to do with it, beside the tabs: at
             // the top of the window, where a selection's own buttons are,
             // and in a row that is there already. It was across the foot of
