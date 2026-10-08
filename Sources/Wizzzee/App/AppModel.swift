@@ -504,6 +504,14 @@ final class AppModel: ObservableObject {
     /// in front, and the line then went on quoting what was no longer there.
     private var trashWatch: AnyCancellable?
 
+    /// How many looks in a row found some part of the Trash that could not
+    /// be looked at. Past a few, the looking every few seconds stops: see
+    /// `refreshTrashLine`.
+    private var looksUnanswered = 0
+
+    /// Whether the Trash is being looked at every few seconds.
+    var isWatchingTrash: Bool { trashWatch != nil }
+
     /// How a batch moves one thing to the Trash. A property so the
     /// self-test can stand in a Trash that does not say where things went,
     /// and one that is inside the folder being scanned.
@@ -1257,7 +1265,10 @@ final class AppModel: ObservableObject {
                     ScanEngine.normalize(inTrash.deletingLastPathComponent),
                     inTrash.lastPathComponent
                 )
-                return scanned.file(at: path) != nil || scanned.directory(at: path) != nil
+                // Counted, and not merely found: a folder the scan could
+                // not read, or read part of, is in the tree with what it
+                // holds still missing from the totals.
+                return scanned.hasCounted(at: path)
             }
             refreshTrashLine()
         }
@@ -2455,16 +2466,22 @@ final class AppModel: ObservableObject {
     func refreshTrashLine() {
         var held: [(receipt: FileActions.TrashReceipt, bytes: UInt64)] = []
         var left: [(item: FileActions.FileIdentity, bytes: UInt64)] = []
+        var unanswered = false
         for entry in sessionTrash {
             // Kept unless it is known to have gone. A disk that does not
             // answer has not said so, and letting go here lets go of the
             // Undo below as well.
-            if !entry.receipt.hasLeftTrash {
+            switch entry.receipt.presence {
+            case .there:
                 held.append(entry)
-            } else if entry.bytes > 0 {
-                left.append((entry.receipt.item, entry.bytes))
+            case .unknown:
+                held.append(entry)
+                unanswered = true
+            case .gone:
+                if entry.bytes > 0 { left.append((entry.receipt.item, entry.bytes)) }
             }
         }
+        looksUnanswered = unanswered ? looksUnanswered + 1 : 0
         // Another name of the same file that is still in the Trash holds
         // all of it. Two names moved together were each put down for half,
         // and deleting one of them there took its half off the line with
@@ -2487,8 +2504,12 @@ final class AppModel: ObservableObject {
             }
         }
 
-        // A look at a handful of paths, and only while there are any.
-        if sessionTrash.isEmpty {
+        // A look at a handful of paths, and only while there are any. Not
+        // while part of the Trash goes on not answering, either: each look
+        // at a share that has dropped can wait out its timeout, on the main
+        // thread, and kept waiting it out every three seconds. After a few
+        // it is left to coming to the front, and to Undo, to look again.
+        if sessionTrash.isEmpty || looksUnanswered >= 3 {
             trashWatch = nil
         } else if trashWatch == nil {
             trashWatch = Timer.publish(every: 3, on: .main, in: .common)
