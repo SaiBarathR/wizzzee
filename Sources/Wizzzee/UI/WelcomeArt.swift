@@ -671,20 +671,25 @@ private struct RemoveArt: View {
         VStack(spacing: 5) {
             tabsRow
             Divider()
-            // The folder the scan started from. It can't go, so it has no
-            // box: the dash says something inside it is marked.
-            row(.holds, "/Users/you", "232 GB")
-                .guideBadge(6, at: .leading, outset: 20)
-            row(.on, "node_modules", "1.9 GB", depth: 1)
-                .guideBadge(1, at: .leading, outset: 20)
-            // Selected and not marked, which is what the Finder keys act on.
-            row(.off, "Documents", "21.7 GB", depth: 1, isSelected: true)
-                .guideBadge(5, at: .trailing, outset: 20)
+            VStack(spacing: 5) {
+                // The folder the scan started from. It can't go, so it has no
+                // box: the dash says something inside it is marked.
+                row(.holds, "/Users/you", "232 GB")
+                    .guideBadge(6, at: .leading, outset: 20)
+                row(.on, "node_modules", "1.9 GB", depth: 1)
+                    .guideBadge(1, at: .leading, outset: 20)
+                // Selected and not marked, which is what the Finder keys act on.
+                row(.off, "Documents", "21.7 GB", depth: 1, isSelected: true)
+                    .guideBadge(5, at: .trailing, outset: 20)
+            }
+            // Room at the sides for the dots that sit beside a row. The rows
+            // only: the tabs' row can't be squeezed, and with the room taken
+            // from it too it was wider than the page and pushed the page out
+            // past the edges of the guide.
+            .padding(.horizontal, 12)
             Spacer(minLength: 0)
             status
         }
-        // Room at the sides for the dots that sit beside a row.
-        .padding(.horizontal, 12)
     }
 
     /// The tabs, and the bar that fills the rest of their row.

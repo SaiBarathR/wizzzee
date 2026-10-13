@@ -420,7 +420,9 @@ struct WelcomeGuide: View {
     /// the tick is drawn from what was just clicked.
     @State private var staysAway = !Preferences.showsWelcome
 
-    static let size = CGSize(width: 900, height: 680)
+    /// Big enough for the fullest page, Mark and Remove with its six cards,
+    /// to be read without scrolling.
+    static let size = CGSize(width: 940, height: 700)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -608,7 +610,9 @@ struct WelcomePageView: View {
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 18)
+            .placed(as: .guidePageContents)
         }
+        .placed(as: .guidePage)
     }
 
     private var heading: some View {

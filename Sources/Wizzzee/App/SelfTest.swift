@@ -143,6 +143,7 @@ enum SelfTest {
         testTheKeysWaitUnderTheGuide()
         testTheGuideSaysWhatTheAppDoes()
         testTheGuideIsPutUpOverTheWindow()
+        testEveryPageOfTheGuideFitsIt()
         testTreemapVisibilityPersists()
         testPreferenceSummary()
 
@@ -9617,6 +9618,71 @@ enum SelfTest {
             KeyCap.spoken(["⌥", "⌘", "⌫"]) == "Option Command Delete"
                 && KeyCap.spoken(["⌘", "R"]) == "Command R",
             KeyCap.spoken(["⌥", "⌘", "⌫"])
+        )
+    }
+
+    /// A page of the guide is all in sight at once. The picture on Mark and
+    /// Remove was wider than its page: the page grew to hold it, the guide
+    /// was cut off at both sides, and its six cards ran off the foot.
+    @MainActor
+    private static func testEveryPageOfTheGuideFitsIt() {
+        let sheet = CGRect(origin: .zero, size: WelcomeGuide.size)
+        var cutOff: [String] = []
+        var scrolling: [String] = []
+        var unseen: [String] = []
+        for page in WelcomePage.allCases {
+            let layout = Layout()
+            let hosting = NSHostingView(
+                rootView: WelcomeGuide(page: .constant(page)) {}
+                    .onPreferenceChange(WindowPartFrames.self) { layout.parts = $0 }
+            )
+            hosting.frame = sheet
+            // Borderless, so that a small screen does not hold it shorter
+            // than the guide is.
+            let window = NSWindow(
+                contentRect: sheet,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentView = hosting
+            window.isReleasedWhenClosed = false
+            window.setFrameOrigin(NSPoint(x: -9000, y: -9000))
+            window.orderFront(nil)
+            defer { window.close() }
+            _ = settled { layout.parts[.guidePageContents]?.height ?? 0 }
+
+            guard let shown = layout.parts[.guidePage],
+                let contents = layout.parts[.guidePageContents]
+            else {
+                unseen.append(page.title)
+                continue
+            }
+            // Half a point for where a length was rounded to a pixel.
+            if !sheet.insetBy(dx: -0.5, dy: -0.5).contains(shown) {
+                cutOff.append("\(page.title) \(Int(shown.minX))…\(Int(shown.maxX))")
+            }
+            if !shown.insetBy(dx: -0.5, dy: -0.5).contains(contents) {
+                scrolling.append(
+                    "\(page.title) \(Int(contents.width))×\(Int(contents.height)) in "
+                        + "\(Int(shown.width))×\(Int(shown.height))"
+                )
+            }
+        }
+        check(
+            "every page of the guide says where it has been put",
+            unseen.isEmpty,
+            "nothing from: \(unseen)"
+        )
+        check(
+            "no page of the guide is wider than the guide",
+            cutOff.isEmpty,
+            "past the sides of \(Int(sheet.width)): \(cutOff)"
+        )
+        check(
+            "and every page is all in sight, with nothing to scroll to",
+            scrolling.isEmpty,
+            "more than the page holds: \(scrolling)"
         )
     }
 
