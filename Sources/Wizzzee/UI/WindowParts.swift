@@ -5,6 +5,9 @@ enum WindowPart: Hashable {
     case header, tabs, statusBar
     case marksList
     case showMarksList, clearMarks, trashMarked, deleteMarked
+    /// The guide's page, and what is on it: longer or wider than the page,
+    /// some of it is out of sight.
+    case guidePage, guidePageContents
 }
 
 /// Where each of those parts is, of the ones on screen, in the window's own
