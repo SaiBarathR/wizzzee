@@ -7,6 +7,11 @@ files, caches, other users' folders — and can trash or delete what you pick.
 
 Scans the whole startup disk (about 3.9M files) in roughly 15 seconds.
 
+https://github.com/user-attachments/assets/14e254f9-c855-4b6c-b218-a9e72c59ca07
+
+<sub>Music: "Rocket Power" by Kevin MacLeod (incompetech.com), licensed under
+[Creative Commons: By Attribution 4.0](http://creativecommons.org/licenses/by/4.0/).</sub>
+
 ![Tree View, with the treemap below it](docs/images/tree-view.png)
 
 ## Install a release
