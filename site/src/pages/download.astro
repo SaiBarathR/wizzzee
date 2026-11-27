@@ -1,0 +1,197 @@
+---
+import { Code } from 'astro:components';
+import Base from '../layouts/Base.astro';
+import { codeThemes } from '../lib/code-themes.mjs';
+import Steps from '../components/Steps.astro';
+import { icon } from '../lib/icons';
+import { APP_VERSION, SITE, url } from '../lib/site';
+
+const themes = codeThemes;
+const verify = `cd ~/Downloads
+shasum -a 256 -c SHA256SUMS.txt`;
+const verifyOut = `Wizzzee-${APP_VERSION}-macos-universal.zip: OK`;
+const build = `git clone https://github.com/SaiBarathR/wizzzee.git
+cd wizzzee
+./scripts/build-app.sh --install    # universal, ad-hoc signed, copied to /Applications`;
+const buildOpts = `./scripts/build-app.sh             # just build dist/Wizzzee.app
+./scripts/build-app.sh --native    # only this Mac's architecture, faster while iterating
+open dist/Wizzzee.app`;
+const selftest = `dist/Wizzzee.app/Contents/MacOS/Wizzzee --selftest`;
+const uninstall = `defaults delete com.wizzzee.diskanalyzer     # settings`;
+---
+<Base title="Download and install" path="download/" description="Download Wizzzee for macOS, check the archive, approve the first launch and grant Full Disk Access. Or build it from source.">
+  <section class="page-hero">
+    <div class="container">
+      <h1>Download Wizzzee</h1>
+      <p>One universal app for Apple silicon and Intel Macs running macOS 14 Sonoma or later. Free and open source under the MIT license.</p>
+    </div>
+  </section>
+
+  <div class="container">
+    <div class="dl-card card">
+      <div class="dl-main">
+        <a class="btn btn-primary btn-lg" href={SITE.latestRelease} data-download>
+          <span set:html={icon('download', 18)} /> Download for Mac
+        </a>
+        <div class="dl-info">
+          <p class="dl-file" data-download-name>Wizzzee-&lt;version&gt;-macos-universal.zip</p>
+          <p class="dl-version" data-download-version>Latest release on GitHub</p>
+        </div>
+      </div>
+      <div class="dl-links">
+        <a href={SITE.latestRelease} data-download-sums>SHA256SUMS.txt</a>
+        <a href={SITE.latestRelease} data-release-notes>Release notes</a>
+        <a href={SITE.releases}>All releases</a>
+      </div>
+    </div>
+
+    <div class="dl-layout">
+      <div class="dl-content">
+        <section aria-labelledby="install">
+          <h2 id="install">Install</h2>
+          <Steps>
+            <li>
+              <h3>Check the download (optional)</h3>
+              <p>Download <code>SHA256SUMS.txt</code> from the same release, put it next to the zip, and run:</p>
+              <Code code={verify} lang="sh" themes={themes} defaultColor={false} data-copy />
+              <p>It should print the archive’s name followed by <code>OK</code>:</p>
+              <Code code={verifyOut} lang="text" themes={themes} defaultColor={false} />
+            </li>
+            <li>
+              <h3>Unzip and move Wizzzee to Applications</h3>
+              <p>Double-click the zip, then drag <strong>Wizzzee.app</strong> into your <strong>Applications</strong> folder.</p>
+            </li>
+            <li>
+              <h3>Approve the first launch</h3>
+              <p>
+                Wizzzee is ad-hoc signed rather than notarized by Apple, so Gatekeeper blocks it the first time. Open it once and
+                dismiss the warning, then open <strong>System Settings → Privacy &amp; Security</strong> and click
+                <strong>Open Anyway</strong> next to the message about Wizzzee. macOS asks only once.
+              </p>
+              <div class="note">
+                <span set:html={icon('info', 20)} />
+                <p>On <strong>macOS 14 Sonoma</strong> you can instead Control-click Wizzzee in Applications and choose <strong>Open</strong>. macOS 15 removed that shortcut for apps that aren’t notarized.</p>
+              </div>
+            </li>
+            <li id="full-disk-access">
+              <h3>Grant Full Disk Access</h3>
+              <p>
+                Wizzzee works without it, but macOS then hides Mail, Messages, Safari, Time Machine and other users’ home folders,
+                and the totals read low. The header says so when it detects this. To grant it, open
+                <strong>System Settings → Privacy &amp; Security → Full Disk Access</strong>, click <strong>+</strong> and add
+                <strong>Wizzzee.app</strong>.
+              </p>
+            </li>
+            <li>
+              <h3>Scan</h3>
+              <p>
+                Pick a volume or a folder at the top of the window and press <kbd>Return</kbd>. The first time it opens, Wizzzee
+                shows a short guide to each part of the window; it stays under <strong>Help ▸ Welcome to Wizzzee</strong>, and
+                <kbd>⌘/</kbd> opens it at the keyboard shortcuts.
+              </p>
+              <figure class="shot">
+                <img class="screenshot" src={url('images/welcome.webp')} width="1400" height="1043" alt="Wizzzee's guide, on its page about marking and removing: a picture of that part of the window with numbered points, and a card for each" loading="lazy" decoding="async" />
+              </figure>
+            </li>
+          </Steps>
+        </section>
+
+        <section aria-labelledby="updating">
+          <h2 id="updating">After updating</h2>
+          <p>
+            Wizzzee doesn’t check for updates, because it makes no network requests at all. New versions are on the
+            <a href={SITE.releases}>releases page</a> and in the <a href={url('changelog/')}>changelog</a>. Download the new one and
+            replace the app in Applications.
+          </p>
+          <div class="note warn">
+            <span set:html={icon('triangle-alert', 20)} />
+            <p>
+              <strong>Grant Full Disk Access again after every update.</strong> macOS ties the permission to the exact build,
+              and an ad-hoc signature changes with every one. In System Settings → Privacy &amp; Security → Full Disk Access,
+              remove the old Wizzzee entry with <strong>−</strong> and add the new app with <strong>+</strong>.
+            </p>
+          </div>
+        </section>
+
+        <section aria-labelledby="source">
+          <h2 id="source">Build from source</h2>
+          <p>You need the Xcode command line tools, and nothing else: there is no Xcode project and there are no dependencies.</p>
+          <Code code={build} lang="sh" themes={themes} defaultColor={false} data-copy />
+          <p><code>scripts/build-app.sh</code> without <code>--install</code> only builds:</p>
+          <Code code={buildOpts} lang="sh" themes={themes} defaultColor={false} data-copy />
+          <p>
+            Each rebuild has a new ad-hoc signature, so it drops the Full Disk Access grant. Check a build with the self-test,
+            which builds a throwaway tree of known contents and checks the scanner and both delete paths against it, with no
+            permissions needed:
+          </p>
+          <Code code={selftest} lang="sh" themes={themes} defaultColor={false} data-copy />
+          <p>The same binary runs from the command line too. <a href={url('docs/command-line/')}>Everything it can do</a></p>
+        </section>
+
+        <section aria-labelledby="uninstall">
+          <h2 id="uninstall">Uninstall</h2>
+          <ol class="plain-list">
+            <li>Quit Wizzzee.</li>
+            <li>Move <strong>Wizzzee.app</strong> from Applications to the Trash.</li>
+            <li>Optionally remove its settings: the folder or volume last scanned, Size or On Disk, and whether the treemap and the guide show.</li>
+          </ol>
+          <Code code={uninstall} lang="sh" themes={themes} defaultColor={false} data-copy />
+          <p>Remove Wizzzee from the Full Disk Access list in System Settings too, if you added it.</p>
+        </section>
+      </div>
+
+      <aside class="dl-aside" aria-label="Requirements">
+        <div class="card req-card">
+          <h2>Requirements</h2>
+          <ul role="list">
+            <li><span set:html={icon('apple', 18)} /><div><strong>macOS 14 Sonoma</strong> or later</div></li>
+            <li><span set:html={icon('cpu', 18)} /><div><strong>Apple silicon or Intel</strong>, one universal app</div></li>
+            <li><span set:html={icon('hard-drive', 18)} /><div><strong>Full Disk Access</strong> for complete totals</div></li>
+            <li><span set:html={icon('package', 18)} /><div>Ad-hoc signed, <strong>not notarized</strong></div></li>
+          </ul>
+        </div>
+        <div class="card req-card">
+          <h2>Next</h2>
+          <ul role="list" class="next-links">
+            <li><a href={url('docs/')}>Getting started</a></li>
+            <li><a href={url('docs/using-wizzzee/')}>Using Wizzzee</a></li>
+            <li><a href={url('docs/search/')}>Search and filters</a></li>
+          </ul>
+        </div>
+      </aside>
+    </div>
+  </div>
+</Base>
+<style>
+  .dl-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 20px 32px; padding: 24px 28px; }
+  .dl-main { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 22px; min-width: 0; }
+  .dl-info { min-width: 0; }
+  .dl-file { font: 600 15px/1.4 var(--mono); color: var(--text); overflow-wrap: anywhere; }
+  .dl-version { margin-top: 2px; font-size: 14px; color: var(--text-3); }
+  .dl-links { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 15px; }
+  @media (max-width: 560px) { .dl-card { padding: 20px; } .dl-main .btn { width: 100%; } }
+
+  .dl-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 56px; margin: 56px 0 24px; align-items: start; }
+  @media (max-width: 960px) { .dl-layout { grid-template-columns: minmax(0, 1fr); gap: 40px; } .dl-aside { order: -1; } }
+  .dl-content section + section { margin-top: 64px; }
+  .dl-content h2 { font-size: 28px; font-weight: 750; letter-spacing: -0.02em; margin-bottom: 24px; }
+  .dl-content > section > p { color: var(--text-2); }
+  .dl-content > section > p + p, .dl-content > section > * + .note, .dl-content > section > .note + p { margin-top: 16px; }
+  .dl-content > section > p + :global(pre), .dl-content > section > :global(pre) + p, .dl-content > section > :global(.code-block) + p,
+  .dl-content > section > p + :global(.code-block), .dl-content > section > ol + :global(.code-block), .dl-content > section > ol + :global(pre) { margin-top: 14px; }
+  .dl-content :global(:not(pre) > code) { font-size: 0.88em; padding: 0.1em 0.36em; border-radius: 6px; background: var(--code-bg); border: 1px solid var(--border); overflow-wrap: anywhere; }
+  .shot { margin: 16px 0 0; max-width: 640px; }
+  .plain-list { margin: 0; padding-left: 1.3em; color: var(--text-2); }
+  .plain-list li + li { margin-top: 6px; }
+
+  .dl-aside { position: sticky; top: calc(var(--header-h) + 24px); display: grid; gap: 18px; }
+  @media (max-width: 960px) { .dl-aside { position: static; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); } }
+  .req-card { padding: 20px 22px; }
+  .req-card h2 { font-size: 16px; font-weight: 680; }
+  .req-card ul { list-style: none; padding: 0; margin: 14px 0 0; display: grid; gap: 12px; }
+  .req-card li { display: flex; gap: 12px; align-items: flex-start; font-size: 14.5px; color: var(--text-2); line-height: 1.5; }
+  .req-card li > span { flex-shrink: 0; color: var(--accent-text); margin-top: 1px; }
+  .req-card li > span :global(svg) { display: block; }
+  .req-card strong { color: var(--text); font-weight: 620; }
+  .next-links li { font-size: 15px; }
+</style>

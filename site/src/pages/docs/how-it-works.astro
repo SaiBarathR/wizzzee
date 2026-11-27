@@ -1,0 +1,8 @@
+---
+// docs/architecture.md is the write-up of how Wizzzee is put together; this page renders it as is.
+import Docs from '../../layouts/Docs.astro';
+import { Content, getHeadings } from '../../../../docs/architecture.md';
+---
+<Docs title="How it works" description="How Wizzzee scans a disk in seconds, stores millions of files compactly, draws its treemap and removes files safely." path="docs/how-it-works/" headings={getHeadings()} source="docs/architecture.md">
+  <Content />
+</Docs>

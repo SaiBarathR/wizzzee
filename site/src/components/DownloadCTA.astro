@@ -1,0 +1,47 @@
+---
+import { icon } from '../lib/icons';
+import { SITE, url } from '../lib/site';
+---
+<section class="cta" aria-labelledby="cta-title">
+  <div class="container">
+    <div class="cta-card">
+      <img class="cta-mark" src={url('favicon.svg')} width="72" height="72" alt="" />
+      <h2 id="cta-title">Get Wizzzee</h2>
+      <p class="cta-lead">Free, open source, and smaller than most of what it finds.</p>
+      <a class="btn btn-primary btn-lg cta-btn" href={SITE.latestRelease} data-download>
+        <span set:html={icon('download', 18)} /> Download for Mac
+      </a>
+      <p class="cta-version" data-download-version>Universal app for Apple silicon and Intel</p>
+      <ul class="reqs" role="list">
+        <li><span set:html={icon('apple', 16)} /> macOS 14 Sonoma or later</li>
+        <li><span set:html={icon('cpu', 16)} /> Apple silicon and Intel</li>
+        <li><span set:html={icon('hard-drive', 16)} /> Full Disk Access recommended</li>
+      </ul>
+      <p class="cta-note">
+        Wizzzee is ad-hoc signed, not notarized, so macOS asks you to approve the first launch.
+        <a href={url('download/')}>See the install steps</a>
+      </p>
+    </div>
+  </div>
+</section>
+
+<style>
+  .cta { padding: 40px 0 72px; }
+  .cta-card {
+    text-align: center; padding: 52px 28px 48px; border-radius: 24px;
+    background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
+  }
+  .cta-mark { display: inline-block; width: 72px; height: 72px; border-radius: 16px; box-shadow: var(--shadow); }
+  .cta-card h2 { margin-top: 22px; font-size: clamp(30px, 4.5vw, 42px); font-weight: 800; letter-spacing: -0.03em; }
+  .cta-lead { margin-top: 10px; font-size: 18px; color: var(--text-2); }
+  .cta-btn { margin-top: 28px; }
+  .cta-version { margin-top: 12px; font-size: 14px; color: var(--text-3); }
+  .reqs { list-style: none; padding: 0; margin: 28px 0 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+  .reqs li {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 999px;
+    background: var(--bg-soft); border: 1px solid var(--border); font-size: 14px; font-weight: 550; color: var(--text-2);
+  }
+  .reqs li :global(svg) { width: 16px; height: 16px; display: block; color: var(--text-3); }
+  .cta-note { margin: 22px auto 0; max-width: 520px; font-size: 14.5px; color: var(--text-3); }
+  @media (max-width: 480px) { .cta-card { padding: 40px 18px 36px; } .cta-btn { width: 100%; } }
+</style>

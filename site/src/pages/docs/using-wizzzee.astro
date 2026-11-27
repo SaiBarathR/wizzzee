@@ -1,0 +1,7 @@
+---
+import Docs from '../../layouts/Docs.astro';
+import { Content, getHeadings, frontmatter } from '../../guides/using-wizzzee.md';
+---
+<Docs title={frontmatter.title} description={frontmatter.description} path="docs/using-wizzzee/" headings={getHeadings()} source="site/src/guides/using-wizzzee.md">
+  <Content />
+</Docs>

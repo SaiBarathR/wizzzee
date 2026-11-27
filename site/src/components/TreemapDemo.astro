@@ -1,0 +1,154 @@
+---
+// A working treemap of a made-up disk, drawn the way the app draws its own (src/lib/treemap-demo.ts). Without
+// JavaScript, the app's real treemap image stands in for it.
+import { url } from '../lib/site';
+import { icon } from '../lib/icons';
+---
+<div class="tm" data-treemap-demo>
+  <div class="tm-window">
+    <div class="tm-titlebar">
+      <span class="tm-lights" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span class="tm-title">Wizzzee</span>
+      <span class="tm-badge">Demo disk</span>
+    </div>
+    <div class="tm-body">
+      <div class="tm-main">
+        <div class="tm-pathbar">
+          <button class="tm-icon-btn" type="button" data-zoom-out aria-label="Zoom out one folder" title="Zoom out (⌘[)" disabled set:html={icon('arrow-up', 15)} />
+          <nav class="tm-crumbs" aria-label="Folder on show"><span class="tm-crumb" aria-current="location">Macintosh HD</span></nav>
+          <span class="tm-hint">Double-click a folder to zoom in</span>
+        </div>
+        <div class="tm-stage">
+          <img class="tm-fallback" src={url('images/treemap.webp')} width="2000" height="858" alt="A treemap of /System/Library as Wizzzee draws it: every file a shaded tile, sized by the space it takes and coloured by type" loading="eager" decoding="async" />
+          <canvas class="tm-map" aria-hidden="true"></canvas>
+          <canvas class="tm-overlay" role="img" aria-label="Treemap of a demo disk: every file is a tile sized by the space it takes, coloured by type. Use the path above, the buttons below and the file types list to explore it."></canvas>
+          <div class="tm-tip" hidden><p class="tm-tip-path"></p><p class="tm-tip-detail"></p></div>
+          <button class="tm-focus" type="button" hidden aria-label="Stop focusing this file type">
+            <span class="tm-swatch"></span><span class="tm-focus-name"></span><span set:html={icon('x', 13)} />
+          </button>
+        </div>
+        <div class="tm-status">
+          <span class="tm-status-text">Macintosh HD</span>
+          <button class="tm-zoom" type="button" data-zoom-in disabled><span set:html={icon('zoom-in', 14)} /> Zoom in</button>
+        </div>
+      </div>
+      <aside class="tm-types" aria-label="File types">
+        <div class="tm-types-head"><span>File Types</span><span class="tm-types-count"></span></div>
+        <div class="tm-types-cols" aria-hidden="true"><span>Type</span><span>On Disk</span><span>%</span></div>
+        <div class="tm-types-list"></div>
+      </aside>
+    </div>
+  </div>
+  <p class="tm-live visually-hidden" aria-live="polite"></p>
+</div>
+
+<script>
+  import { mountTreemapDemo } from '../lib/treemap-demo';
+  document.querySelectorAll<HTMLElement>('[data-treemap-demo]').forEach((el) => {
+    try { mountTreemapDemo(el); } catch (e) { console.error(e); }
+  });
+</script>
+
+<style>
+  /* The window is the app's own dark chrome in both of the site's themes. */
+  .tm { --w-bg: #1c1f24; --w-bar: #23272d; --w-line: #33383f; --w-text: #e8eaed; --w-dim: #9aa0a8; color: var(--w-text); }
+  .tm-window {
+    border-radius: 14px; overflow: hidden; background: var(--w-bg); border: 1px solid #2e3238;
+    box-shadow: var(--shadow-lg), 0 0 0 1px rgb(0 0 0 / 0.25);
+  }
+  .tm-titlebar { position: relative; display: flex; align-items: center; justify-content: center; height: 36px; background: var(--w-bar); border-bottom: 1px solid #15181c; }
+  .tm-lights { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); display: flex; gap: 8px; }
+  .tm-lights span { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; }
+  .tm-lights span:nth-child(2) { background: #febc2e; }
+  .tm-lights span:nth-child(3) { background: #28c840; }
+  .tm-title { font-size: 13px; font-weight: 600; color: var(--w-dim); }
+  .tm-badge {
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; color: #f2b46e; background: #3a2a19;
+  }
+
+  .tm-body { display: grid; grid-template-columns: minmax(0, 1fr) 248px; }
+  .tm-main { min-width: 0; display: flex; flex-direction: column; }
+
+  .tm-pathbar { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 6px; border-bottom: 1px solid var(--w-line); font-size: 13px; }
+  .tm-icon-btn {
+    display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0;
+    border: 0; border-radius: 6px; background: transparent; color: var(--w-text); cursor: pointer; padding: 0;
+  }
+  .tm-icon-btn:hover:not(:disabled) { background: #2c3138; }
+  .tm-icon-btn:disabled { color: #5a6068; cursor: default; }
+  .tm-icon-btn :global(svg) { display: block; }
+  .tm-crumbs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; flex: 1; }
+  .tm-crumbs::-webkit-scrollbar { display: none; }
+  .tm-crumbs :global(.tm-crumb) { font: 500 13px/1 var(--font); color: var(--w-text); padding: 5px 6px; border-radius: 6px; border: 0; background: none; }
+  .tm-crumbs :global(button.tm-crumb) { color: var(--w-dim); cursor: pointer; }
+  .tm-crumbs :global(button.tm-crumb:hover) { color: var(--w-text); background: #2c3138; }
+  .tm-crumbs :global(.tm-sep) { color: #5a6068; }
+  .tm-hint { flex-shrink: 0; font-size: 12px; color: #7d848d; }
+
+  .tm-stage { position: relative; height: 440px; background: #0f1114; touch-action: manipulation; }
+  .tm-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .tm-overlay { cursor: pointer; }
+  .tm-fallback { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: left top; }
+  .tm.is-live .tm-fallback { display: none; }
+  .tm-tip {
+    position: absolute; left: 0; top: 0; z-index: 3; max-width: min(420px, 80%); pointer-events: none;
+    padding: 7px 10px; border-radius: 8px; background: rgb(22 24 28 / 0.94); border: 1px solid #3a3f46;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+  }
+  .tm-tip-path { font-size: 12.5px; font-weight: 600; color: #fff; overflow-wrap: anywhere; line-height: 1.35; }
+  .tm-tip-detail { margin-top: 2px; font-size: 12px; color: #b5bbc3; }
+  .tm-focus {
+    position: absolute; right: 10px; top: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 8px 5px 9px; border-radius: 999px; border: 1px solid #454b53; background: rgb(22 24 28 / 0.92);
+    color: #fff; font: 600 12.5px/1 var(--font); cursor: pointer;
+  }
+  .tm-focus[hidden] { display: none; }
+  .tm-focus :global(svg) { display: block; color: #b5bbc3; }
+  .tm :global(.tm-swatch) { display: inline-block; width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25); }
+
+  .tm-status { display: flex; align-items: center; gap: 12px; min-height: 36px; padding: 4px 8px 4px 12px; border-top: 1px solid var(--w-line); background: var(--w-bar); font-size: 12.5px; color: var(--w-dim); }
+  .tm-status-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tm-zoom {
+    display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 6px; flex-shrink: 0;
+    border: 1px solid #3d434b; background: #2c3138; color: var(--w-text); font: 600 12px/1 var(--font); cursor: pointer;
+  }
+  .tm-zoom:disabled { color: #5f656d; background: transparent; cursor: default; }
+  .tm-zoom :global(svg) { display: block; }
+
+  .tm-types { border-left: 1px solid var(--w-line); display: flex; flex-direction: column; min-width: 0; }
+  .tm-types-head { display: flex; align-items: baseline; justify-content: space-between; padding: 10px 12px 6px; font-size: 13px; font-weight: 650; }
+  .tm-types-count { font-size: 11px; font-weight: 500; color: #7d848d; }
+  .tm-types-cols, .tm-types :global(.tm-type) { display: grid; grid-template-columns: minmax(0, 1fr) 60px 46px; gap: 6px; align-items: center; }
+  .tm-types-cols { padding: 4px 12px 6px; font-size: 11.5px; color: #7d848d; border-bottom: 1px solid var(--w-line); }
+  .tm-types-cols span:not(:first-child) { text-align: right; }
+  .tm-types-list { padding: 4px 6px 8px; overflow-y: auto; }
+  .tm-types :global(.tm-type) {
+    width: 100%; padding: 5px 6px; border: 0; border-radius: 6px; background: none; color: var(--w-text);
+    font: 500 12.5px/1.2 var(--font); text-align: left; cursor: pointer;
+    grid-template-columns: 11px minmax(0, 1fr) 60px 46px; white-space: nowrap;
+  }
+  .tm-types :global(.tm-type:nth-child(odd)) { background: rgb(255 255 255 / 0.025); }
+  .tm-types :global(.tm-type:hover) { background: #2a2f36; }
+  .tm-types :global(.tm-type[aria-pressed="true"]) { background: #3a2a19; box-shadow: inset 0 0 0 1px #8a5a26; }
+  .tm-types :global(.tm-ext) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tm-types :global(.tm-tsize), .tm-types :global(.tm-pct) { text-align: right; font-variant-numeric: tabular-nums; }
+  .tm-types :global(.tm-pct) { color: var(--w-dim); }
+  .tm button:focus-visible { outline: 2px solid #f0a04b; outline-offset: 1px; }
+
+  @media (max-width: 900px) {
+    .tm-body { grid-template-columns: minmax(0, 1fr); }
+    .tm-types { border-left: 0; border-top: 1px solid var(--w-line); }
+    .tm-types-cols { display: none; }
+    .tm-types-list { display: flex; gap: 6px; overflow-x: auto; padding: 4px 10px 12px; scrollbar-width: thin; }
+    .tm-types :global(.tm-type) { width: auto; flex-shrink: 0; grid-template-columns: 11px auto auto; gap: 7px; padding: 6px 10px; border: 1px solid #343941; border-radius: 999px; }
+    .tm-types :global(.tm-type:nth-child(odd)) { background: none; }
+    .tm-types :global(.tm-pct) { display: none; }
+    .tm-stage { height: 360px; }
+  }
+  @media (max-width: 600px) {
+    .tm-hint { display: none; }
+    .tm-stage { height: 300px; }
+    .tm-badge { display: none; }
+  }
+</style>
