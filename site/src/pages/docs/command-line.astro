@@ -1,0 +1,8 @@
+---
+// docs/cli.md is the reference for the command line; this page renders it as is.
+import Docs from '../../layouts/Docs.astro';
+import { Content, getHeadings } from '../../../../docs/cli.md';
+---
+<Docs title="Command line" description="Wizzzee's headless modes: --scan, --probe, --treemap, --uishot, --prefs and --selftest, with every flag." path="docs/command-line/" headings={getHeadings()} source="docs/cli.md">
+  <Content />
+</Docs>

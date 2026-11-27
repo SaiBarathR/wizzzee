@@ -7,6 +7,9 @@ files, caches, other users' folders — and can trash or delete what you pick.
 
 Scans the whole startup disk (about 3.9M files) in roughly 15 seconds.
 
+**Website:** [saibarathr.github.io/wizzzee](https://saibarathr.github.io/wizzzee/): download, install
+steps, a treemap to try in the browser, and the [docs](https://saibarathr.github.io/wizzzee/docs/).
+
 https://github.com/user-attachments/assets/14e254f9-c855-4b6c-b218-a9e72c59ca07
 
 <sub>Music: "Rocket Power" by Kevin MacLeod (incompetech.com), licensed under
@@ -287,6 +290,7 @@ Sources/Wizzzee/
               UIShot
 scripts/      build-app.sh, validate-release.sh, make-icon.swift
 docs/         architecture.md, cli.md, releasing.md, releases/
+site/         the website (Astro, published to GitHub Pages)
 ```
 
 ## Verify a build

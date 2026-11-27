@@ -1,0 +1,384 @@
+---
+import Base from '../layouts/Base.astro';
+import TreemapDemo from '../components/TreemapDemo.astro';
+import VideoSlot from '../components/VideoSlot.astro';
+import DownloadCTA from '../components/DownloadCTA.astro';
+import { icon } from '../lib/icons';
+import { SITE, url } from '../lib/site';
+
+const tour = [
+  {
+    id: 'tree', label: 'Tree View', image: 'tree-view.webp',
+    alt: 'Tree View of /System/Library: folders sorted by space on disk, each with a bar for its share of the parent, the File Types list at the right and the treemap below',
+    title: 'Folders, biggest first',
+    text: 'Every folder sorted by size, with a bar for its share of its parent. Sorting stays inside each folder, so the hierarchy holds. → and ← open and shut folders, as in Finder.',
+  },
+  {
+    id: 'files', label: 'File View', image: 'file-view.webp',
+    alt: 'File View: the biggest files in the scan, with their folders, sizes and dates',
+    title: 'The biggest files, wherever they are',
+    text: 'The 1,000 largest files anywhere in the scan, however deep they are buried, with the folder each one is in. Right-click any of them to reveal it, open it or remove it.',
+  },
+  {
+    id: 'types', label: 'File Types', image: 'file-types.png',
+    alt: 'One file type in focus: its tiles lit on the treemap and the rest set back, and File View listing only that type',
+    title: 'Spot the space hogs',
+    text: 'Every extension ranked by the space it takes. Click one and its tiles stay lit on the treemap while every other tile is set back, and File View lists that type alone.',
+  },
+  {
+    id: 'search', label: 'Search', image: 'search.webp',
+    alt: 'A search for folders by name and size in File View, with the count of what it found and the space it takes',
+    title: 'Search the whole scan',
+    text: 'Words find names, folders as well as files. Add filters for size, age, type and kind; the line at the right says how many things matched and what they take up.',
+  },
+  {
+    id: 'marks', label: 'Marks', image: 'marks.webp',
+    alt: 'Two folders marked for removal: ticked in the table, hatched on the treemap, and listed with their sizes under the bar that counts them',
+    title: 'Gather, review, remove',
+    text: 'Mark things from anywhere in the scan. A bar beside the tabs counts them and what removing them would free, then moves them to the Trash, or deletes them, in one go.',
+  },
+].map((t) => ({ ...t, image: t.image.replace(/\.png$/, '.webp') }));
+
+const cleanup = [
+  { icon: 'square-check', title: 'Mark now, remove together', text: 'Tick a row, press Space, or ⌘-click a tile. Marks stay put while you open folders, sort, filter and switch tabs, so you can collect from anywhere.' },
+  { icon: 'eye', title: 'Look before you delete', text: '⌘Y opens Quick Look on the selection and follows it as you move, so a list can be worked down with the preview up.' },
+  { icon: 'undo-2', title: 'Undo the last move to the Trash', text: '⌘Z puts it back, on disk and in the tree, selected and with the marks it had. The status bar shows what is still sitting in the Trash.' },
+  { icon: 'refresh-cw', title: 'A rescan keeps your place', text: '⌘R brings the numbers up to date and leaves the same folders open, the same zoom, the same selection and the same marks.' },
+  { icon: 'trash-2', title: 'Sizes update as you delete', text: 'Removing something adjusts every folder above it at once, with no rescan. The row goes and its neighbours stay where they were.' },
+  { icon: 'lock', title: 'Straight about what can’t go', text: '/System and /usr are on the sealed, read-only system volume. Wizzzee counts them, and says why instead of failing with a bare permission error.' },
+];
+
+const queries = [
+  { q: ['node_modules'], text: 'Every folder of that name, and what they come to together.' },
+  { q: ['>1gb', '<500kb'], text: 'Bigger, or smaller, in the measure on show.' },
+  { q: ['older:1y', 'newer:30d'], text: 'By when it was last modified: d, w, m or y.' },
+  { q: ['ext:dmg', 'ext:none'], text: 'One file type, or files with no extension.' },
+  { q: ['kind:folder', 'kind:file'], text: 'Folders only, or files only.' },
+  { q: ['Library/Caches', '"two words"'], text: 'A word with a / looks in the whole path. Quotes make a phrase.' },
+];
+
+const speed = [
+  { icon: 'layers', title: 'Many files per system call', text: 'getattrlistbulk(2) returns names, types, sizes, dates and link counts for a whole run of entries at once, instead of a stat per file.' },
+  { icon: 'cpu', title: 'A worker on every core', text: 'Threads pull from one shared stack of folders still to read, which keeps an SSD saturated.' },
+  { icon: 'database', title: 'Packed in memory', text: 'Files live in a packed array on their folder rather than as objects, so a four-million-file scan fits in a few hundred MB.' },
+  { icon: 'layout-grid', title: 'One pass to draw the map', text: 'The treemap is squarified and cushion-shaded per pixel. The tiles tile the canvas, so drawing it costs one pass over the bitmap.' },
+];
+
+const stats = [
+  { value: '~15 s', label: 'for a whole startup disk, about 3.9 million files' },
+  { value: '~980%', label: 'CPU on an 18-core Mac while it scans' },
+  { value: '766', label: 'self-test checks against a tree of known contents' },
+  { value: 'du -sk', label: 'agrees with its totals exactly, on every tree they’ve been compared on' },
+];
+
+const numbers = [
+  { icon: 'hard-drive', title: 'On Disk, and Size', text: 'A sparse disk image can be 996 GB long and occupy 42 GB. Wizzzee shows the space you would get back by default, and both figures in the tables.' },
+  { icon: 'ruler', title: 'Units that match Finder', text: '1 GB is 1,000,000,000 bytes, as in Finder and Get Info, so the two agree. df -h, and WizTree on Windows, count in base 2.' },
+  { icon: 'link', title: 'Hard links counted once', text: 'A package store or a developer cache full of links isn’t counted twice. The status bar says how much was kept from being double-counted.' },
+  { icon: 'folder-tree', title: 'One volume at a time', text: 'Other disks, network shares and the mounts under /System/Volumes stay out of a scan, and APFS firmlinks are followed once.' },
+];
+
+const privacy = [
+  { icon: 'wifi-off', title: 'No network requests', text: 'Wizzzee never goes online. No account, no analytics, no update check.' },
+  { icon: 'shield-check', title: 'Nothing removed unasked', text: 'It reads your disk and shows you what it found. The only files it touches are the ones you tell it to remove.' },
+  { icon: 'package', title: 'Open source', text: 'MIT licensed, with no dependencies. Read every line, or build it yourself with one script.' },
+];
+---
+<Base path="">
+  <section class="hero">
+    <div class="container">
+      <div class="hero-copy">
+        <span class="eyebrow">Free and open source · macOS 14+</span>
+        <h1>See exactly where your <span class="hl">disk space</span> went.</h1>
+        <p class="hero-lead">
+          Wizzzee is a fast, native disk space analyzer for macOS. It reads every file it’s allowed to, hidden and system
+          files included, and shows them as a folder tree with sizes, a list of the biggest files, and a treemap you can
+          click into. Then it helps you take the space back.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary btn-lg" href={SITE.latestRelease} data-download>
+            <span set:html={icon('download', 18)} /> Download for Mac
+          </a>
+          <a class="btn btn-secondary btn-lg" href={url('docs/')}>Read the docs</a>
+        </div>
+        <p class="hero-meta">
+          <span data-download-version>Universal app for Apple silicon and Intel</span>
+          <span aria-hidden="true">·</span>
+          <a href={url('download/')}>Install steps</a>
+        </p>
+      </div>
+      <div class="hero-demo">
+        <TreemapDemo />
+        <p class="hero-demo-hint">
+          A working treemap of a made-up disk, shaded the way Wizzzee shades it. Point at a tile to see what it is,
+          double-click it (or select it and press Zoom in) to go into its folder, and pick a file type to light it up.
+          From the keyboard, the arrow keys step through the map biggest first, <kbd>Return</kbd> zooms in and
+          <kbd>⌫</kbd> zooms out.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section-tight" aria-labelledby="video-title">
+    <div class="container">
+      <div class="section-head center">
+        <span class="eyebrow">See it work</span>
+        <h2 class="section-title" id="video-title">Forty-four seconds with Wizzzee</h2>
+      </div>
+      <div class="video-wrap">
+        <VideoSlot file="promo.mp4" poster="promo-poster.webp" title="Wizzzee promo" caption={'Music: "Rocket Power" by Kevin MacLeod (incompetech.com), CC BY 4.0.'} />
+      </div>
+    </div>
+  </section>
+
+  <section class="section alt" aria-labelledby="tour-title">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">One scan, every angle</span>
+        <h2 class="section-title" id="tour-title">The same files, the way you need to see them</h2>
+        <p class="section-lead">A scan builds one tree of the disk, held in memory. The tabs, the list of file types and the treemap are all views of that tree, so moving between them costs nothing.</p>
+      </div>
+      <div class="tour" data-tour>
+        <div class="tour-tabs" role="tablist" aria-label="Wizzzee's views">
+          {tour.map((t, i) => (
+            <button class="tour-tab" type="button" role="tab" id={`tab-${t.id}`} aria-controls={`panel-${t.id}`} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>{t.label}</button>
+          ))}
+        </div>
+        {tour.map((t, i) => (
+          <div class="tour-panel" role="tabpanel" id={`panel-${t.id}`} aria-labelledby={`tab-${t.id}`} data-active={i === 0 ? '' : undefined}>
+            <div class="tour-text">
+              <h3>{t.title}</h3>
+              <p>{t.text}</p>
+            </div>
+            <img class="screenshot" src={url('images/' + t.image)} width="2000" height="1215" alt={t.alt} loading={i === 0 ? 'eager' : 'lazy'} decoding="async" />
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="cleanup-title">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Cleaning up</span>
+        <h2 class="section-title" id="cleanup-title">Take the space back, carefully</h2>
+        <p class="section-lead">Finding the big things is half of it. Right-click anything to reveal it, open it, copy its path or remove it, and Wizzzee keeps the rest steady while you do.</p>
+      </div>
+      <ul class="feature-grid" role="list">
+        {cleanup.map((a) => (
+          <li class="feature card">
+            <span class="feature-icon" set:html={icon(a.icon, 20)} />
+            <h3>{a.title}</h3>
+            <p>{a.text}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  </section>
+
+  <section class="section alt" aria-labelledby="search-title">
+    <div class="container split">
+      <div>
+        <span class="eyebrow">Search</span>
+        <h2 class="section-title" id="search-title">Find it the way you’d say it</h2>
+        <p class="section-lead">
+          <kbd>⌘F</kbd> goes to the File View’s filter from any tab. Words are looked for in names, all of them, in any order,
+          and find folders as well as files. The rest are filters, and a second filter of a kind narrows the first.
+        </p>
+        <p class="split-more"><a href={url('docs/search/')}>Everything search understands</a></p>
+      </div>
+      <dl class="queries card">
+        {queries.map((q) => (
+          <div class="query">
+            <dt>{q.q.map((s) => <code>{s}</code>)}</dt>
+            <dd>{q.text}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="speed-title">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Fast</span>
+        <h2 class="section-title" id="speed-title">A whole disk, in seconds</h2>
+        <p class="section-lead">WizTree is fast on Windows because it reads the NTFS master file table. APFS has no public index like it, so Wizzzee makes walking the disk fast instead.</p>
+      </div>
+      <ul class="stats" role="list">
+        {stats.map((s) => (
+          <li class="stat card">
+            <span class="stat-value">{s.value}</span>
+            <span class="stat-label">{s.label}</span>
+          </li>
+        ))}
+      </ul>
+      <ul class="how-grid" role="list">
+        {speed.map((s) => (
+          <li class="how-item">
+            <span class="how-icon" set:html={icon(s.icon, 18)} />
+            <div>
+              <h3>{s.title}</h3>
+              <p>{s.text}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <p class="more-link"><a href={url('docs/how-it-works/')}>How Wizzzee is put together</a></p>
+    </div>
+  </section>
+
+  <section class="section alt" aria-labelledby="numbers-title">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Accurate</span>
+        <h2 class="section-title" id="numbers-title">Numbers you can check</h2>
+        <p class="section-lead">Disk analyzers disagree with each other, and with <code>df</code>, for real reasons. Wizzzee picks the figure you can act on and tells you which one it is.</p>
+      </div>
+      <ul class="safety-grid" role="list">
+        {numbers.map((s) => (
+          <li class="safety card">
+            <span class="feature-icon" set:html={icon(s.icon, 20)} />
+            <h3>{s.title}</h3>
+            <p>{s.text}</p>
+          </li>
+        ))}
+      </ul>
+      <p class="more-link"><a href={url('docs/reading-the-numbers/')}>Reading the numbers</a></p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="privacy-title">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Privacy</span>
+        <h2 class="section-title" id="privacy-title">Your files are your business</h2>
+        <p class="section-lead">Wizzzee needs to read your whole disk to measure it. Here is what it does with that, and what it doesn’t.</p>
+      </div>
+      <ul class="privacy-grid" role="list">
+        {privacy.map((s) => (
+          <li class="safety card">
+            <span class="feature-icon" set:html={icon(s.icon, 20)} />
+            <h3>{s.title}</h3>
+            <p>{s.text}</p>
+          </li>
+        ))}
+      </ul>
+      <p class="more-link">
+        Without Full Disk Access, macOS hides Mail, Messages, Safari and other users’ folders and the totals read low.
+        Wizzzee says so when it notices. <a href={url('download/#full-disk-access')}>Granting it</a>
+      </p>
+    </div>
+  </section>
+
+  <DownloadCTA />
+</Base>
+
+<script>
+  // The tour's tabs. Without JavaScript every panel shows, one after another.
+  document.querySelectorAll<HTMLElement>('[data-tour]').forEach((tour) => {
+    tour.classList.add('js');
+    const tabs = Array.from(tour.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const panels = Array.from(tour.querySelectorAll<HTMLElement>('[role="tabpanel"]'));
+    const select = (i: number, moveFocus = false) => {
+      tabs.forEach((t, k) => {
+        t.setAttribute('aria-selected', String(k === i));
+        t.tabIndex = k === i ? 0 : -1;
+      });
+      panels.forEach((p, k) => p.toggleAttribute('data-active', k === i));
+      if (moveFocus) tabs[i].focus();
+    };
+    tabs.forEach((t, i) => {
+      t.addEventListener('click', () => select(i));
+      t.addEventListener('keydown', (e) => {
+        const n = tabs.length;
+        const to = e.key === 'ArrowRight' ? (i + 1) % n : e.key === 'ArrowLeft' ? (i - 1 + n) % n : e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : -1;
+        if (to >= 0) { e.preventDefault(); select(to, true); }
+      });
+    });
+  });
+</script>
+
+<style>
+  .hero { padding: 56px 0 48px; }
+  .hero-copy { text-align: center; max-width: 860px; margin: 0 auto; }
+  .hero h1 { font-size: clamp(40px, 5.6vw, 62px); font-weight: 800; letter-spacing: -0.035em; line-height: 1.05; }
+  /* "disk space" sits on a tile of the treemap's orange */
+  .hl { background: var(--orange); color: #15181d; border-radius: 0.12em; padding: 0 0.1em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .hero-lead { margin: 22px auto 0; font-size: 19px; line-height: 1.6; color: var(--text-2); max-width: 700px; }
+  .hero-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 30px; }
+  .hero-meta { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 10px; margin-top: 16px; font-size: 14.5px; color: var(--text-3); }
+  .hero-demo { margin-top: 44px; }
+  .hero-demo-hint { margin: 16px auto 0; max-width: 720px; text-align: center; font-size: 14px; color: var(--text-3); }
+  @media (max-width: 720px) {
+    .hero { padding: 44px 0 32px; }
+    .hero-demo { margin-top: 40px; }
+  }
+  @media (max-width: 480px) { .hero-actions .btn { width: 100%; } }
+
+  .video-wrap { max-width: 880px; margin: 0 auto; }
+  .alt { background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+
+  .tour-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 24px; }
+  .tour-tab {
+    height: 38px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface);
+    color: var(--text-2); font: 600 14.5px/1 var(--font); cursor: pointer;
+  }
+  .tour-tab:hover { color: var(--text); border-color: var(--text-3); }
+  .tour-tab[aria-selected="true"] { background: var(--step-bg); border-color: var(--step-bg); color: var(--step-fg); }
+  .tour:not(.js) .tour-tabs { display: none; }
+  .tour-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .tour-text { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 8px 36px; align-items: baseline; max-width: 1000px; }
+  .tour:not(.js) .tour-panel + .tour-panel { margin-top: 48px; }
+  .tour.js .tour-panel:not([data-active]) { display: none; }
+  .tour-text h3 { font-size: 22px; font-weight: 720; letter-spacing: -0.015em; }
+  .tour-text p { color: var(--text-2); font-size: 16.5px; }
+  @media (max-width: 900px) { .tour-text { grid-template-columns: minmax(0, 1fr); } }
+
+  .feature-grid, .safety-grid, .privacy-grid { list-style: none; margin: 0; padding: 0; display: grid; gap: 18px; }
+  .feature-grid, .privacy-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .safety-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .privacy-grid { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 600px) { .feature-grid, .safety-grid { grid-template-columns: minmax(0, 1fr); } }
+  .feature, .safety { padding: 22px 22px 24px; }
+  .feature h3, .safety h3 { font-size: 17px; font-weight: 680; margin-top: 14px; }
+  .feature p, .safety p { margin-top: 6px; color: var(--text-2); font-size: 15px; line-height: 1.6; }
+  .feature-icon {
+    display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 11px;
+    background: var(--pill); color: var(--pill-fg); box-shadow: var(--shadow-sm);
+  }
+  .feature-icon :global(svg) { width: 20px; height: 20px; display: block; }
+  .more-link { margin-top: 22px; color: var(--text-2); font-size: 15px; }
+  .section-lead code, .more-link code { font-size: 0.88em; padding: 0.1em 0.36em; border-radius: 6px; background: var(--code-bg); border: 1px solid var(--border); }
+
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 56px; align-items: center; }
+  @media (max-width: 900px) { .split { grid-template-columns: minmax(0, 1fr); gap: 32px; } }
+  .split-more { margin-top: 20px; font-size: 15px; }
+  .queries { margin: 0; padding: 8px 22px; }
+  .query { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 8px 20px; padding: 14px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
+  .query:last-child { border-bottom: 0; }
+  .query dt { display: flex; flex-wrap: wrap; gap: 6px; }
+  .query dt code {
+    font-size: 13.5px; padding: 3px 8px; border-radius: 7px; background: var(--pill); color: #f3f4f6; white-space: nowrap;
+  }
+  .query dd { margin: 0; color: var(--text-2); font-size: 15px; line-height: 1.55; }
+  @media (max-width: 560px) { .query { grid-template-columns: minmax(0, 1fr); } }
+
+  .stats { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+  @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 420px) { .stats { grid-template-columns: minmax(0, 1fr); } }
+  .stat { padding: 22px; display: flex; flex-direction: column; gap: 6px; }
+  .stat-value { font: 780 32px/1.1 var(--font-display); letter-spacing: -0.03em; color: var(--text); }
+  .stat:nth-child(4) .stat-value { font: 700 26px/1.25 var(--mono); letter-spacing: -0.02em; }
+  .stat-label { font-size: 14.5px; color: var(--text-2); line-height: 1.5; }
+  .how-grid { list-style: none; margin: 36px 0 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 36px; }
+  @media (max-width: 760px) { .how-grid { grid-template-columns: minmax(0, 1fr); } }
+  .how-item { display: flex; gap: 14px; align-items: flex-start; padding: 16px 0; border-bottom: 1px solid var(--border); }
+  .how-icon {
+    display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; flex-shrink: 0;
+    border-radius: 9px; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  }
+  .how-icon :global(svg) { width: 18px; height: 18px; display: block; }
+  .how-item h3 { font-size: 15.5px; font-weight: 650; }
+  .how-item p { margin-top: 2px; font-size: 14.5px; color: var(--text-2); line-height: 1.55; }
+</style>

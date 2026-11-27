@@ -1,0 +1,34 @@
+---
+import Base from '../layouts/Base.astro';
+import { url } from '../lib/site';
+---
+<Base title="Page not found" path="404.html" description="This page doesn't exist.">
+  <section class="nf">
+    <div class="container">
+      <div class="nf-map" aria-hidden="true"><span></span><span></span><span></span><span>0 KB</span></div>
+      <h1>Nothing here takes up any space</h1>
+      <p>This page doesn’t exist, or it moved. Try one of these instead:</p>
+      <div class="nf-links">
+        <a class="btn btn-primary" href={url()}>Home</a>
+        <a class="btn btn-secondary" href={url('download/')}>Download</a>
+        <a class="btn btn-secondary" href={url('docs/')}>Docs</a>
+        <a class="btn btn-secondary" href={url('changelog/')}>Changelog</a>
+      </div>
+    </div>
+  </section>
+</Base>
+<style>
+  .nf { padding: 96px 0 72px; text-align: center; }
+  .nf-map {
+    display: inline-grid; grid-template-columns: 44px 26px; grid-template-rows: 26px 26px; gap: 4px; padding: 8px;
+    border-radius: 16px; background: var(--pill); box-shadow: var(--shadow-lg); margin-bottom: 28px;
+  }
+  .nf-map span { border-radius: 6px; background: #3a3f47; }
+  .nf-map span:first-child { grid-row: span 2; background: #e8943a; }
+  .nf-map span:nth-child(2) { background: #4dad4f; }
+  .nf-map span:nth-child(3) { display: none; }
+  .nf-map span:nth-child(4) { font: 700 9px/26px var(--mono); color: #9ba2ac; background: #2a2e35; }
+  .nf h1 { font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.03em; }
+  .nf p { margin-top: 14px; color: var(--text-2); font-size: 18px; }
+  .nf-links { margin-top: 28px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+</style>
