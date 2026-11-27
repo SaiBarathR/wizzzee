@@ -22,8 +22,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deployment at a time; a newer push replaces a queued one, but a running deployment finishes. Pull request builds
 # deploy nothing, so each branch's newest build replaces its older ones.
@@ -64,6 +62,10 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    # Only the deploy writes to Pages, so a pull request's build runs read-only.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

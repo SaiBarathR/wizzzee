@@ -21,7 +21,7 @@ import { icon } from '../lib/icons';
         <div class="tm-stage">
           <img class="tm-fallback" src={url('images/treemap.webp')} width="2000" height="858" alt="A treemap of /System/Library as Wizzzee draws it: every file a shaded tile, sized by the space it takes and coloured by type" loading="eager" decoding="async" />
           <canvas class="tm-map" aria-hidden="true"></canvas>
-          <canvas class="tm-overlay" tabindex="0" role="application" aria-roledescription="treemap" aria-label="Treemap of a demo disk: every file is a tile sized by the space it takes, coloured by type. With the map focused, the arrow keys select what is in the folder on show, Return zooms into the selected folder, and Backspace or Command-[ zooms back out."></canvas>
+          <canvas class="tm-overlay" tabindex="0" role="application" aria-roledescription="treemap" aria-label="Treemap of a demo disk: every file is a tile sized by the space it takes, coloured by type. With the map focused, the arrow keys step through what is in the folder on show, biggest first; Return zooms into the selected folder, and Backspace or Command-[ zooms back out."></canvas>
           <div class="tm-tip" hidden><p class="tm-tip-path"></p><p class="tm-tip-detail"></p></div>
           <button class="tm-focus" type="button" hidden aria-label="Stop focusing this file type">
             <span class="tm-swatch"></span><span class="tm-focus-name"></span><span set:html={icon('x', 13)} />

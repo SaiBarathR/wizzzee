@@ -442,16 +442,17 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
   zoomOut.addEventListener('click', () => { if (root.parent) zoomTo(root.parent); });
   focusLabel.addEventListener('click', () => setFocus(null));
 
-  // Keys, while something in the demo has focus. ⌘[ and ⌘0 zoom out and reset as they do in the app, and are
-  // always kept from the browser here, where ⌘[ would otherwise go Back. Esc takes a file type out of focus.
+  // Keys, while something in the demo has focus. ⌘[ and ⌘0 zoom out and reset as they do in the app; ⌘[ is always
+  // kept from the browser here, where it would otherwise go Back. Esc takes a file type out of focus.
   rootEl.addEventListener('keydown', (e) => {
     const cmd = e.metaKey || e.ctrlKey;
     if (cmd && e.key === '[') {
       e.preventDefault();
       if (root.parent) zoomTo(root.parent);
-    } else if (cmd && e.key === '0') {
+    } else if (cmd && e.key === '0' && root !== disk) {
+      // Only when zoomed in: at the top, ⌘0 is left to the browser's own reset of the page zoom.
       e.preventDefault();
-      if (root !== disk) zoomTo(disk);
+      zoomTo(disk);
     } else if (e.key === 'Escape' && focus !== null) {
       setFocus(null);
     }
@@ -460,7 +461,8 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
   // into the selected folder and Backspace zooms out, so the demo can be used without a pointer.
   overlay.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    const kids = (root.children ?? []).slice().sort((a, b) => b.size - a.size);
+    // Only what the map has a tile for: a sliver too thin to draw would take the selection out of sight.
+    const kids = (root.children ?? []).filter((k) => rectOf(k)).sort((a, b) => b.size - a.size);
     if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
       e.preventDefault();
       if (!kids.length) return;
