@@ -28,7 +28,7 @@ const tour = [
   {
     id: 'search', label: 'Search', image: 'search.webp',
     alt: 'A search for folders by name and size in File View, with the count of what it found and the space it takes',
-    title: 'Find it the way you’d say it',
+    title: 'Search the whole scan',
     text: 'Words find names, folders as well as files. Add filters for size, age, type and kind; the line at the right says how many things matched and what they take up.',
   },
   {
@@ -66,7 +66,7 @@ const speed = [
 
 const stats = [
   { value: '~15 s', label: 'for a whole startup disk, about 3.9 million files' },
-  { value: '980%', label: 'CPU on an 18-core Mac while it scans' },
+  { value: '~980%', label: 'CPU on an 18-core Mac while it scans' },
   { value: '766', label: 'self-test checks against a tree of known contents' },
   { value: 'du -sk', label: 'agrees with its totals exactly, on every tree they’ve been compared on' },
 ];
@@ -323,7 +323,7 @@ const privacy = [
     color: var(--text-2); font: 600 14.5px/1 var(--font); cursor: pointer;
   }
   .tour-tab:hover { color: var(--text); border-color: var(--text-3); }
-  .tour-tab[aria-selected="true"] { background: var(--pill); border-color: var(--pill); color: #fff; }
+  .tour-tab[aria-selected="true"] { background: var(--step-bg); border-color: var(--step-bg); color: var(--step-fg); }
   .tour:not(.js) .tour-tabs { display: none; }
   .tour-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
   .tour-text { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 8px 36px; align-items: baseline; max-width: 1000px; }

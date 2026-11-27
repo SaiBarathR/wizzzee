@@ -78,8 +78,9 @@ would download it.
 
 ## The right-click menu
 
-Right-click anything, in a table or on the treemap, for **Reveal in Finder**, **Open**, **Quick Look**, **Open in
-Terminal**, **Copy Path**, **Mark for Removal**, **Move to Trash** or **Delete Permanently**.
+Right-click anything, in a table or on the treemap, for **Reveal in Finder**, **Open** (**Open Folder** for a folder),
+**Quick Look**, **Open in Terminal**, **Copy Path**, **Mark for Removal**, **Move to Trash** and **Delete
+Permanently…**, and, where they apply, **Zoom Treemap Here** for a folder and **Show in Tree**.
 
 Removing something updates the sizes all the way up the tree without rescanning: the row goes, its neighbours stay
 where they were, and the selection moves to whatever took its place. A removal that takes a while shows how many items

@@ -294,7 +294,7 @@ kbd {
 .prose tr:last-child td { border-bottom: 0; }
 .prose td:first-child { min-width: 9em; }
 .prose td code { overflow-wrap: normal; white-space: nowrap; }
-.prose td:not(:first-child) code { white-space: normal; overflow-wrap: anywhere; }
+.prose td:not(:first-child) code { white-space: normal; overflow-wrap: break-word; }
 .prose img { border-radius: 12px; }
 
 /* code blocks (Shiki dual theme) */

@@ -122,7 +122,7 @@ function setBack(c: [number, number, number]): [number, number, number] {
 function render(img: ImageData, cells: Cell[], scale: number, focus: number | null) {
   const { width, height, data } = img;
   const buf = new Uint32Array(data.buffer);
-  buf.fill(0xff141110); // #0f1114, little-endian ABGR
+  buf.fill(0xff14110f); // #0f1114, little-endian ABGR
   const inv = 1 / scale;
   const edge = Math.max(1, Math.round(scale));
   for (const c of cells) {
@@ -211,6 +211,8 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
     return best;
   };
   const isInside = (n: DemoNode | null, dir: DemoNode) => { for (let a = n; a; a = a.parent ?? null) if (a === dir) return true; return false; };
+  /** The disk by name, anything else by its path. */
+  const where = (n: DemoNode) => (n === disk ? disk.name : pathOf(n));
 
   function drawLabels() {
     ctx.save();
@@ -219,7 +221,7 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
     ctx.shadowColor = 'rgba(0,0,0,0.9)';
     ctx.shadowBlur = 2.5 * size.scale;
     ctx.fillStyle = 'rgba(255,255,255,0.96)';
-    const line = 13, insetX = 7, insetTop = 5, trailing = 4;
+    const line = 13, insetX = 12, insetTop = 8, trailing = 4;
     const placed: Rect[] = [];
     const hit = (a: Rect) => placed.some((b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h);
     for (const f of frames) {
@@ -242,6 +244,19 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
     ctx.restore();
   }
 
+  // White hairlines round folder groups, fading with depth (TreemapView.drawGroupBorders).
+  function drawGroupBorders() {
+    ctx.save();
+    ctx.scale(size.scale, size.scale);
+    for (const f of frames) {
+      if (f.depth === 0 || f.depth > 6 || f.r.w <= 3 || f.r.h <= 3) continue;
+      ctx.strokeStyle = `rgba(255,255,255,${Math.max(0.08, 0.55 - (f.depth - 1) * 0.09)})`;
+      ctx.lineWidth = f.depth === 1 ? 1 : 0.5;
+      ctx.strokeRect(f.r.x + 0.25, f.r.y + 0.25, f.r.w - 0.5, f.r.h - 0.5);
+    }
+    ctx.restore();
+  }
+
   function paint() {
     const w = stage.clientWidth, h = stage.clientHeight;
     if (w < 2 || h < 2) return;
@@ -255,25 +270,20 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
     const img = ctx.createImageData(canvas.width, canvas.height);
     render(img, cells, scale, focus);
     ctx.putImageData(img, 0, 0);
+    drawGroupBorders();
     drawLabels();
     rootEl.classList.add('is-live');
     drawOverlay();
   }
 
-  function outline(r: Rect, strong: boolean) {
+  // The selection is a 2 pt white outline and the tile under the pointer a 1 pt one, as in TreemapView.draw.
+  function outline(r: Rect, selection: boolean) {
     octx.save();
     octx.scale(size.scale, size.scale);
-    if (strong) {
-      octx.strokeStyle = 'rgba(0,0,0,0.85)';
-      octx.lineWidth = 3;
-      octx.strokeRect(r.x + 1.5, r.y + 1.5, Math.max(0, r.w - 3), Math.max(0, r.h - 3));
-      octx.strokeStyle = 'rgba(255,255,255,0.9)';
-      octx.lineWidth = 1.25;
-    } else {
-      octx.strokeStyle = 'rgba(255,255,255,0.55)';
-      octx.lineWidth = 1;
-    }
-    octx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
+    const inset = selection ? 1 : 0.5;
+    octx.strokeStyle = selection ? '#fff' : 'rgba(255,255,255,0.85)';
+    octx.lineWidth = selection ? 2 : 1;
+    octx.strokeRect(r.x + inset, r.y + inset, Math.max(0, r.w - 2 * inset), Math.max(0, r.h - 2 * inset));
     octx.restore();
   }
 
@@ -299,11 +309,14 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
   }
 
   function updateStatus() {
-    const n = selected ?? root;
-    const pct = root.size ? ` · ${((n.size / root.size) * 100).toFixed(1)} % of ${root === disk ? 'the disk' : root.name}` : '';
-    const where = root === disk ? disk.name : pathOf(root);
-    statusText.textContent = selected ? `${pathOf(n)} · ${formatBytes(n.size)}${selected !== root ? pct : ''}` : `${where} · ${formatBytes(root.size)} · click a tile to select it`;
-    zoomIn.disabled = !selected || !(selected.children || selected.parent !== root);
+    if (selected) {
+      // Name and size first: a narrow window cuts off the folder it is in, not what it is.
+      const pct = ((selected.size / root.size) * 100).toFixed(1);
+      statusText.textContent = `${selected.name} · ${formatBytes(selected.size)} · ${pct} % of ${root === disk ? 'the disk' : root.name} · in ${where(selected.parent!)}`;
+    } else {
+      statusText.textContent = `${where(root)} · ${formatBytes(root.size)} · click a tile to select it`;
+    }
+    zoomIn.disabled = !selected || selected === root || !(selected.children || selected.parent !== root);
     zoomOut.disabled = root === disk;
   }
 
@@ -335,14 +348,19 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
 
   function zoomTo(n: DemoNode) {
     if (!n.children || n === root) return;
+    // The crumbs are rebuilt and the zoom-out button can go disabled, either of which would drop keyboard focus to
+    // the page, so it moves to the map instead.
+    const hadFocus = rootEl.contains(document.activeElement);
     root = n;
-    if (selected && !isInside(selected, root)) selected = null;
+    if (selected && (selected === root || !isInside(selected, root))) selected = null;
     hovered = null;
     tip.hidden = true;
     renderCrumbs();
     paint();
     updateStatus();
-    live.textContent = `Zoomed to ${pathOf(n)}, ${formatBytes(n.size)}`;
+    const active = document.activeElement as HTMLElement | null;
+    if (hadFocus && (!active || !rootEl.contains(active) || (active as HTMLButtonElement).disabled)) overlay.focus({ preventScroll: true });
+    live.textContent = `Zoomed to ${where(n)}, ${formatBytes(n.size)}`;
   }
 
   function renderTypes() {
@@ -357,7 +375,7 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
       b.querySelector('.tm-ext')!.textContent = extLabel(t.ext);
       b.querySelector('.tm-tsize')!.textContent = formatBytes(t.size);
       b.querySelector('.tm-pct')!.textContent = `${((t.size / disk.size) * 100).toFixed(1)} %`;
-      b.title = `${t.count.toLocaleString('en-US')} files`;
+      b.title = `${t.count.toLocaleString('en-US')} ${t.count === 1 ? 'file' : 'files'}`;
       b.addEventListener('click', () => setFocus(focus === t.color ? null : t.color));
       typeList.appendChild(b);
     }
@@ -397,13 +415,15 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
     tip.style.transform = `translate(${x}px, ${y}px)`;
   });
   overlay.addEventListener('pointerleave', () => { hovered = null; tip.hidden = true; drawOverlay(); });
-  overlay.addEventListener('click', (e) => {
-    const p = local(e);
-    const c = cellAt(p.x, p.y);
-    selected = c ? c.node : null;
+  function select(n: DemoNode | null) {
+    selected = n;
     drawOverlay();
     updateStatus();
-    if (c) live.textContent = `Selected ${describe(c.node)}`;
+    if (n) live.textContent = `Selected ${describe(n)}`;
+  }
+  overlay.addEventListener('click', (e) => {
+    const p = local(e);
+    select(cellAt(p.x, p.y)?.node ?? null);
   });
   overlay.addEventListener('dblclick', (e) => {
     const p = local(e);
@@ -414,20 +434,51 @@ export function mountTreemapDemo(rootEl: HTMLElement) {
     if (f && f.depth > 0) zoomTo(f.node);
   });
 
-  zoomIn.addEventListener('click', () => {
-    if (!selected) return;
+  const zoomToSelection = () => {
+    if (!selected || selected === root) return;
     zoomTo(selected.children ? selected : selected.parent!);
-  });
+  };
+  zoomIn.addEventListener('click', zoomToSelection);
   zoomOut.addEventListener('click', () => { if (root.parent) zoomTo(root.parent); });
   focusLabel.addEventListener('click', () => setFocus(null));
 
+  // Keys, while something in the demo has focus. ⌘[ and ⌘0 zoom out and reset as they do in the app, and are
+  // always kept from the browser here, where ⌘[ would otherwise go Back. Esc takes a file type out of focus.
   rootEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      if (focus !== null) setFocus(null);
-      else if (root.parent) zoomTo(root.parent);
-    } else if ((e.key === '[' && (e.metaKey || e.ctrlKey)) && root.parent) {
+    const cmd = e.metaKey || e.ctrlKey;
+    if (cmd && e.key === '[') {
       e.preventDefault();
-      zoomTo(root.parent);
+      if (root.parent) zoomTo(root.parent);
+    } else if (cmd && e.key === '0') {
+      e.preventDefault();
+      if (root !== disk) zoomTo(disk);
+    } else if (e.key === 'Escape' && focus !== null) {
+      setFocus(null);
+    }
+  });
+  // With the map focused, the arrow keys step through what is in the folder on show, biggest first, Return zooms
+  // into the selected folder and Backspace zooms out, so the demo can be used without a pointer.
+  overlay.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const kids = (root.children ?? []).slice().sort((a, b) => b.size - a.size);
+    if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault();
+      if (!kids.length) return;
+      let top: DemoNode | null = selected;
+      while (top && top.parent !== root) top = top.parent ?? null;
+      const at = top ? kids.indexOf(top) : -1;
+      const forward = e.key === 'ArrowRight' || e.key === 'ArrowDown';
+      const next = e.key === 'Home' ? 0 : e.key === 'End' ? kids.length - 1
+        : at < 0 ? (forward ? 0 : kids.length - 1)
+        : top !== selected ? at
+        : Math.max(0, Math.min(kids.length - 1, at + (forward ? 1 : -1)));
+      select(kids[next]);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      zoomToSelection();
+    } else if (e.key === 'Backspace') {
+      e.preventDefault();
+      if (root.parent) zoomTo(root.parent);
     }
   });
 

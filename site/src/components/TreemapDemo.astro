@@ -14,14 +14,14 @@ import { icon } from '../lib/icons';
     <div class="tm-body">
       <div class="tm-main">
         <div class="tm-pathbar">
-          <button class="tm-icon-btn" type="button" data-zoom-out aria-label="Zoom out one folder" title="Zoom out (⌘[)" disabled set:html={icon('arrow-up', 15)} />
+          <button class="tm-icon-btn" type="button" data-zoom-out aria-label="Zoom out one folder" title="Zoom out one folder" disabled set:html={icon('arrow-up', 15)} />
           <nav class="tm-crumbs" aria-label="Folder on show"><span class="tm-crumb" aria-current="location">Macintosh HD</span></nav>
           <span class="tm-hint">Double-click a folder to zoom in</span>
         </div>
         <div class="tm-stage">
           <img class="tm-fallback" src={url('images/treemap.webp')} width="2000" height="858" alt="A treemap of /System/Library as Wizzzee draws it: every file a shaded tile, sized by the space it takes and coloured by type" loading="eager" decoding="async" />
           <canvas class="tm-map" aria-hidden="true"></canvas>
-          <canvas class="tm-overlay" role="img" aria-label="Treemap of a demo disk: every file is a tile sized by the space it takes, coloured by type. Use the path above, the buttons below and the file types list to explore it."></canvas>
+          <canvas class="tm-overlay" tabindex="0" role="application" aria-roledescription="treemap" aria-label="Treemap of a demo disk: every file is a tile sized by the space it takes, coloured by type. With the map focused, the arrow keys select what is in the folder on show, Return zooms into the selected folder, and Backspace or Command-[ zooms back out."></canvas>
           <div class="tm-tip" hidden><p class="tm-tip-path"></p><p class="tm-tip-detail"></p></div>
           <button class="tm-focus" type="button" hidden aria-label="Stop focusing this file type">
             <span class="tm-swatch"></span><span class="tm-focus-name"></span><span set:html={icon('x', 13)} />
@@ -40,6 +40,13 @@ import { icon } from '../lib/icons';
     </div>
   </div>
   <p class="tm-live visually-hidden" aria-live="polite"></p>
+  <noscript>
+    <style>
+      /* Without JavaScript the app's treemap image stands in, and the controls that would drive the demo go. */
+      .tm-types, .tm-zoom, .tm-icon-btn, .tm-hint { display: none !important; }
+      .tm-body { grid-template-columns: minmax(0, 1fr) !important; }
+    </style>
+  </noscript>
 </div>
 
 <script>
@@ -84,11 +91,12 @@ import { icon } from '../lib/icons';
   .tm-crumbs :global(button.tm-crumb) { color: var(--w-dim); cursor: pointer; }
   .tm-crumbs :global(button.tm-crumb:hover) { color: var(--w-text); background: #2c3138; }
   .tm-crumbs :global(.tm-sep) { color: #5a6068; }
-  .tm-hint { flex-shrink: 0; font-size: 12px; color: #7d848d; }
+  .tm-hint { flex-shrink: 0; font-size: 12px; color: #8a919a; }
 
   .tm-stage { position: relative; height: 440px; background: #0f1114; touch-action: manipulation; }
   .tm-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   .tm-overlay { cursor: pointer; }
+  .tm-overlay:focus-visible { outline: 2px solid #f0a04b; outline-offset: -2px; border-radius: 0; }
   .tm-fallback { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: left top; }
   .tm.is-live .tm-fallback { display: none; }
   .tm-tip {
@@ -118,9 +126,9 @@ import { icon } from '../lib/icons';
 
   .tm-types { border-left: 1px solid var(--w-line); display: flex; flex-direction: column; min-width: 0; }
   .tm-types-head { display: flex; align-items: baseline; justify-content: space-between; padding: 10px 12px 6px; font-size: 13px; font-weight: 650; }
-  .tm-types-count { font-size: 11px; font-weight: 500; color: #7d848d; }
+  .tm-types-count { font-size: 11px; font-weight: 500; color: #8a919a; }
   .tm-types-cols, .tm-types :global(.tm-type) { display: grid; grid-template-columns: minmax(0, 1fr) 60px 46px; gap: 6px; align-items: center; }
-  .tm-types-cols { padding: 4px 12px 6px; font-size: 11.5px; color: #7d848d; border-bottom: 1px solid var(--w-line); }
+  .tm-types-cols { padding: 4px 12px 6px; font-size: 11.5px; color: #8a919a; border-bottom: 1px solid var(--w-line); }
   .tm-types-cols span:not(:first-child) { text-align: right; }
   .tm-types-list { padding: 4px 6px 8px; overflow-y: auto; }
   .tm-types :global(.tm-type) {

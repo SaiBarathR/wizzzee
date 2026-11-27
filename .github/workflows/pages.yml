@@ -2,10 +2,17 @@ name: Website
 
 # Builds site/ (Astro) and publishes it to GitHub Pages at https://saibarathr.github.io/wizzzee/.
 # The site reads docs/ (the command line and architecture write-ups, and the release notes for the changelog) and the
-# app version in Resources/Info.plist at build time, so changes there redeploy it too.
+# app version in Resources/Info.plist at build time, so changes there redeploy it too. A pull request touching any of
+# them gets the build without the deploy, so a docs change that breaks the site shows up before it is merged.
 on:
   push:
     branches: [main]
+    paths:
+      - "site/**"
+      - "docs/**"
+      - "Resources/Info.plist"
+      - ".github/workflows/pages.yml"
+  pull_request:
     paths:
       - "site/**"
       - "docs/**"
@@ -18,10 +25,11 @@ permissions:
   pages: write
   id-token: write
 
-# One deployment at a time; a newer push replaces a queued one, but a running deployment finishes.
+# One deployment at a time; a newer push replaces a queued one, but a running deployment finishes. Pull request builds
+# deploy nothing, so each branch's newest build replaces its older ones.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -47,11 +55,13 @@ jobs:
         run: npm run build
 
       - name: Upload the site
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     environment:

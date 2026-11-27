@@ -18,8 +18,8 @@ biggest first.
 Words are looked for in names: all of them, in any order, ignoring case. They find folders as well as files, so
 `node_modules` lists every folder of that name and what they come to.
 
-- **A word with a `/` in it** is looked for in the whole path instead of the name: `Library/Caches` finds everything
-  under any folder of that name.
+- **A word with a `/` in it** is looked for in the whole path instead of the name: `Library/Caches` finds whatever
+  has that anywhere in its path, such as everything in `~/Library/Caches`.
 - **Words in double quotes** are one word, spaces and all: `"Screen Recording"`.
 
 ## Filters

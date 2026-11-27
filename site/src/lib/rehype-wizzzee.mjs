@@ -1,7 +1,8 @@
 // Rehype plugin for every Markdown file the site renders (docs/cli.md, docs/architecture.md, docs/releases/*.md,
 // the guides):
 //  - adds a "#" anchor link to h2–h4 (ids come from rehypeHeadingIds, which runs first)
-//  - demotes headings in release notes by one level (their "# Wizzzee 0.6.2" sits under the page's h1)
+//  - demotes headings in release notes by one level (their "# Wizzzee 0.6.2" sits under the page's h1), and prefixes
+//    their ids with the version: every release note is on the one changelog page, and they share headings
 //  - points relative links to repository files at GitHub, and links between docs at their pages
 //  - makes tables scroll horizontally on narrow screens instead of overflowing
 const REPO = 'https://github.com/SaiBarathR/wizzzee/blob/main/';
@@ -28,6 +29,7 @@ export function rehypeWizzzee() {
   return (tree, file) => {
     const path = String(file?.path || file?.history?.[0] || '');
     const isRelease = /[\\/]docs[\\/]releases[\\/]/.test(path);
+    const version = isRelease ? (path.match(/([^\\/]+)\.md$/)?.[1] ?? '') : '';
     const sourceDir = isRelease ? 'docs/releases/' : /[\\/]docs[\\/][^\\/]+\.md$/.test(path) ? 'docs/' : '';
 
     walk(tree, (node, parent, index) => {
@@ -35,6 +37,7 @@ export function rehypeWizzzee() {
 
       if (isRelease && /^h[1-5]$/.test(node.tagName)) {
         node.tagName = 'h' + (Number(node.tagName[1]) + 1);
+        if (node.properties?.id) node.properties.id = `${version}-${node.properties.id}`;
       }
 
       if (/^h[2-4]$/.test(node.tagName) && node.properties?.id) {
@@ -48,6 +51,11 @@ export function rehypeWizzzee() {
 
       if (node.tagName === 'a' && typeof node.properties?.href === 'string') {
         const href = node.properties.href;
+        // (The heading anchors added above already carry the prefixed id.)
+        if (isRelease && href.startsWith('#') && href.length > 1 && !node.properties.className?.includes('anchor')) {
+          node.properties.href = `#${version}-${href.slice(1)}`;
+          return;
+        }
         if (/^[a-z]+:/i.test(href) || href.startsWith('#') || href.startsWith('/')) {
           if (/^https?:/i.test(href)) node.properties.rel = ['noopener'];
           return;
